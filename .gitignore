@@ -6,6 +6,37 @@
 # damit komplett unsichtbar waren (gefunden 27.10.2026 nach `git init`).
 # Ein Muster ohne `/` ist in dieser Datei ein Fehler, kein Stil.
 
+# ── Grosse Erzeugnisse: NIE ins Repo ─────────────────────────────────────
+# `git add .` lief in diese beiden und meldete minutenlang Rechte-Warnungen
+# (root-eigene Container-Schichten).  Zusammen 11,4 GB.
+/alt_*/
+deploy/oci/
+deploy/rt_base/
+deploy/rt_cuts/
+deploy/rt_image/
+deploy/rt_template/
+deploy/runtime/
+deploy/*.tar.gz
+console_snapshot.txt
+
+# Vorbereitete Container-Wurzeln der Laufzeit (~280 MB Bibliotheken je Stueck)
+/runtime/.rt_*/
+
+# Arbeitsverzeichnisse der Tests und Proben (je Lauf neu angelegt)
+/.chk/
+/.e2e_chaos/
+/.e2e_pipe/
+/.e2e_prov/
+/.liveshape/
+/.lt/
+/.matrix/
+/.runpipe/
+/.sched/
+/.step_run/
+/.test_env/
+/.test_notes/
+/.wire/
+
 # Arbeits- und Laufverzeichnisse
 out/
 __aiml_cache/
