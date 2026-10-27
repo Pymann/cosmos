@@ -1,0 +1,81 @@
+# Abnahme der erklaerten Konfiguration (doc/spec/111): Lesen, Plan, Apply.
+# Laeuft ohne Netz; COSMOS_ROOT zeigt aufs Projekt (run_tests.sh setzt es).
+# Expected exit code: 0
+
+- import: "sources/server/casc_reader.aiml"
+
+- def:
+    name: expect
+    args: [[label, string], [cond, i32]]
+    return: i32
+    body:
+      - if: { condition: { eq: [cond, 1] }, then: [{ return: 0 }] }
+      - print: ["  FAIL ${label}"]
+      - return: 1
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      - decl: [cenv, map<string:string>, { call: [sys.env] }]
+      - decl: [root, string, "."]
+      - if: { condition: { gt: [{ call: [cenv.contains, "COSMOS_ROOT"] }, 0] }, then: [{ set: [root, { call: [cenv.get, "COSMOS_ROOT"] }] }] }
+      - decl: [fix, string, "${root}/test/fixtures/casc"]
+
+      - decl: [reader, ptr<CascReader>, { new: CascReader }]
+      - call: [reader.set_root, fix]
+      - decl: [doc, CascDoc, { call: [reader.read_file, "${fix}/cosmos.yaml"] }]
+      - decl: [err_txt, string, ""]
+      - decl: [eix, i32, 0]
+      - while:
+          condition: { lt: [eix, doc.errors.len] }
+          body:
+            - decl: [one_err, string, { at: [doc.errors, eix] }]
+            - set: [err_txt, "${err_txt}\n    ${one_err}"]
+            - set: [eix, { +: [eix, 1] }]
+      - set: [fails, { +: [fails, { call: [expect, "read: no errors${err_txt}", { call: [bool_i32, { eq: [doc.errors.len, 0] }] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "read: config + catalog", { call: [bool_i32, { '&&': [{ eq: [doc.has_config, 1] }, { eq: [doc.has_catalog, 1] }] }] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "read: 2 roles, roles_on", { call: [bool_i32, { '&&': [{ eq: [doc.config.roles.len, 2] }, { eq: [doc.config.roles_on, 1] }] }] }] }] }]
+      - decl: [grant1, CascGrant, { at: [doc.config.grants, 1] }]
+      - set: [fails, { +: [fails, { call: [expect, "read: group grant", { call: [bool_i32, { '&&': [{ eq: [grant1.kind, "group"] }, { eq: [grant1.subject, "devs"] }] }] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "read: museum url", { call: [bool_i32, { eq: [doc.config.museum.url, "http://127.0.0.1:18081"] }] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "read: layer_trust default", { call: [bool_i32, { eq: [doc.config.museum.layer_trust, "same_host"] }] }] }] }]
+      # 1 explizit + 3 aus dem Verzeichnis
+      - set: [fails, { +: [fails, { call: [expect, "read: 4 jobs (got ${doc.jobs.len})", { call: [bool_i32, { eq: [doc.jobs.len, 4] }] }] }] }]
+      - decl: [job0, CatalogEntry, { at: [doc.jobs, 0] }]
+      - set: [fails, { +: [fails, { call: [expect, "read: explicit job first, project net", { call: [bool_i32, { '&&': [{ eq: [job0.name, "net"] }, { eq: [job0.project, "net"] }] }] }] }] }]
+      - decl: [job1, CatalogEntry, { at: [doc.jobs, 1] }]
+      - set: [fails, { +: [fails, { call: [expect, "read: from_dir sorted, project from header (${job1.name}/${job1.project})", { call: [bool_i32, { '&&': [{ eq: [job1.name, "core"] }, { eq: [job1.project, "core"] }] }] }] }] }]
+      - decl: [job2, CatalogEntry, { at: [doc.jobs, 2] }]
+      - set: [fails, { +: [fails, { call: [expect, "read: no header → no project", { call: [bool_i32, { '&&': [{ eq: [job2.name, "tools"] }, { eq: [job2.project.len, 0] }] }] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "read: job id + origin", { call: [bool_i32, { '&&': [{ eq: [job1.job_id, "cat-core"] }, { eq: [job1.origin, "catalog"] }] }] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "read: sources loaded", { call: [bool_i32, { eq: [doc.sources.len, 4] }] }] }] }]
+
+      - decl: [bad, CascDoc, { call: [reader.read_file, "${fix}/bad.yaml"] }]
+      - decl: [bad_txt, string, ""]
+      - decl: [bix, i32, 0]
+      - while:
+          condition: { lt: [bix, bad.errors.len] }
+          body:
+            - decl: [one_bad, string, { at: [bad.errors, bix] }]
+            - set: [bad_txt, "${bad_txt}|${one_bad}"]
+            - set: [bix, { +: [bix, 1] }]
+      - set: [fails, { +: [fails, { call: [expect, "bad: unknown key grnats", { call: [bool_i32, { ge: [{ call: [bad_txt.index_of, "'grnats'"] }, 0] }] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "bad: unknown key in role", { call: [bool_i32, { ge: [{ call: [bad_txt.index_of, "'extra'"] }, 0] }] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "bad: duplicate job", { call: [bool_i32, { ge: [{ call: [bad_txt.index_of, "doppelt"] }, 0] }] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "bad: missing source", { call: [bool_i32, { ge: [{ call: [bad_txt.index_of, "Quelle fehlt"] }, 0] }] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "bad: neither config nor catalog", { call: [bool_i32, { ge: [{ call: [bad_txt.index_of, "weder"] }, 0] }] }] }] }]
+
+      - if: { condition: { gt: [fails, 0] }, then: [{ print: ["test_casc FAIL (${fails})"] }, { return: 1 }] }
+      - print: ["test_casc PASS"]
+      - return: 0
+
+- def:
+    name: bool_i32
+    args: [[cond, bool]]
+    return: i32
+    body:
+      - if: { condition: cond, then: [{ return: 1 }] }
+      - return: 0

@@ -1,0 +1,414 @@
+# CascStore — der config-Teil der erklaerten Konfiguration (doc/spec/111,
+# nach doc/spec/100 §100.4): lesen, planen, anwenden; dazu die Rollen-Pruefung
+# und das Aufloesen von Geheimnis-Namen.
+#
+# Die vier Verben (F100-2):
+#   read   — das Ist aus dem KV (`casc_config`, Schluessel "current")
+#   plan   — diff(Soll, Ist) als Liste von PlanChange; aendert NICHTS (F100-3)
+#   apply  — Soll speichern; idempotent (F100-4): ein zweites apply plant leer
+#   (declare steht in der Datei, gelesen von CascReader)
+#
+# Der Katalog-Teil braucht den Cluster und steht als Gruppen-Methode in
+# casc_catalog.aiml.
+#
+# Static-Check (aiml spec/49 §14): 1 class.
+- import: "sources/models/catalog_entry.aiml"
+
+- class:
+    name: CascStore
+    members:
+      - [state,   Kv<string:CascConfig>]
+      - [entries, Kv<string:CatalogEntry>]
+    methods:
+      - def:
+          name: init
+          access: public
+          args: [[db_dir, path]]
+          body:
+            - set: [<.state,   { call: [db.open_kv, "casc_config", {persist: true}] }]
+            - set: [<.entries, { call: [db.open_kv, "catalog_meta", {persist: true}] }]
+
+      - def:
+          name: current
+          access: public
+          return: { type: CascConfig, lifetime: producer }
+          body:
+            - decl: [out, CascConfig]
+            - if: { condition: { gt: [{ call: [<.state.has, "current"] }, 0] }, then: [{ set: [out, { call: [<.state.get_copy, "current"] }] }] }
+            - return: out
+
+      # ── plan (config) ─────────────────────────────────────────────────────
+      - def:
+          name: role_text
+          access: public
+          args: [[role, CascRole]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [sorted, list<string>, role.may]
+            - call: [sorted.sort]
+            - decl: [out, string, ""]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, sorted.len] }
+                body:
+                  - decl: [one, string, { at: [sorted, idx] }]
+                  - if: { condition: { gt: [idx, 0] }, then: [{ set: [out, "${out},"] }] }
+                  - set: [out, "${out}${one}"]
+                  - set: [idx, { +: [idx, 1] }]
+            - return: out
+
+      - def:
+          name: change
+          access: public
+          args: [[plan, ref<CascPlan>], [action, string], [target, string], [detail, string]]
+          body:
+            - decl: [row, PlanChange]
+            - set: [row.domain, "config"]
+            - set: [row.action, action]
+            - set: [row.target, target]
+            - set: [row.detail, detail]
+            - call: [plan.changes.push, row]
+
+      # Rollen: je Name hinzu / geaendert / entfernt.
+      - def:
+          name: plan_roles
+          access: public
+          static_off: ["str_cmp"]
+          args: [[want, ref<CascConfig>], [have, ref<CascConfig>], [plan, ref<CascPlan>]]
+          body:
+            - decl: [wix, i32, 0]
+            - while:
+                condition: { lt: [wix, want.roles.len] }
+                body:
+                  - decl: [wrole, CascRole, { at: [want.roles, wix] }]
+                  - set: [wix, { +: [wix, 1] }]
+                  - decl: [wtxt, string, { call: [<.role_text, wrole] }]
+                  - decl: [found, i32, 0]
+                  - decl: [hix, i32, 0]
+                  - while:
+                      condition: { lt: [hix, have.roles.len] }
+                      body:
+                        - decl: [hrole, CascRole, { at: [have.roles, hix] }]
+                        - set: [hix, { +: [hix, 1] }]
+                        - if:
+                            condition: { eq: [hrole.name, wrole.name] }
+                            then:
+                              - set: [found, 1]
+                              - decl: [htxt, string, { call: [<.role_text, hrole] }]
+                              - if: { condition: { neq: [htxt, wtxt] }, then: [{ call: [<.change, plan, "change", "role ${wrole.name}", "${htxt} -> ${wtxt}"] }] }
+                  - if: { condition: { eq: [found, 0] }, then: [{ call: [<.change, plan, "add", "role ${wrole.name}", wtxt] }] }
+            - decl: [gix, i32, 0]
+            - while:
+                condition: { lt: [gix, have.roles.len] }
+                body:
+                  - decl: [grole, CascRole, { at: [have.roles, gix] }]
+                  - set: [gix, { +: [gix, 1] }]
+                  - decl: [still, i32, 0]
+                  - decl: [kix, i32, 0]
+                  - while:
+                      condition: { lt: [kix, want.roles.len] }
+                      body:
+                        - decl: [krole, CascRole, { at: [want.roles, kix] }]
+                        - set: [kix, { +: [kix, 1] }]
+                        - if: { condition: { eq: [krole.name, grole.name] }, then: [{ set: [still, 1] }] }
+                  - if: { condition: { eq: [still, 0] }, then: [{ call: [<.change, plan, "remove", "role ${grole.name}", ""] }] }
+
+      # Zuordnungen: als Menge von "kind:subject=role" verglichen.
+      - def:
+          name: grant_keys
+          access: public
+          args: [[cfg, ref<CascConfig>]]
+          return: { type: list<string>, lifetime: producer }
+          body:
+            - decl: [out, list<string>]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, cfg.grants.len] }
+                body:
+                  - decl: [grant, CascGrant, { at: [cfg.grants, idx] }]
+                  - set: [idx, { +: [idx, 1] }]
+                  - call: [out.push, "${grant.kind} ${grant.subject} -> ${grant.role}"]
+            - call: [out.sort]
+            - return: out
+
+      - def:
+          name: plan_sets
+          access: public
+          args: [[want, list<string>], [have, list<string>], [what, string], [plan, ref<CascPlan>]]
+          body:
+            - decl: [wix, i32, 0]
+            - while:
+                condition: { lt: [wix, want.len] }
+                body:
+                  - decl: [one, string, { at: [want, wix] }]
+                  - set: [wix, { +: [wix, 1] }]
+                  - if: { condition: { eq: [{ call: [have.contains, one] }, 0] }, then: [{ call: [<.change, plan, "add", "${what} ${one}", ""] }] }
+            - decl: [hix, i32, 0]
+            - while:
+                condition: { lt: [hix, have.len] }
+                body:
+                  - decl: [old, string, { at: [have, hix] }]
+                  - set: [hix, { +: [hix, 1] }]
+                  - if: { condition: { eq: [{ call: [want.contains, old] }, 0] }, then: [{ call: [<.change, plan, "remove", "${what} ${old}", ""] }] }
+
+      - def:
+          name: secret_keys
+          access: public
+          args: [[cfg, ref<CascConfig>]]
+          return: { type: list<string>, lifetime: producer }
+          body:
+            - decl: [out, list<string>]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, cfg.secrets.len] }
+                body:
+                  - decl: [sec, CascSecret, { at: [cfg.secrets, idx] }]
+                  - set: [idx, { +: [idx, 1] }]
+                  - call: [out.push, "${sec.name} (${sec.source}:${sec.ref})"]
+            - call: [out.sort]
+            - return: out
+
+      # Ein Feld: nur wenn verschieden, eine Zeile.  Werte werden genannt —
+      # sie sind nie geheim (Geheimnisse stehen hier nur als NAMEN).
+      - def:
+          name: plan_field
+          access: public
+          static_off: ["str_cmp"]
+          args: [[target, string], [want, string], [have, string], [plan, ref<CascPlan>]]
+          body:
+            - if: { condition: { neq: [want, have] }, then: [{ call: [<.change, plan, "change", target, "'${have}' -> '${want}'"] }] }
+
+      - def:
+          name: plan_config
+          access: public
+          args: [[want, ref<CascConfig>], [plan, ref<CascPlan>]]
+          body:
+            - decl: [have, CascConfig, { call: [<.current] }]
+            - call: [<.plan_roles, want, have, plan]
+            - call: [<.plan_field, "roles enforced", "${want.roles_on}", "${have.roles_on}", plan]
+            - call: [<.plan_sets, { call: [<.grant_keys, want] }, { call: [<.grant_keys, have] }, "grant", plan]
+            - call: [<.plan_sets, { call: [<.secret_keys, want] }, { call: [<.secret_keys, have] }, "secret", plan]
+            - call: [<.plan_field, "museum.url", want.museum.url, have.museum.url, plan]
+            - call: [<.plan_field, "museum.webhook_secret", want.museum.webhook_secret, have.museum.webhook_secret, plan]
+            - call: [<.plan_field, "museum.token", want.museum.token, have.museum.token, plan]
+            - call: [<.plan_field, "museum.layer_trust", want.museum.layer_trust, have.museum.layer_trust, plan]
+            - call: [<.plan_field, "ldap.url", want.ldap.url, have.ldap.url, plan]
+            - call: [<.plan_field, "ldap.start_tls", "${want.ldap.start_tls}", "${have.ldap.start_tls}", plan]
+            - call: [<.plan_field, "ldap.user_dn", want.ldap.user_dn, have.ldap.user_dn, plan]
+            - call: [<.plan_field, "ldap.search_base", want.ldap.search_base, have.ldap.search_base, plan]
+            - call: [<.plan_field, "ldap.search_filter", want.ldap.search_filter, have.ldap.search_filter, plan]
+            - call: [<.plan_field, "ldap.bind_dn", want.ldap.bind_dn, have.ldap.bind_dn, plan]
+            - call: [<.plan_field, "ldap.bind_secret", want.ldap.bind_secret, have.ldap.bind_secret, plan]
+            - call: [<.plan_field, "ldap.group_attr", want.ldap.group_attr, have.ldap.group_attr, plan]
+            - call: [<.plan_field, "ldap.mail_attr", want.ldap.mail_attr, have.ldap.mail_attr, plan]
+            - call: [<.plan_field, "saml.idp_sso_url", want.saml.idp_sso_url, have.saml.idp_sso_url, plan]
+            - call: [<.plan_field, "saml.idp_cert_file", want.saml.idp_cert_file, have.saml.idp_cert_file, plan]
+            - call: [<.plan_field, "saml.sp_entity_id", want.saml.sp_entity_id, have.saml.sp_entity_id, plan]
+            - call: [<.plan_field, "saml.acs_url", want.saml.acs_url, have.saml.acs_url, plan]
+            - call: [<.plan_field, "saml.email_attr", want.saml.email_attr, have.saml.email_attr, plan]
+            - call: [<.plan_field, "saml.group_attr", want.saml.group_attr, have.saml.group_attr, plan]
+
+      # Gegenproben, die nur mit dem GANZEN Soll gehen: jede Zuordnung nennt
+      # eine erklaerte Rolle, jeder Geheimnis-Verweis ein erklaertes Geheimnis.
+      # Ein Fehler hier laesst apply abbrechen, bevor etwas geaendert ist (F100-5).
+      - def:
+          name: check_config
+          access: public
+          static_off: ["str_cmp"]
+          args: [[want, ref<CascConfig>], [plan, ref<CascPlan>]]
+          body:
+            - decl: [names, list<string>]
+            - decl: [rix, i32, 0]
+            - while:
+                condition: { lt: [rix, want.roles.len] }
+                body:
+                  - decl: [role, CascRole, { at: [want.roles, rix] }]
+                  - set: [rix, { +: [rix, 1] }]
+                  - if: { condition: { gt: [{ call: [names.contains, role.name] }, 0] }, then: [{ call: [plan.errors.push, "role '${role.name}' doppelt"] }] }
+                  - call: [names.push, role.name]
+            - decl: [gix, i32, 0]
+            - while:
+                condition: { lt: [gix, want.grants.len] }
+                body:
+                  - decl: [grant, CascGrant, { at: [want.grants, gix] }]
+                  - set: [gix, { +: [gix, 1] }]
+                  - if: { condition: { eq: [{ call: [names.contains, grant.role] }, 0] }, then: [{ call: [plan.errors.push, "grant ${grant.subject}: Rolle '${grant.role}' ist nicht erklaert"] }] }
+            - decl: [secs, list<string>]
+            - decl: [six, i32, 0]
+            - while:
+                condition: { lt: [six, want.secrets.len] }
+                body:
+                  - decl: [sec, CascSecret, { at: [want.secrets, six] }]
+                  - set: [six, { +: [six, 1] }]
+                  - call: [secs.push, sec.name]
+            - decl: [refs, list<string>]
+            - call: [refs.push, want.museum.webhook_secret]
+            - call: [refs.push, want.museum.token]
+            - call: [refs.push, want.ldap.bind_secret]
+            - decl: [fix, i32, 0]
+            - while:
+                condition: { lt: [fix, refs.len] }
+                body:
+                  - decl: [one_ref, string, { at: [refs, fix] }]
+                  - set: [fix, { +: [fix, 1] }]
+                  - if:
+                      condition: { '&&': [{ gt: [one_ref.len, 0] }, { eq: [{ call: [secs.contains, one_ref] }, 0] }] }
+                      then: [{ call: [plan.errors.push, "Geheimnis '${one_ref}' wird benutzt, ist aber nicht unter secrets: erklaert"] }]
+
+      - def:
+          name: apply_config
+          access: public
+          args: [[want, ref<CascConfig>]]
+          body:
+            - decl: [copy, CascConfig, want]
+            - call: [<.state.set, "current", copy]
+
+      # ── Geheimnisse ───────────────────────────────────────────────────────
+      # Wert eines Geheimnis-NAMENS zur Benutzungszeit (F100-10).  "" wenn
+      # unbekannt oder nicht lesbar.  Ein abschliessender Zeilenumbruch einer
+      # Datei gehoert nicht zum Geheimnis.  Der Wert wird nie protokolliert.
+      - def:
+          name: secret_value
+          access: public
+          static_off: ["str_cmp"]
+          args: [[name, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - if: { condition: { eq: [name.len, 0] }, then: [{ return: "" }] }
+            - decl: [cfg, CascConfig, { call: [<.current] }]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, cfg.secrets.len] }
+                body:
+                  - decl: [sec, CascSecret, { at: [cfg.secrets, idx] }]
+                  - set: [idx, { +: [idx, 1] }]
+                  - if:
+                      condition: { eq: [sec.name, name] }
+                      then:
+                        - if:
+                            condition: { eq: [sec.source, "file"] }
+                            then:
+                              - if: { condition: { eq: [{ call: [io.is_file, sec.ref] }, false] }, then: [{ return: "" }] }
+                              - decl: [raw, string, { call: [io.read_file, sec.ref] }]
+                              - return: { call: [raw.trim] }
+                        - decl: [envm, map<string:string>, { call: [sys.env] }]
+                        - if: { condition: { gt: [{ call: [envm.contains, sec.ref] }, 0] }, then: [{ return: { call: [envm.get, sec.ref] } }] }
+                        - return: ""
+            - return: ""
+
+      # ── Rollen (doc/spec/111 §111.3) ──────────────────────────────────────
+      # Immer erlaubt, sobald jemand angemeldet ist: die Selbstbedienung des
+      # eigenen Kontos.  Ohne sie koennte sich ein Konto ohne Rolle nicht
+      # einmal abmelden.
+      - def:
+          name: self_service
+          access: public
+          args: [[method, string]]
+          return: i32
+          body:
+            - decl: [always, list<string>, ["validate_token", "logout", "set_nickname", "change_password", "change_email", "my_clearance", "create_api_token", "list_api_tokens", "revoke_api_token"]]
+            - return: { call: [always.contains, method] }
+
+      # allows: darf dieses Konto diese RPC?  `clearance` 1 (Admin) darf
+      # immer — sonst koennte eine verungglueckte Rollen-Erklaerung den Admin
+      # aussperren, und niemand koennte sie zuruecknehmen.
+      - def:
+          name: allows
+          access: public
+          static_off: ["str_cmp"]
+          args: [[email, string], [groups, list<string>], [clearance, i32], [method, string]]
+          return: i32
+          body:
+            - decl: [cfg, CascConfig, { call: [<.current] }]
+            - if: { condition: { eq: [cfg.roles_on, 0] }, then: [{ return: 1 }] }
+            - if: { condition: { eq: [clearance, 1] }, then: [{ return: 1 }] }
+            - if: { condition: { eq: [method.len, 0] }, then: [{ return: 1 }] }
+            - if: { condition: { eq: [{ call: [<.self_service, method] }, 1] }, then: [{ return: 1 }] }
+            - decl: [mine, list<string>, { call: [<.roles_of, email, groups] }]
+            - decl: [rix, i32, 0]
+            - while:
+                condition: { lt: [rix, cfg.roles.len] }
+                body:
+                  - decl: [role, CascRole, { at: [cfg.roles, rix] }]
+                  - set: [rix, { +: [rix, 1] }]
+                  - if:
+                      condition: { gt: [{ call: [mine.contains, role.name] }, 0] }
+                      then:
+                        - if: { condition: { gt: [{ call: [role.may.contains, method] }, 0] }, then: [{ return: 1 }] }
+                        - if: { condition: { gt: [{ call: [role.may.contains, "*"] }, 0] }, then: [{ return: 1 }] }
+            - return: 0
+
+      - def:
+          name: roles_of
+          access: public
+          static_off: ["str_cmp"]
+          args: [[email, string], [groups, list<string>]]
+          return: { type: list<string>, lifetime: producer }
+          body:
+            - decl: [out, list<string>]
+            - decl: [cfg, CascConfig, { call: [<.current] }]
+            - decl: [gix, i32, 0]
+            - while:
+                condition: { lt: [gix, cfg.grants.len] }
+                body:
+                  - decl: [grant, CascGrant, { at: [cfg.grants, gix] }]
+                  - set: [gix, { +: [gix, 1] }]
+                  - decl: [hit, i32, 0]
+                  - if: { condition: { '&&': [{ eq: [grant.kind, "user"] }, { eq: [grant.subject, email] }] }, then: [{ set: [hit, 1] }] }
+                  - if: { condition: { '&&': [{ eq: [grant.kind, "group"] }, { gt: [{ call: [groups.contains, grant.subject] }, 0] }] }, then: [{ set: [hit, 1] }] }
+                  - if: { condition: { '&&': [{ eq: [hit, 1] }, { eq: [{ call: [out.contains, grant.role] }, 0] }] }, then: [{ call: [out.push, grant.role] }] }
+            - return: out
+
+      # ── Katalog-Metadaten (gelesen vom Katalog-Teil und von den Kampagnen) ─
+      - def:
+          name: entry_of
+          access: public
+          args: [[job_id, string]]
+          return: { type: CatalogEntry, lifetime: producer }
+          body:
+            - decl: [out, CatalogEntry]
+            - if: { condition: { gt: [{ call: [<.entries.has, job_id] }, 0] }, then: [{ set: [out, { call: [<.entries.get_copy, job_id] }] }] }
+            - return: out
+
+      - def:
+          name: set_entry
+          access: public
+          args: [[ent, CatalogEntry]]
+          body: [{ call: [<.entries.set, ent.job_id, ent] }]
+
+      - def:
+          name: all_entries
+          access: public
+          return: { type: list<CatalogEntry>, lifetime: producer }
+          body:
+            - decl: [out, list<CatalogEntry>]
+            - decl: [key_it, "iterator<string>", { call: [<.entries.iter] }]
+            - while:
+                condition: { call: [key_it.has_next] }
+                body:
+                  - decl: [key, string, { call: [key_it.next] }]
+                  - call: [out.push, { call: [<.entries.get_copy, key] }]
+            - call: [free, key_it]
+            - return: out
+
+      # Welcher Katalog-Job baut dieses exodus-Projekt (und nimmt an
+      # Kampagnen teil)?  "" wenn keiner.
+      - def:
+          name: job_for_project
+          access: public
+          static_off: ["str_cmp"]
+          args: [[project, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - if: { condition: { eq: [project.len, 0] }, then: [{ return: "" }] }
+            - decl: [all, list<CatalogEntry>, { call: [<.all_entries] }]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, all.len] }
+                body:
+                  - decl: [ent, CatalogEntry, { at: [all, idx] }]
+                  - set: [idx, { +: [idx, 1] }]
+                  - if:
+                      condition: { '&&': [{ eq: [ent.project, project] }, { gt: [{ call: [ent.triggers.contains, "museum"] }, 0] }] }
+                      then: [{ return: ent.job_id }]
+            - return: ""

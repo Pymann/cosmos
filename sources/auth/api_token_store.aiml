@@ -1,0 +1,135 @@
+# ApiTokenStore — langlebige, widerrufbare API-Tokens (doc/spec/111 §111.7).
+#
+# Form des Geheimnisses: "cosmos_" + 64 Hex (256 Bit aus math.random_hex).
+# Das Praefix macht ein Token in Logs und Repos erkennbar (Geheimnis-Scanner)
+# und unterscheidet es ohne Nachschlagen vom Sitzungs-Token.
+#
+# Gespeichert: sha256(Geheimnis) → ApiToken.  Ein gestohlener Speicher gibt
+# also keine benutzbaren Tokens heraus.
+#
+# Static-Check (aiml spec/49 §14): 1 class.
+- import: "sources/models/api_token.aiml"
+- import: "sources/models/api_token_reqs.aiml"
+
+- class:
+    name: ApiTokenStore
+    members:
+      - [by_hash, Kv<string:ApiToken>]
+      # token_id → hash, damit der Widerruf ohne das Geheimnis geht.
+      - [by_id,   Kv<string:string>]
+      - [groups,  Kv<string:UserGroups>]
+    methods:
+      - def:
+          name: init
+          access: public
+          args: [[db_dir, path]]
+          body:
+            - set: [<.by_hash, { call: [db.open_kv, "api_tokens", {persist: true}] }]
+            - set: [<.by_id,   { call: [db.open_kv, "api_token_ids", {persist: true}] }]
+            - set: [<.groups,  { call: [db.open_kv, "user_groups", {persist: true}] }]
+
+      # mint: neues Token fuer ein Konto.  Das Ergebnis traegt Kennung und
+      # GEHEIMNIS; das Geheimnis gibt es nur hier, einmal.
+      - def:
+          name: mint
+          access: public
+          args: [[email, string], [label, string]]
+          return: { type: ApiTokenMade, lifetime: producer }
+          body:
+            - decl: [out, ApiTokenMade]
+            - if:
+                condition: { eq: [email.len, 0] }
+                then: [{ set: [out.message, "kein Konto"] }, { return: out }]
+            - decl: [raw, string, { call: [math.random_hex, 32] }]
+            - decl: [secret, string, "cosmos_${raw}"]
+            - decl: [digest, string, { call: [hash.sha256, secret] }]
+            - decl: [idraw, string, { call: [math.random_hex, 6] }]
+            - decl: [tok, ApiToken]
+            - set: [tok.token_id, "at-${idraw}"]
+            - set: [tok.email, email]
+            - set: [tok.label, label]
+            - set: [tok.created_ms, { call: [time.now] }]
+            - call: [<.by_hash.set, digest, tok]
+            - call: [<.by_id.set, tok.token_id, digest]
+            - set: [out.success, 1]
+            - set: [out.token_id, tok.token_id]
+            - set: [out.secret, secret]
+            - set: [out.message, "Token ${tok.token_id} fuer ${email} erzeugt"]
+            - return: out
+
+      # email_for: zu welchem Konto gehoert dieses Geheimnis?  "" wenn
+      # unbekannt oder widerrufen.  Vermerkt die letzte Benutzung.
+      - def:
+          name: email_for
+          access: public
+          args: [[secret, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - if: { condition: { neq: [{ call: [secret.starts_with, "cosmos_"] }, 1] }, then: [{ return: "" }] }
+            - decl: [digest, string, { call: [hash.sha256, secret] }]
+            - if: { condition: { eq: [{ call: [<.by_hash.has, digest] }, 0] }, then: [{ return: "" }] }
+            - decl: [tok, ApiToken, { call: [<.by_hash.get_copy, digest] }]
+            - if: { condition: { neq: [tok.revoked, 0] }, then: [{ return: "" }] }
+            - set: [tok.last_used_ms, { call: [time.now] }]
+            - call: [<.by_hash.set, digest, tok]
+            - return: tok.email
+
+      - def:
+          name: list_for
+          access: public
+          static_off: ["str_cmp"]
+          args: [[email, string], [all, i32]]
+          return: { type: list<ApiToken>, lifetime: producer }
+          body:
+            - decl: [out, list<ApiToken>]
+            - decl: [key_it, "iterator<string>", { call: [<.by_hash.iter] }]
+            - while:
+                condition: { call: [key_it.has_next] }
+                body:
+                  - decl: [key, string, { call: [key_it.next] }]
+                  - decl: [tok, ApiToken, { call: [<.by_hash.get_copy, key] }]
+                  - if: { condition: { '||': [{ eq: [all, 1] }, { eq: [tok.email, email] }] }, then: [{ call: [out.push, tok] }] }
+            - call: [free, key_it]
+            - return: out
+
+      # revoke: 1 = widerrufen, 0 = unbekannt, 2 = fremdes Token (nur Admins
+      # duerfen fremde widerrufen — `may_any`).
+      - def:
+          name: revoke
+          access: public
+          static_off: ["str_cmp"]
+          args: [[email, string], [token_id, string], [may_any, i32]]
+          return: i32
+          body:
+            - if: { condition: { eq: [{ call: [<.by_id.has, token_id] }, 0] }, then: [{ return: 0 }] }
+            - decl: [digest, string, { call: [<.by_id.get_copy, token_id] }]
+            - if: { condition: { eq: [{ call: [<.by_hash.has, digest] }, 0] }, then: [{ return: 0 }] }
+            - decl: [tok, ApiToken, { call: [<.by_hash.get_copy, digest] }]
+            - if: { condition: { '&&': [{ neq: [tok.email, email] }, { eq: [may_any, 0] }] }, then: [{ return: 2 }] }
+            - set: [tok.revoked, 1]
+            - call: [<.by_hash.set, digest, tok]
+            - return: 1
+
+      # Gruppen eines Kontos (von LDAP/SAML bei der Anmeldung gemeldet).
+      - def:
+          name: set_groups
+          access: public
+          args: [[email, string], [source, string], [groups, list<string>]]
+          body:
+            - decl: [rec, UserGroups]
+            - set: [rec.email, email]
+            - set: [rec.source, source]
+            - set: [rec.groups, groups]
+            - set: [rec.updated_ms, { call: [time.now] }]
+            - call: [<.groups.set, email, rec]
+
+      - def:
+          name: groups_of
+          access: public
+          args: [[email, string]]
+          return: { type: list<string>, lifetime: producer }
+          body:
+            - decl: [out, list<string>]
+            - if: { condition: { eq: [{ call: [<.groups.has, email] }, 0] }, then: [{ return: out }] }
+            - decl: [rec, UserGroups, { call: [<.groups.get_copy, email] }]
+            - return: rec.groups

@@ -1,0 +1,24 @@
+# Ein museum-Webhook, vom REST-Gateway an cosmosd weitergereicht (doc/spec/111
+# §111.6, museum doc/ecosystem.md §4).
+#
+# Das Gateway prueft die Signatur NICHT selbst: das Geheimnis kennt nur
+# cosmosd (erklaerte Konfiguration, F100-10).  Es reicht die rohen Bytes und
+# den Header durch; cosmosd rechnet die HMAC ueber genau diese Bytes nach.
+#
+# Static-Check (aiml spec/49 §14): 2 models.
+
+- model:
+    name: MuseumEventReq
+    fields:
+      - [event,     string]   # X-Museum-Event
+      - [delivery,  string]   # X-Museum-Delivery
+      - [signature, string]   # X-Museum-Signature-256 ("sha256=<hex>")
+      - [body,      string]   # roher JSON-Koerper
+
+- model:
+    name: MuseumEventResp
+    fields:
+      - [success, i32]
+      - [message, string]
+      # Was daraus wurde: "ignored", "duplicate", "campaign <id>", …
+      - [outcome, string]

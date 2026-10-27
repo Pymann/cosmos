@@ -1,0 +1,6 @@
+# pipeline: core
+# project: core
+- pipeline:
+    name: core
+    steps:
+      - stage: { name: build, run: "echo build" }

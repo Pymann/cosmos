@@ -98,6 +98,12 @@
             - call: [disp.register, "clear_break",       g_runtime.clear_break]
             - call: [disp.register, "rewind_run",        g_runtime.rewind_run]
             - call: [disp.register, "run_pipeline",      g_runtime.run_pipeline]
+            - call: [disp.register, "config_plan",       g_runtime.config_plan]
+            - call: [disp.register, "config_apply",      g_runtime.config_apply]
+            - call: [disp.register, "config_read",       g_runtime.config_read]
+            - call: [disp.register, "create_api_token",  g_runtime.create_api_token]
+            - call: [disp.register, "list_api_tokens",   g_runtime.list_api_tokens]
+            - call: [disp.register, "revoke_api_token",  g_runtime.revoke_api_token]
             - call: [<.install_agent_handlers, disp]
             - call: [log.info, "[cosmos_daemon] registered auth + logout + cluster + agent handlers"]
       # AP1 (doc/spec/90 §AP1.4): Agenten-Registrierung, Kommando-Dispatch, Ausgabe-Relay

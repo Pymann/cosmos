@@ -1,0 +1,33 @@
+# Bausteine der erklaerten Konfiguration (doc/spec/111, nach doc/spec/100 §100.4).
+#
+# Eigene Modelle in eigenen KVs: ein neues Feld an einem vorhandenen Modell
+# aendert dessen Schema-Fingerabdruck, und jeder gespeicherte Datensatz waere
+# unlesbar (doc/spec/108 F108-2).
+#
+# Static-Check (aiml spec/49 §14): 3 models.
+
+# Eine Rolle ist eine Liste erlaubter RPCs, kein Rechtebaum (F100-11).
+# "*" erlaubt alle.
+- model:
+    name: CascRole
+    fields:
+      - [name, string]
+      - [may,  list<string>]
+
+# Wer welche Rolle hat.  kind: "user" (E-Mail) oder "group" (Gruppe aus LDAP
+# oder einem SAML-Attribut, so wie die Quelle sie liefert).
+- model:
+    name: CascGrant
+    fields:
+      - [kind,    string]
+      - [subject, string]
+      - [role,    string]
+
+# Ein Geheimnis steht nie in der Erklaerung, nur seine HERKUNFT (F100-10):
+# source "file" (ref = Pfad) oder "env" (ref = Variablenname).
+- model:
+    name: CascSecret
+    fields:
+      - [name,   string]
+      - [source, string]
+      - [ref,    string]

@@ -1,0 +1,442 @@
+# CascReader — liest eine Erklaerung (doc/spec/111 §111.1) in ein CascDoc.
+#
+# Die Datei ist aiml-DATEN in derselben Form wie `- pipeline:` (F100-1):
+#
+#   - config:
+#       roles:   [ { role: { name: operator, may: [run_job, pause_run] } } ]
+#       grants:  [ { grant: { user: alice@example.org, role: operator } },
+#                  { grant: { group: devs, role: viewer } } ]
+#       secrets: [ { secret: { name: hook, file: /etc/cosmos/hook.secret } },
+#                  { secret: { name: mtok, env: COSMOS_MUSEUM_TOKEN } } ]
+#       museum:  { url: "http://museum:8081", webhook_secret: hook, token: mtok }
+#       ldap:    { url: "ldap://dir:389", user_dn: "uid={user},ou=people,dc=x" }
+#       saml:    { idp_sso_url: …, idp_cert_file: …, sp_entity_id: …, acs_url: … }
+#   - catalog:
+#       jobs:     [ { job: { name: zlib, source: ci/zlib.aiml, project: zlib-lite,
+#                            triggers: [museum] } } ]
+#       from_dir: [ { path: ci } ]     # jede *.aiml/*.yaml darin ist ein Job
+#
+# Gelesen wird mit `yaml.*` — es ist EIN Leser fuer diese Form, kein zweiter
+# Leser einer Sprache, die der Uebersetzer kennt (der Befund aus doc/spec/96
+# F96-29 betrifft Pipelines, nicht diese Datei).  Unbekannte Schluessel sind
+# ein FEHLER, nicht stillschweigend wirkungslos: ein Tippfehler in `grnats:`
+# waere sonst eine Rechtevergabe, die nie stattfindet.
+#
+# Quelltexte aus `jobs[].source` und `from_dir` werden BEIM LESEN geladen, damit
+# `plan` und `apply` dieselben Bytes sehen (F100-3: plan beruehrt nichts, auch
+# die Platte nicht ein zweites Mal).
+#
+# Static-Check (aiml spec/49 §14): 1 class.
+- import: "sources/models/catalog_entry.aiml"
+
+- class:
+    name: CascReader
+    members:
+      # Wurzel fuer relative Pfade (Verzeichnis der Erklaerung).
+      - [root, string, "."]
+    methods:
+      - def:
+          name: set_root
+          access: public
+          args: [[dir, string]]
+          body: [{ set: [<.root, dir] }]
+
+      - def:
+          name: text_of
+          access: public
+          args: [[node, ref<yaml_node>], [key, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [sub, ref<yaml_node>, { call: [yaml.get, node, key] }]
+            - return: { call: [yaml.scalar, sub] }
+
+      # Wahrheitswert mit Vorgabe: fehlt der Schluessel, gilt `dflt`.
+      - def:
+          name: flag_of
+          access: public
+          static_off: ["str_cmp"]
+          args: [[node, ref<yaml_node>], [key, string], [dflt, i32]]
+          return: i32
+          body:
+            - decl: [raw, string, { call: [<.text_of, node, key] }]
+            - if: { condition: { eq: [raw.len, 0] }, then: [{ return: dflt }] }
+            - decl: [low, string, { call: [raw.lower] }]
+            - if: { condition: { '||': [{ eq: [low, "true"] }, { '||': [{ eq: [low, "yes"] }, { eq: [low, "1"] }] }] }, then: [{ return: 1 }] }
+            - return: 0
+
+      - def:
+          name: number_of
+          access: public
+          args: [[node, ref<yaml_node>], [key, string]]
+          return: i32
+          body:
+            - decl: [raw, string, { call: [<.text_of, node, key] }]
+            - if: { condition: { eq: [raw.len, 0] }, then: [{ return: 0 }] }
+            - return: { call: [raw.parse_i32] }
+
+      - def:
+          name: list_of
+          access: public
+          args: [[node, ref<yaml_node>], [key, string]]
+          return: { type: list<string>, lifetime: producer }
+          body:
+            - decl: [out, list<string>]
+            - decl: [seq, ref<yaml_node>, { call: [yaml.get, node, key] }]
+            - decl: [cnt, i32, { call: [yaml.size, seq] }]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, cnt] }
+                body:
+                  - decl: [one, string, { call: [yaml.scalar, { call: [yaml.item, seq, idx] }] }]
+                  - if: { condition: { gt: [one.len, 0] }, then: [{ call: [out.push, one] }] }
+                  - set: [idx, { +: [idx, 1] }]
+            - return: out
+
+      # Alle Schluessel einer Abbildung muessen bekannt sein.  `allowed` ist
+      # eine Komma-Liste.  Gibt die Fehler als Liste zurueck.
+      - def:
+          name: unknown_keys
+          access: public
+          args: [[node, ref<yaml_node>], [allowed, string], [where, string]]
+          return: { type: list<string>, lifetime: producer }
+          body:
+            - decl: [out, list<string>]
+            - decl: [known, list<string>, { call: [allowed.split, ","] }]
+            - decl: [cnt, i32, { call: [yaml.size, node] }]
+            - if: { condition: { neq: [{ call: [yaml.kind, node] }, yaml.mapping] }, then: [{ return: out }] }
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, cnt] }
+                body:
+                  - decl: [key, string, { call: [yaml.key, node, idx] }]
+                  - if:
+                      condition: { eq: [{ call: [known.contains, key] }, 0] }
+                      then: [{ call: [out.push, "${where}: unbekannter Schluessel '${key}' (erlaubt: ${allowed})"] }]
+                  - set: [idx, { +: [idx, 1] }]
+            - return: out
+
+      # Das Element einer Liste in der Form `- <wrap>: { … }` auspacken.
+      # Ohne Huelle (`- { … }`) wird das Element selbst genommen.
+      - def:
+          name: unwrap
+          access: public
+          args: [[item, ref<yaml_node>], [wrap, string]]
+          return: ref<yaml_node>
+          body:
+            - decl: [inner, ref<yaml_node>, { call: [yaml.get, item, wrap] }]
+            - if: { condition: { neq: [{ call: [yaml.kind, inner] }, yaml.null] }, then: [{ return: inner }] }
+            - return: item
+
+      - def:
+          name: read_file
+          access: public
+          args: [[file_path, string]]
+          return: { type: CascDoc, lifetime: producer }
+          body:
+            - decl: [out, CascDoc]
+            - if:
+                condition: { eq: [{ call: [io.is_file, file_path] }, false] }
+                then:
+                  - call: [out.errors.push, "Erklaerung nicht gefunden: ${file_path}"]
+                  - return: out
+            - decl: [text, string, { call: [io.read_file, file_path] }]
+            - return: { call: [<.read_text, text] }
+
+      - def:
+          name: read_text
+          access: public
+          static_off: ["str_cmp"]
+          args: [[text, string]]
+          return: { type: CascDoc, lifetime: producer }
+          body:
+            - decl: [out, CascDoc]
+            - decl: [doc, ptr<yaml_doc>, { call: [yaml.parse, text] }]
+            - decl: [perr, string, { call: [yaml.error, doc] }]
+            - if:
+                condition: { gt: [perr.len, 0] }
+                then:
+                  - call: [out.errors.push, "YAML: ${perr}"]
+                  - call: [yaml.free, doc]
+                  - return: out
+            - decl: [root, ref<yaml_node>, { call: [yaml.root, doc] }]
+            - if:
+                condition: { neq: [{ call: [yaml.kind, root] }, yaml.sequence] }
+                then:
+                  - call: [out.errors.push, "die Erklaerung ist eine Liste: '- config: …' / '- catalog: …'"]
+                  - call: [yaml.free, doc]
+                  - return: out
+            - decl: [cnt, i32, { call: [yaml.size, root] }]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, cnt] }
+                body:
+                  - decl: [item, ref<yaml_node>, { call: [yaml.item, root, idx] }]
+                  - set: [idx, { +: [idx, 1] }]
+                  - decl: [cfg_node, ref<yaml_node>, { call: [yaml.get, item, "config"] }]
+                  - decl: [cat_node, ref<yaml_node>, { call: [yaml.get, item, "catalog"] }]
+                  - if:
+                      condition: { neq: [{ call: [yaml.kind, cfg_node] }, yaml.null] }
+                      then:
+                        - if:
+                            condition: { eq: [out.has_config, 1] }
+                            then: [{ call: [out.errors.push, "zwei 'config:'-Abschnitte — es gibt genau einen"] }]
+                        - set: [out.has_config, 1]
+                        - call: [<.read_config, cfg_node, out]
+                      else:
+                        - if:
+                            condition: { neq: [{ call: [yaml.kind, cat_node] }, yaml.null] }
+                            then:
+                              - set: [out.has_catalog, 1]
+                              - call: [<.read_catalog, cat_node, out]
+                            else:
+                              - call: [out.errors.push, "Eintrag ${idx}: weder 'config:' noch 'catalog:'"]
+            - call: [yaml.free, doc]
+            - return: out
+
+      - def:
+          name: read_config
+          access: public
+          static_off: ["str_cmp"]
+          args: [[node, ref<yaml_node>], [out, ref<CascDoc>]]
+          body:
+            - decl: [bad_keys_1, list<string>, { call: [<.unknown_keys, node, "roles,grants,secrets,museum,ldap,saml", "config"] }]
+            - call: [out.errors.extend, bad_keys_1]
+            # roles
+            - decl: [roles, ref<yaml_node>, { call: [yaml.get, node, "roles"] }]
+            - if: { condition: { neq: [{ call: [yaml.kind, roles] }, yaml.null] }, then: [{ set: [out.config.roles_on, 1] }] }
+            - decl: [rix, i32, 0]
+            - while:
+                condition: { lt: [rix, { call: [yaml.size, roles] }] }
+                body:
+                  - decl: [rnode, ref<yaml_node>, { call: [<.unwrap, { call: [yaml.item, roles, rix] }, "role"] }]
+                  - set: [rix, { +: [rix, 1] }]
+                  - decl: [bad_keys_2, list<string>, { call: [<.unknown_keys, rnode, "name,may", "role"] }]
+                  - call: [out.errors.extend, bad_keys_2]
+                  - decl: [role, CascRole]
+                  - set: [role.name, { call: [<.text_of, rnode, "name"] }]
+                  - set: [role.may, { call: [<.list_of, rnode, "may"] }]
+                  - if: { condition: { eq: [role.name.len, 0] }, then: [{ call: [out.errors.push, "role ohne name"] }] }
+                  - call: [out.config.roles.push, role]
+            # grants
+            - decl: [grants, ref<yaml_node>, { call: [yaml.get, node, "grants"] }]
+            - decl: [gix, i32, 0]
+            - while:
+                condition: { lt: [gix, { call: [yaml.size, grants] }] }
+                body:
+                  - decl: [gnode, ref<yaml_node>, { call: [<.unwrap, { call: [yaml.item, grants, gix] }, "grant"] }]
+                  - set: [gix, { +: [gix, 1] }]
+                  - decl: [bad_keys_3, list<string>, { call: [<.unknown_keys, gnode, "user,group,role", "grant"] }]
+                  - call: [out.errors.extend, bad_keys_3]
+                  - decl: [grant, CascGrant]
+                  - decl: [g_user, string, { call: [<.text_of, gnode, "user"] }]
+                  - decl: [g_group, string, { call: [<.text_of, gnode, "group"] }]
+                  - set: [grant.role, { call: [<.text_of, gnode, "role"] }]
+                  - if:
+                      condition: { '&&': [{ gt: [g_user.len, 0] }, { gt: [g_group.len, 0] }] }
+                      then: [{ call: [out.errors.push, "grant: entweder user oder group, nicht beides"] }]
+                  - if:
+                      condition: { gt: [g_user.len, 0] }
+                      then: [{ set: [grant.kind, "user"] }, { set: [grant.subject, g_user] }]
+                      else: [{ set: [grant.kind, "group"] }, { set: [grant.subject, g_group] }]
+                  - if: { condition: { eq: [grant.subject.len, 0] }, then: [{ call: [out.errors.push, "grant ohne user/group"] }] }
+                  - if: { condition: { eq: [grant.role.len, 0] }, then: [{ call: [out.errors.push, "grant ohne role"] }] }
+                  - call: [out.config.grants.push, grant]
+            # secrets
+            - decl: [secrets, ref<yaml_node>, { call: [yaml.get, node, "secrets"] }]
+            - decl: [six, i32, 0]
+            - while:
+                condition: { lt: [six, { call: [yaml.size, secrets] }] }
+                body:
+                  - decl: [snode, ref<yaml_node>, { call: [<.unwrap, { call: [yaml.item, secrets, six] }, "secret"] }]
+                  - set: [six, { +: [six, 1] }]
+                  - decl: [bad_keys_4, list<string>, { call: [<.unknown_keys, snode, "name,file,env", "secret"] }]
+                  - call: [out.errors.extend, bad_keys_4]
+                  - decl: [sec, CascSecret]
+                  - set: [sec.name, { call: [<.text_of, snode, "name"] }]
+                  - decl: [s_file, string, { call: [<.text_of, snode, "file"] }]
+                  - decl: [s_env, string, { call: [<.text_of, snode, "env"] }]
+                  - if:
+                      condition: { gt: [s_file.len, 0] }
+                      then: [{ set: [sec.source, "file"] }, { set: [sec.ref, s_file] }]
+                      else: [{ set: [sec.source, "env"] }, { set: [sec.ref, s_env] }]
+                  - if: { condition: { eq: [sec.ref.len, 0] }, then: [{ call: [out.errors.push, "secret ${sec.name}: 'file:' oder 'env:' fehlt"] }] }
+                  - call: [out.config.secrets.push, sec]
+            # museum
+            - decl: [mus, ref<yaml_node>, { call: [yaml.get, node, "museum"] }]
+            - if:
+                condition: { neq: [{ call: [yaml.kind, mus] }, yaml.null] }
+                then:
+                  - decl: [bad_keys_5, list<string>, { call: [<.unknown_keys, mus, "url,webhook_secret,token,layer_trust", "museum"] }]
+                  - call: [out.errors.extend, bad_keys_5]
+                  - set: [out.config.museum.url, { call: [<.text_of, mus, "url"] }]
+                  - set: [out.config.museum.webhook_secret, { call: [<.text_of, mus, "webhook_secret"] }]
+                  - set: [out.config.museum.token, { call: [<.text_of, mus, "token"] }]
+                  - set: [out.config.museum.layer_trust, { call: [<.text_of, mus, "layer_trust"] }]
+            - if: { condition: { eq: [out.config.museum.layer_trust.len, 0] }, then: [{ set: [out.config.museum.layer_trust, "same_host"] }] }
+            # ldap
+            - decl: [ldn, ref<yaml_node>, { call: [yaml.get, node, "ldap"] }]
+            - if:
+                condition: { neq: [{ call: [yaml.kind, ldn] }, yaml.null] }
+                then:
+                  - decl: [bad_keys_6, list<string>, { call: [<.unknown_keys, ldn, "url,start_tls,user_dn,search_base,search_filter,bind_dn,bind_secret,group_attr,mail_attr", "ldap"] }]
+                  - call: [out.errors.extend, bad_keys_6]
+                  - set: [out.config.ldap.url, { call: [<.text_of, ldn, "url"] }]
+                  - set: [out.config.ldap.start_tls, { call: [<.flag_of, ldn, "start_tls", 0] }]
+                  - set: [out.config.ldap.user_dn, { call: [<.text_of, ldn, "user_dn"] }]
+                  - set: [out.config.ldap.search_base, { call: [<.text_of, ldn, "search_base"] }]
+                  - set: [out.config.ldap.search_filter, { call: [<.text_of, ldn, "search_filter"] }]
+                  - set: [out.config.ldap.bind_dn, { call: [<.text_of, ldn, "bind_dn"] }]
+                  - set: [out.config.ldap.bind_secret, { call: [<.text_of, ldn, "bind_secret"] }]
+                  - set: [out.config.ldap.group_attr, { call: [<.text_of, ldn, "group_attr"] }]
+                  - set: [out.config.ldap.mail_attr, { call: [<.text_of, ldn, "mail_attr"] }]
+                  - if:
+                      condition: { '&&': [{ eq: [out.config.ldap.user_dn.len, 0] }, { eq: [out.config.ldap.search_base.len, 0] }] }
+                      then: [{ call: [out.errors.push, "ldap: 'user_dn' oder 'search_base' + 'search_filter' angeben"] }]
+            # saml
+            - decl: [sml, ref<yaml_node>, { call: [yaml.get, node, "saml"] }]
+            - if:
+                condition: { neq: [{ call: [yaml.kind, sml] }, yaml.null] }
+                then:
+                  - decl: [bad_keys_7, list<string>, { call: [<.unknown_keys, sml, "idp_sso_url,idp_cert_file,sp_entity_id,acs_url,email_attr,group_attr", "saml"] }]
+                  - call: [out.errors.extend, bad_keys_7]
+                  - set: [out.config.saml.idp_sso_url, { call: [<.text_of, sml, "idp_sso_url"] }]
+                  - set: [out.config.saml.idp_cert_file, { call: [<.text_of, sml, "idp_cert_file"] }]
+                  - set: [out.config.saml.sp_entity_id, { call: [<.text_of, sml, "sp_entity_id"] }]
+                  - set: [out.config.saml.acs_url, { call: [<.text_of, sml, "acs_url"] }]
+                  - set: [out.config.saml.email_attr, { call: [<.text_of, sml, "email_attr"] }]
+                  - set: [out.config.saml.group_attr, { call: [<.text_of, sml, "group_attr"] }]
+
+      - def:
+          name: read_catalog
+          access: public
+          static_off: ["str_cmp"]
+          args: [[node, ref<yaml_node>], [out, ref<CascDoc>]]
+          body:
+            - decl: [bad_keys_8, list<string>, { call: [<.unknown_keys, node, "jobs,from_dir", "catalog"] }]
+            - call: [out.errors.extend, bad_keys_8]
+            - decl: [jobs, ref<yaml_node>, { call: [yaml.get, node, "jobs"] }]
+            - decl: [jix, i32, 0]
+            - while:
+                condition: { lt: [jix, { call: [yaml.size, jobs] }] }
+                body:
+                  - decl: [jnode, ref<yaml_node>, { call: [<.unwrap, { call: [yaml.item, jobs, jix] }, "job"] }]
+                  - set: [jix, { +: [jix, 1] }]
+                  - decl: [bad_keys_9, list<string>, { call: [<.unknown_keys, jnode, "name,source,project,interval_s,enabled,triggers", "job"] }]
+                  - call: [out.errors.extend, bad_keys_9]
+                  - decl: [ent, CatalogEntry]
+                  - set: [ent.name, { call: [<.text_of, jnode, "name"] }]
+                  - set: [ent.source_file, { call: [<.text_of, jnode, "source"] }]
+                  - set: [ent.project, { call: [<.text_of, jnode, "project"] }]
+                  - set: [ent.interval_s, { call: [<.number_of, jnode, "interval_s"] }]
+                  - set: [ent.enabled, { call: [<.flag_of, jnode, "enabled", 1] }]
+                  - set: [ent.triggers, { call: [<.list_of, jnode, "triggers"] }]
+                  - call: [<.add_job, ent, out]
+            - decl: [dirs, ref<yaml_node>, { call: [yaml.get, node, "from_dir"] }]
+            - decl: [dix, i32, 0]
+            - while:
+                condition: { lt: [dix, { call: [yaml.size, dirs] }] }
+                body:
+                  - decl: [dnode, ref<yaml_node>, { call: [yaml.item, dirs, dix] }]
+                  - set: [dix, { +: [dix, 1] }]
+                  - decl: [bad_keys_10, list<string>, { call: [<.unknown_keys, dnode, "path,triggers", "from_dir"] }]
+                  - call: [out.errors.extend, bad_keys_10]
+                  - decl: [rel, string, { call: [<.text_of, dnode, "path"] }]
+                  - decl: [dtrig, list<string>, { call: [<.list_of, dnode, "triggers"] }]
+                  - call: [<.scan_dir, rel, dtrig, out]
+
+      # from_dir: jede *.aiml / *.yaml im Verzeichnis ist ein Job.  Name =
+      # Dateistamm, Projekt aus einer Kopfzeile `# project: <name>` (fehlt sie,
+      # baut der Job kein exodus-Projekt und nimmt an keiner Kampagne teil).
+      - def:
+          name: scan_dir
+          access: public
+          static_off: ["str_cmp"]
+          args: [[rel, string], [trig, list<string>], [out, ref<CascDoc>]]
+          body:
+            - decl: [abs, string, "${<.root}/${rel}"]
+            - if:
+                condition: { eq: [{ call: [io.is_dir, abs] }, false] }
+                then:
+                  - call: [out.errors.push, "from_dir: Verzeichnis fehlt: ${rel}"]
+                  - return: []
+            - decl: [names, list<string>]
+            - decl: [entries, list<path>, { call: [io.list_dir, abs] }]
+            - decl: [eix, i32, 0]
+            - while:
+                condition: { lt: [eix, entries.len] }
+                body:
+                  - decl: [entry, path, { at: [entries, eix] }]
+                  - set: [eix, { +: [eix, 1] }]
+                  - decl: [fname, string, { call: [entry.name] }]
+                  - if:
+                      condition: { '||': [{ eq: [{ call: [fname.ends_with, ".aiml"] }, 1] }, { eq: [{ call: [fname.ends_with, ".yaml"] }, 1] }] }
+                      then: [{ call: [names.push, fname] }]
+            # Feste Reihenfolge: dieselbe Erklaerung ergibt denselben Plan.
+            - call: [names.sort]
+            - decl: [nix, i32, 0]
+            - while:
+                condition: { lt: [nix, names.len] }
+                body:
+                  - decl: [fname, string, { at: [names, nix] }]
+                  - set: [nix, { +: [nix, 1] }]
+                  - decl: [dot, i32, { call: [fname.index_of, "."] }]
+                  - decl: [ent, CatalogEntry]
+                  - set: [ent.name, { call: [fname.substr, 0, dot] }]
+                  - set: [ent.source_file, "${rel}/${fname}"]
+                  - set: [ent.enabled, 1]
+                  - set: [ent.triggers, trig]
+                  - call: [<.add_job, ent, out]
+
+      # Quelle laden, Projekt aus dem Kopf lesen (wenn nicht erklaert), Eintrag
+      # pruefen und anhaengen.  Doppelte Namen sind ein Fehler.
+      - def:
+          name: add_job
+          access: public
+          static_off: ["str_cmp"]
+          args: [[ent, CatalogEntry], [out, ref<CascDoc>]]
+          body:
+            - if:
+                condition: { eq: [ent.name.len, 0] }
+                then: [{ call: [out.errors.push, "job ohne name"] }, { return: [] }]
+            - decl: [dup, i32, 0]
+            - while:
+                condition: { lt: [dup, out.jobs.len] }
+                body:
+                  - decl: [other, CatalogEntry, { at: [out.jobs, dup] }]
+                  - set: [dup, { +: [dup, 1] }]
+                  - if:
+                      condition: { eq: [other.name, ent.name] }
+                      then: [{ call: [out.errors.push, "job '${ent.name}' doppelt im Katalog"] }, { return: [] }]
+            - decl: [src_at, string, "${<.root}/${ent.source_file}"]
+            - if:
+                condition: { '||': [{ eq: [ent.source_file.len, 0] }, { eq: [{ call: [io.is_file, src_at] }, false] }] }
+                then: [{ call: [out.errors.push, "job '${ent.name}': Quelle fehlt (${ent.source_file})"] }, { return: [] }]
+            - decl: [src, string, { call: [io.read_file, src_at] }]
+            - if:
+                condition: { eq: [ent.project.len, 0] }
+                then: [{ set: [ent.project, { call: [<.project_header, src] }] }]
+            - set: [ent.job_id, "cat-${ent.name}"]
+            - set: [ent.origin, "catalog"]
+            - call: [out.jobs.push, ent]
+            - call: [out.sources.push, src]
+
+      - def:
+          name: project_header
+          access: public
+          args: [[src, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [lines, list<string>, { call: [src.split, "\n"] }]
+            - decl: [lix, i32, 0]
+            - while:
+                condition: { '&&': [{ lt: [lix, lines.len] }, { lt: [lix, 20] }] }
+                body:
+                  - decl: [line, string, { at: [lines, lix] }]
+                  - set: [lix, { +: [lix, 1] }]
+                  - decl: [trimmed, string, { call: [line.trim] }]
+                  - if:
+                      condition: { eq: [{ call: [trimmed.starts_with, "# project:"] }, 1] }
+                      then:
+                        - decl: [rest, string, { call: [trimmed.substr, 10] }]
+                        - return: { call: [rest.trim] }
+            - return: ""

@@ -1,0 +1,49 @@
+# Identitaetsquellen der erklaerten Konfiguration (doc/spec/111 §111.5).
+#
+# Alle Geheimnisse sind NAMEN aus `secrets:` (F100-10), nie Werte.
+#
+# Static-Check (aiml spec/49 §14): 3 models.
+
+# LDAP: einfache Bindung.  Entweder direkt ueber eine DN-Vorlage
+# (`user_dn: "uid={user},ou=people,dc=example,dc=org"`) oder erst suchen,
+# dann binden (`search_base` + `search_filter` mit {user}, gesucht wird mit
+# `bind_dn` + `bind_secret`).  Gruppen: Werte des Attributs `group_attr` am
+# Nutzereintrag (z. B. memberOf).
+- model:
+    name: CascLdap
+    fields:
+      - [url,           string]
+      - [start_tls,     i32]
+      - [user_dn,       string]
+      - [search_base,   string]
+      - [search_filter, string]
+      - [bind_dn,       string]
+      - [bind_secret,   string]
+      - [group_attr,    string]
+      - [mail_attr,     string]
+
+# SAML 2.0, SP-initiiert.  Die Antwort muss mit dem Zertifikat des IdP
+# signiert sein (Datei unter `idp_cert_file`).  `email_attr`/`group_attr`
+# nennen die Attribute der Assertion; leer heisst: NameID ist die E-Mail,
+# keine Gruppen.
+- model:
+    name: CascSaml
+    fields:
+      - [idp_sso_url,   string]
+      - [idp_cert_file, string]
+      - [sp_entity_id,  string]
+      - [acs_url,       string]
+      - [email_attr,    string]
+      - [group_attr,    string]
+
+# museum (doc/ecosystem.md im museum-Repo).  `webhook_secret` und `token`
+# sind Geheimnis-NAMEN.  `layer_trust`: "same_host" (Vorgabe, doc/spec/110
+# F110-121) oder eine Komma-Liste von Agenten, deren Schichten auch auf
+# anderen Wirten gelten duerfen.
+- model:
+    name: CascMuseum
+    fields:
+      - [url,            string]
+      - [webhook_secret, string]
+      - [token,          string]
+      - [layer_trust,    string]

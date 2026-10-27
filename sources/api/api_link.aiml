@@ -1,0 +1,46 @@
+# ApiLink — die eine Verbindung des REST-Gateways zu cosmosd (doc/spec/111 §111.8).
+#
+# Das Gateway ist ein CLIENT wie der Browser: es haelt eine Mirror-Sitzung und
+# ruft dieselben RPCs.  Darum gilt jede Pruefung von cosmosd unveraendert —
+# Token, Freigabe, Rollen —, und cosmosd bleibt der einzige Schreiber.
+#
+# Der HTTP-Server laeuft mit einem Faden (aiml spec/32_2 §3), Anfragen kommen
+# also nacheinander; eine Sitzung reicht und braucht keine Sperre.
+#
+# Static-Check (aiml spec/49 §14): 1 class.
+
+- class:
+    name: ApiLink
+    members:
+      - [url,  string]
+      - [sess, mirror_session]
+      - [up,   i32, 0]
+      - [timeout_ms, i32, 15000]
+    methods:
+      - def:
+          name: init
+          access: public
+          args: [[url, string]]
+          body: [{ set: [<.url, url] }]
+
+      # ensure: verbunden sein, sonst (neu) verbinden.  0 = cosmosd nicht erreichbar.
+      - def:
+          name: ensure
+          access: public
+          return: i32
+          body:
+            - if:
+                condition: { eq: [<.up, 1] }
+                then:
+                  - call: [<.sess.update]
+                  - if: { condition: { gt: [{ call: [<.sess.is_connected] }, 0] }, then: [{ return: 1 }] }
+                  - call: [log.warn, "[api] Verbindung zu ${<.url} verloren — neu verbinden"]
+                  - call: [<.sess.close]
+                  - set: [<.up, 0]
+            - set: [<.sess, { call: [mirror.connect_timeout, <.url, 4000] }]
+            - if: { condition: { eq: [<.sess, null] }, then: [{ return: 0 }] }
+            - call: [time.sleep_ms, 50]
+            - call: [<.sess.update]
+            - set: [<.up, 1]
+            - call: [log.info, "[api] verbunden mit ${<.url}"]
+            - return: 1

@@ -16,6 +16,9 @@
 
 # Vom Dispatcher vor jedem handler.run auf rpc.peer_id gesetzt.
 - decl: [g_current_peer_id, i32]
+# Die RPC, die gerade bearbeitet wird (gesetzt vom Dispatcher).  Leer, wenn
+# kein RPC laeuft (Zeitplan, Kampagnen) — dann greift das Rollen-Tor nicht.
+- decl: [g_current_method, string, ""]
 # g_conn ist entfallen: ConnRegistry ist jetzt die Instanz `conn` der
 # CosmosRuntime (spec/58 §11.3).  Zugriff: g_runtime.conn.
 

@@ -1,0 +1,6 @@
+# pipeline: zlib-lite
+# project: zlib-lite
+- pipeline:
+    name: zlib-lite
+    steps:
+      - stage: { name: build, run: "echo build" }
