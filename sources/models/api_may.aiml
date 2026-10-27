@@ -1,0 +1,21 @@
+# may_call — darf dieses Token diese RPC?  (doc/spec/111 §111.3, §111.8)
+#
+# Fuer das REST-Gateway: einige Leser (get_cluster) antworten auf eine
+# Ablehnung mit einer LEEREN Sicht statt mit einem Fehler.  Ohne diese Frage
+# koennte das Gateway „nichts da" nicht von „nicht erlaubt" unterscheiden
+# und meldete 200 statt 403.  Die Antwort kommt aus DEMSELBEN Gate wie der
+# eigentliche Aufruf — keine zweite Rechnung.
+#
+# Static-Check (aiml spec/49 §14): 2 models.
+
+- model:
+    name: ApiMayReq
+    fields:
+      - [token,  string]
+      - [method, string]
+
+- model:
+    name: ApiMayResp
+    fields:
+      - [allowed, i32]
+      - [message, string]

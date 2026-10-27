@@ -80,19 +80,36 @@
             - set: [out.body, "${payload}\n"]
             - call: [out.send]
 
+      # quote: Text als JSON-Zeichenkette (mit Anfuehrungszeichen).
+      - def:
+          name: quote
+          access: public
+          args: [[raw, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [msg, string, { call: [raw.replace, "\\", "\\\\"] }]
+            - set: [msg, { call: [msg.replace, "\"", "\\\""] }]
+            - set: [msg, { call: [msg.replace, "\n", "\\n"] }]
+            - set: [msg, { call: [msg.replace, "\t", "\\t"] }]
+            - set: [msg, { call: [msg.replace, "\r", "\\r"] }]
+            - return: "\"${msg}\""
+
       - def:
           name: error
           access: public
           args: [[status, i32], [code, string], [message, string]]
           body:
-            - decl: [msg, string, { call: [message.replace, "\\", "\\\\"] }]
-            - set: [msg, { call: [msg.replace, "\"", "\\\""] }]
-            - set: [msg, { call: [msg.replace, "\n", "\\n"] }]
-            - call: [<.json, status, "{\"error\":\"${msg}\",\"code\":\"${code}\"}"]
+            - decl: [msg, string, { call: [<.quote, message] }]
+            - call: [<.json, status, "{\"error\":${msg},\"code\":\"${code}\"}"]
 
       # status_for: HTTP-Status aus dem Ergebnis eines RPC.  cosmosd meldet
       # Ablehnungen als Text; die drei Klassen (nicht angemeldet, keine
       # Freigabe, sonst ungueltig) werden hier auf 401/403/400 abgebildet.
+      #
+      # Das Gateway fragt VOR jedem Aufruf `my_clearance` (immer erlaubt): ein
+      # Token, das dort gilt und beim eigentlichen RPC trotzdem „nicht
+      # angemeldet" ergibt, wurde vom Rollen-Gate abgewiesen (§111.3) — das
+      # ist 403, nicht 401.
       - def:
           name: status_for
           access: public
@@ -101,7 +118,8 @@
           body:
             - if: { condition: { eq: [success, 1] }, then: [{ return: 200 }] }
             - decl: [low, string, { call: [message.lower] }]
-            - if: { condition: { ge: [{ call: [low.index_of, "nicht angemeldet"] }, 0] }, then: [{ return: 401 }] }
-            - if: { condition: { ge: [{ call: [low.index_of, "token"] }, 0] }, then: [{ return: 401 }] }
+            - if: { condition: { ge: [{ call: [low.index_of, "nicht angemeldet"] }, 0] }, then: [{ return: 403 }] }
+            - if: { condition: { ge: [{ call: [low.index_of, "token"] }, 0] }, then: [{ return: 403 }] }
             - if: { condition: { ge: [{ call: [low.index_of, "freigabe"] }, 0] }, then: [{ return: 403 }] }
+            - if: { condition: { ge: [{ call: [low.index_of, "clearance"] }, 0] }, then: [{ return: 403 }] }
             - return: 400

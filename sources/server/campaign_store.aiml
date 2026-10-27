@@ -1,0 +1,183 @@
+# CampaignStore — Kampagnen und gesehene Zustellungen (doc/spec/111 §111.6).
+#
+# Hier steht nur, was ohne den Cluster geht: Speicher, Signaturpruefung und das
+# Lesen des museum-Ereignisses.  Das Starten der Laeufe steht in
+# campaign_logic.aiml (Gruppen-Methoden, braucht `cluster` und `casc`).
+#
+# Static-Check (aiml spec/49 §14): 1 class.
+
+- import: "sources/models/campaign.aiml"
+- import: "sources/models/museum_event.aiml"
+
+- class:
+    name: CampaignStore
+    members:
+      - [camps, Kv<string:Campaign>]
+      # X-Museum-Delivery → Eingangszeit.  museum stellt mindestens einmal zu
+      # (Wiederholung nach Zeitablauf); dieselbe Zustellung zaehlt nur einmal.
+      - [seen,  Kv<string:i64>]
+    methods:
+      - def:
+          name: init
+          access: public
+          args: [[db_dir, path]]
+          body:
+            - set: [<.camps, { call: [db.open_kv, "campaigns", {persist: true}] }]
+            - set: [<.seen,  { call: [db.open_kv, "museum_deliveries", {persist: true}] }]
+
+      - def:
+          name: was_seen
+          access: public
+          args: [[delivery, string]]
+          return: i32
+          body:
+            - if: { condition: { eq: [delivery.len, 0] }, then: [{ return: 0 }] }
+            - return: { call: [<.seen.has, delivery] }
+
+      - def:
+          name: remember
+          access: public
+          args: [[delivery, string]]
+          body:
+            - if: { condition: { gt: [delivery.len, 0] }, then: [{ call: [<.seen.set, delivery, { call: [time.now] }] }] }
+
+      # verify: "sha256=<hex HMAC-SHA256(secret, body)>", zeitkonstant verglichen.
+      - def:
+          name: verify
+          access: public
+          args: [[secret, string], [body, string], [signature, string]]
+          return: i32
+          body:
+            - if: { condition: { eq: [secret.len, 0] }, then: [{ return: 0 }] }
+            - if: { condition: { neq: [{ call: [signature.starts_with, "sha256="] }, 1] }, then: [{ return: 0 }] }
+            - decl: [want, string, { call: [hash.hmac_sha256, secret, body] }]
+            - decl: [got, string, { call: [signature.substr, 7] }]
+            - decl: [low, string, { call: [got.lower] }]
+            - return: { call: [hash.const_time_eq, want, low] }
+
+      - def:
+          name: save
+          access: public
+          args: [[camp, Campaign]]
+          body:
+            - call: [<.camps.set, camp.campaign_id, camp]
+
+      - def:
+          name: open_ids
+          access: public
+          static_off: ["str_cmp"]
+          return: { type: list<string>, lifetime: producer }
+          body:
+            - decl: [out, list<string>]
+            - decl: [key_it, "iterator<string>", { call: [<.camps.iter] }]
+            - while:
+                condition: { call: [key_it.has_next] }
+                body:
+                  - decl: [key, string, { call: [key_it.next] }]
+                  - decl: [camp, Campaign, { call: [<.camps.get_copy, key] }]
+                  - if: { condition: { eq: [camp.status, "running"] }, then: [{ call: [out.push, key] }] }
+            - call: [out.sort]
+            - return: out
+
+      - def:
+          name: get
+          access: public
+          args: [[campaign_id, string]]
+          return: { type: Campaign, lifetime: producer }
+          body:
+            - decl: [out, Campaign]
+            - if: { condition: { eq: [{ call: [<.camps.has, campaign_id] }, 1] }, then: [{ set: [out, { call: [<.camps.get_copy, campaign_id] }] }] }
+            - return: out
+
+      # list_all: neueste zuerst, hoechstens `limit`.
+      - def:
+          name: list_all
+          access: public
+          args: [[limit, i32]]
+          return: { type: CampaignList, lifetime: producer }
+          body:
+            - decl: [out, CampaignList]
+            - decl: [keys, list<string>]
+            - decl: [key_it, "iterator<string>", { call: [<.camps.iter] }]
+            - while:
+                condition: { call: [key_it.has_next] }
+                body:
+                  - call: [keys.push, { call: [key_it.next] }]
+            - call: [keys.sort]
+            - decl: [idx, i32, { -: [keys.len, 1] }]
+            - while:
+                condition: { '&&': [{ ge: [idx, 0] }, { lt: [out.campaigns.len, limit] }] }
+                body:
+                  - call: [out.campaigns.push, { call: [<.camps.get_copy, { call: [keys.get, idx] }] }]
+                  - set: [idx, { -: [idx, 1] }]
+            - set: [out.success, 1]
+            - set: [out.message, "${out.campaigns.len} Kampagne(n)"]
+            - return: out
+
+      # parse_published: `data` eines package.published lesen.  JSON ist YAML
+      # (1.2), also genuegt der yaml-Leser.  Unlesbares → name "".
+      - def:
+          name: parse_published
+          access: public
+          static_off: ["str_cmp"]
+          args: [[body, string]]
+          return: { type: PublishedEvent, lifetime: producer }
+          body:
+            - decl: [out, PublishedEvent]
+            - decl: [doc, ptr<yaml_doc>, { call: [yaml.parse, body] }]
+            - decl: [perr, string, { call: [yaml.error, doc] }]
+            - if: { condition: { gt: [perr.len, 0] }, then: [{ call: [yaml.free, doc] }, { return: out }] }
+            - decl: [root, ref<yaml_node>, { call: [yaml.root, doc] }]
+            - decl: [data, ref<yaml_node>, { call: [yaml.get, root, "data"] }]
+            - set: [out.name, { call: [yaml.scalar, { call: [yaml.get, data, "name"] }] }]
+            - set: [out.version, { call: [yaml.scalar, { call: [yaml.get, data, "version"] }] }]
+            - decl: [flag, string, { call: [yaml.scalar, { call: [yaml.get, data, "unchanged"] }] }]
+            - if: { condition: { eq: [flag, "true"] }, then: [{ set: [out.unchanged, 1] }] }
+            - decl: [impact, ref<yaml_node>, { call: [yaml.get, data, "impact"] }]
+            - if: { condition: { neq: [{ call: [yaml.kind, impact] }, yaml.mapping] }, then: [{ call: [yaml.free, doc] }, { return: out }] }
+            - set: [out.has_impact, 1]
+            - decl: [waves, ref<yaml_node>, { call: [yaml.get, impact, "rebuild_waves"] }]
+            - decl: [needs, ref<yaml_node>, { call: [yaml.get, impact, "needs"] }]
+            - decl: [wcount, i32, { call: [yaml.size, waves] }]
+            - decl: [wix, i32, 0]
+            - while:
+                condition: { lt: [wix, wcount] }
+                body:
+                  - decl: [wave, ref<yaml_node>, { call: [yaml.item, waves, wix] }]
+                  - decl: [pcount, i32, { call: [yaml.size, wave] }]
+                  - decl: [pix, i32, 0]
+                  - while:
+                      condition: { lt: [pix, pcount] }
+                      body:
+                        - decl: [item, CampaignItem]
+                        - set: [item.project, { call: [yaml.scalar, { call: [yaml.item, wave, pix] }] }]
+                        - set: [item.wave, { +: [wix, 1] }]
+                        - set: [item.state, "waiting"]
+                        - decl: [deps, ref<yaml_node>, { call: [yaml.get, needs, item.project] }]
+                        - decl: [dcount, i32, { call: [yaml.size, deps] }]
+                        - decl: [dix, i32, 0]
+                        - while:
+                            condition: { lt: [dix, dcount] }
+                            body:
+                              - call: [item.needs.push, { call: [yaml.scalar, { call: [yaml.item, deps, dix] }] }]
+                              - set: [dix, { +: [dix, 1] }]
+                        - if: { condition: { gt: [item.project.len, 0] }, then: [{ call: [out.items.push, item] }] }
+                        - set: [pix, { +: [pix, 1] }]
+                  - set: [wix, { +: [wix, 1] }]
+            - call: [yaml.free, doc]
+            - return: out
+
+      # event_of: das Feld `event` des Koerpers (Gegenprobe zum Header).
+      - def:
+          name: event_of
+          access: public
+          args: [[body, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [doc, ptr<yaml_doc>, { call: [yaml.parse, body] }]
+            - decl: [perr, string, { call: [yaml.error, doc] }]
+            - if: { condition: { gt: [perr.len, 0] }, then: [{ call: [yaml.free, doc] }, { return: "" }] }
+            - decl: [root, ref<yaml_node>, { call: [yaml.root, doc] }]
+            - decl: [out, string, { call: [yaml.scalar, { call: [yaml.get, root, "event"] }] }]
+            - call: [yaml.free, doc]
+            - return: out

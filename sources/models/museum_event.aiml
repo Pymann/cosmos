@@ -5,7 +5,9 @@
 # cosmosd (erklaerte Konfiguration, F100-10).  Es reicht die rohen Bytes und
 # den Header durch; cosmosd rechnet die HMAC ueber genau diese Bytes nach.
 #
-# Static-Check (aiml spec/49 §14): 2 models.
+# Static-Check (aiml spec/49 §14): 3 models.
+
+- import: "sources/models/campaign.aiml"
 
 - model:
     name: MuseumEventReq
@@ -22,3 +24,14 @@
       - [message, string]
       # Was daraus wurde: "ignored", "duplicate", "campaign <id>", …
       - [outcome, string]
+
+# Das gelesene `package.published` (museum doc/ecosystem.md §4) — nur was die
+# Kampagnen brauchen.  `items` sind die Posten aus `rebuild_waves` + `needs`.
+- model:
+    name: PublishedEvent
+    fields:
+      - [name,       string]
+      - [version,    string]
+      - [unchanged,  i32]
+      - [has_impact, i32]
+      - [items,      list<CampaignItem>]

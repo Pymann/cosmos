@@ -306,7 +306,7 @@
           args: [[method, string]]
           return: i32
           body:
-            - decl: [always, list<string>, ["validate_token", "logout", "set_nickname", "change_password", "change_email", "my_clearance", "create_api_token", "list_api_tokens", "revoke_api_token"]]
+            - decl: [always, list<string>, ["validate_token", "logout", "set_nickname", "change_password", "change_email", "my_clearance", "create_api_token", "list_api_tokens", "revoke_api_token", "may_call"]]
             - return: { call: [always.contains, method] }
 
       # allows: darf dieses Konto diese RPC?  `clearance` 1 (Admin) darf

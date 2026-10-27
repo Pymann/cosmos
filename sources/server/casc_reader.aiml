@@ -255,6 +255,11 @@
                   - set: [sec.name, { call: [<.text_of, snode, "name"] }]
                   - decl: [s_file, string, { call: [<.text_of, snode, "file"] }]
                   - decl: [s_env, string, { call: [<.text_of, snode, "env"] }]
+                  # Relativ heisst: neben der Erklaerung — nicht im Arbeitsverzeichnis
+                  # von cosmosd, das niemand beim Schreiben der Datei kennt.
+                  - if:
+                      condition: { '&&': [{ gt: [s_file.len, 0] }, { eq: [{ call: [s_file.starts_with, "/"] }, 0] }] }
+                      then: [{ set: [s_file, "${<.root}/${s_file}"] }]
                   - if:
                       condition: { gt: [s_file.len, 0] }
                       then: [{ set: [sec.source, "file"] }, { set: [sec.ref, s_file] }]

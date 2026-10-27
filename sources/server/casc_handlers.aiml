@@ -11,6 +11,7 @@
 # jede Rolle geben — das ist Freigabe 1, und eine zweite Beschreibung daneben
 # waere eine zweite Wahrheit (F100-11).
 - import: "sources/models/api_token_reqs.aiml"
+- import: "sources/models/api_may.aiml"
 - import: "sources/models/casc_resp.aiml"
 - import: "sources/server/casc_reader.aiml"
 
@@ -141,4 +142,28 @@
                 - if: { condition: { eq: [revoked, 1] }, then: [{ set: [out.success, 1] }, { set: [out.message, "widerrufen"] }] }
                 - if: { condition: { eq: [revoked, 0] }, then: [{ set: [out.message, "unbekanntes Token"] }] }
                 - if: { condition: { eq: [revoked, 2] }, then: [{ set: [out.message, "fremdes Token — nur Admins duerfen das"] }] }
+                - call: [session.reply_rpc, rpc, "set_result", 0, out]
+
+      - instance: may_call
+        methods:
+          - def:
+              name: run
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, ApiMayReq]
+                - decl: [out, ApiMayResp]
+                - if:
+                    condition: { neq: [{ call: [session.decode_rpc, rpc, req] }, 0] }
+                    then: [{ set: [out.message, "unlesbare Anfrage"] }, { call: [session.reply_rpc, rpc, "set_result", 0, out] }, { return: [] }]
+                # Dasselbe Gate wie beim echten Aufruf: email_for_token prueft die
+                # Rolle gegen `g_current_method` — fuer die Dauer der Frage ist das
+                # die erfragte RPC.
+                - decl: [asked_for, string, g_current_method]
+                - set: [g_current_method, req.method]
+                - decl: [eml, string, { call: [<.auth.email_for_token, req.token] }]
+                - set: [g_current_method, asked_for]
+                - if:
+                    condition: { gt: [eml.len, 0] }
+                    then: [{ set: [out.allowed, 1] }, { set: [out.message, "ok"] }]
+                    else: [{ set: [out.message, "keine Rolle erlaubt ${req.method}"] }]
                 - call: [session.reply_rpc, rpc, "set_result", 0, out]

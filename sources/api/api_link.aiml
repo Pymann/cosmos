@@ -14,7 +14,7 @@
     members:
       - [url,  string]
       - [sess, mirror_session]
-      - [up,   i32, 0]
+      - [linked, i32, 0]
       - [timeout_ms, i32, 15000]
     methods:
       - def:
@@ -30,17 +30,17 @@
           return: i32
           body:
             - if:
-                condition: { eq: [<.up, 1] }
+                condition: { eq: [<.linked, 1] }
                 then:
                   - call: [<.sess.update]
                   - if: { condition: { gt: [{ call: [<.sess.is_connected] }, 0] }, then: [{ return: 1 }] }
                   - call: [log.warn, "[api] Verbindung zu ${<.url} verloren — neu verbinden"]
                   - call: [<.sess.close]
-                  - set: [<.up, 0]
+                  - set: [<.linked, 0]
             - set: [<.sess, { call: [mirror.connect_timeout, <.url, 4000] }]
             - if: { condition: { eq: [<.sess, null] }, then: [{ return: 0 }] }
             - call: [time.sleep_ms, 50]
             - call: [<.sess.update]
-            - set: [<.up, 1]
+            - set: [<.linked, 1]
             - call: [log.info, "[api] verbunden mit ${<.url}"]
             - return: 1

@@ -1,0 +1,30 @@
+# Antwort-Huellen des REST-Gateways (doc/spec/111 §111.8).
+#
+# Reine Draht-Modelle: nichts davon wird gespeichert, darum gilt F108-2
+# (Schema-Fingerabdruck persistierter Modelle) hier nicht.  Sie schneiden
+# aus dem EINEN Schnappschuss (ClusterView) die Teile, nach denen eine
+# REST-Anfrage fragt — eine zweite Quelle entsteht dadurch nicht.
+#
+# Static-Check (aiml spec/49 §14): 3 models.
+
+- import: "sources/shared/cluster_view.aiml"
+
+- model:
+    name: ApiJobList
+    fields:
+      - [jobs,   list<JobDef>]
+      - [params, list<JobParams>]
+
+- model:
+    name: ApiRunList
+    fields:
+      - [runs,   list<PipelineRun>]
+      - [layers, list<StageLayer>]
+
+- model:
+    name: ApiWhoami
+    fields:
+      - [success,   i32]
+      - [level,     i32]
+      # "session" (Anmeldung) oder "api_token" — erkennbar am Praefix.
+      - [kind,      string]

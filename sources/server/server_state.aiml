@@ -58,6 +58,7 @@
 - import: "sources/server/casc_store.aiml"           # erklaerte Konfiguration (doc/spec/111)
 - import: "sources/server/casc_catalog.aiml"         # … ihr Katalog-Teil + start_job_now
 - import: "sources/server/casc_handlers.aiml"        # config_plan/apply/read + API-Token-RPCs
+- import: "sources/server/campaign_logic.aiml"       # Rebuild-Kampagnen (doc/spec/111 §111.6)
 
 - classgroup:
     name: CosmosRuntime
@@ -335,6 +336,15 @@
         instance: casc
         constructor: [init, db_dir]
         sees: [cluster]
+
+      # doc/spec/111 §111.6: Rebuild-Kampagnen aus museum-Webhooks.
+      - class: CampaignStore
+        instance: campaigns
+        constructor: [init, db_dir]
+        sees: [casc, cluster]
+      - { class: RpcHandlerBase, instance: may_call,         sees: [auth], implements: [mirror.RpcHandler] }
+      - { class: RpcHandlerBase, instance: museum_event,     sees: [campaigns], implements: [mirror.RpcHandler] }
+      - { class: RpcHandlerBase, instance: list_campaigns,   sees: [auth, campaigns], implements: [mirror.RpcHandler] }
 
       - { class: RpcHandlerBase, instance: config_plan,      sees: [auth, casc], implements: [mirror.RpcHandler] }
       - { class: RpcHandlerBase, instance: config_apply,     sees: [auth, casc], implements: [mirror.RpcHandler] }
