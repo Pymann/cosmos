@@ -35,6 +35,9 @@
       - [acs_url,       string]
       - [email_attr,    string]
       - [group_attr,    string]
+      # Issuer der Assertion; leer = nicht geprueft (dann entscheidet allein
+      # das Zertifikat, wer ausstellen darf).
+      - [idp_entity_id, string]
 
 # museum (doc/ecosystem.md im museum-Repo).  `webhook_secret` und `token`
 # sind Geheimnis-NAMEN.  `layer_trust`: "same_host" (Vorgabe, doc/spec/110

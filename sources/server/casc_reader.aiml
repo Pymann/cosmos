@@ -302,7 +302,7 @@
             - if:
                 condition: { neq: [{ call: [yaml.kind, sml] }, yaml.null] }
                 then:
-                  - decl: [bad_keys_7, list<string>, { call: [<.unknown_keys, sml, "idp_sso_url,idp_cert_file,sp_entity_id,acs_url,email_attr,group_attr", "saml"] }]
+                  - decl: [bad_keys_7, list<string>, { call: [<.unknown_keys, sml, "idp_sso_url,idp_cert_file,sp_entity_id,acs_url,email_attr,group_attr,idp_entity_id", "saml"] }]
                   - call: [out.errors.extend, bad_keys_7]
                   - set: [out.config.saml.idp_sso_url, { call: [<.text_of, sml, "idp_sso_url"] }]
                   - set: [out.config.saml.idp_cert_file, { call: [<.text_of, sml, "idp_cert_file"] }]
@@ -310,6 +310,14 @@
                   - set: [out.config.saml.acs_url, { call: [<.text_of, sml, "acs_url"] }]
                   - set: [out.config.saml.email_attr, { call: [<.text_of, sml, "email_attr"] }]
                   - set: [out.config.saml.group_attr, { call: [<.text_of, sml, "group_attr"] }]
+                  - set: [out.config.saml.idp_entity_id, { call: [<.text_of, sml, "idp_entity_id"] }]
+                  - decl: [cert_at, string, out.config.saml.idp_cert_file]
+                  - if:
+                      condition: { '&&': [{ gt: [cert_at.len, 0] }, { eq: [{ call: [cert_at.starts_with, "/"] }, 0] }] }
+                      then: [{ set: [out.config.saml.idp_cert_file, "${<.root}/${cert_at}"] }]
+                  - if:
+                      condition: { '||': [{ eq: [out.config.saml.idp_sso_url.len, 0] }, { '||': [{ eq: [out.config.saml.idp_cert_file.len, 0] }, { '||': [{ eq: [out.config.saml.sp_entity_id.len, 0] }, { eq: [out.config.saml.acs_url.len, 0] }] }] }] }
+                      then: [{ call: [out.errors.push, "saml: idp_sso_url, idp_cert_file, sp_entity_id und acs_url sind Pflicht"] }]
 
       - def:
           name: read_catalog

@@ -80,6 +80,34 @@
             - set: [out.body, "${payload}\n"]
             - call: [out.send]
 
+      - def:
+          name: redirect
+          access: public
+          args: [[target, string]]
+          body:
+            - decl: [out, http_response_handle, <.resp]
+            - call: [out.headers.put, "location", target]
+            - call: [out.headers.put, "cache-control", "no-store"]
+            - set: [out.status, 302]
+            - set: [out.body, ""]
+            - call: [out.send]
+
+      # form: ein Feld aus einem `application/x-www-form-urlencoded`-Koerper
+      # (die SAML-POST-Bindung).  Der URL-Leser dekodiert Prozentzeichen schon.
+      - def:
+          name: form
+          access: public
+          args: [[key, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [raw, string, { call: [<.text] }]
+            - decl: [furl, url, { call: [http.parse_url, "http://form.invalid/?${raw}"] }]
+            - decl: [fmap, map<string:string>]
+            - set: [fmap, furl.get_param]
+            - decl: [val, string, { call: [fmap.get, key] }]
+            - if: { condition: { eq: [val, null] }, then: [{ return: "" }] }
+            - return: val
+
       # quote: Text als JSON-Zeichenkette (mit Anfuehrungszeichen).
       - def:
           name: quote

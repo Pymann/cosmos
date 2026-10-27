@@ -28,6 +28,8 @@
 #   DELETE /api/v1/tokens/:id
 #   GET    /api/v1/campaigns
 #   POST   /api/v1/hooks/museum
+#   GET    /api/v1/sso/saml/login?relay=/pfad   (302 zum IdP)
+#   POST   /api/v1/sso/saml/acs                 (SAML POST-Bindung)
 #
 # srv.route braucht freie Funktionen: jede Route verpackt die Anfrage in einen
 # ApiExchange und leiht ihn dem ApiGateway.
@@ -215,6 +217,20 @@
       - call: [g_api.museum_hook, xch]
 
 - def:
+    name: on_sso_login
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.sso_login, xch]
+
+- def:
+    name: on_sso_acs
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.sso_acs, xch]
+
+- def:
     name: main
     return: i32
     body:
@@ -262,6 +278,8 @@
       - call: [srv.route, "DELETE", "/api/v1/tokens/:id", on_token_del]
       - call: [srv.route, "GET", "/api/v1/campaigns", on_campaigns]
       - call: [srv.route, "POST", "/api/v1/hooks/museum", on_museum_hook]
+      - call: [srv.route, "GET", "/api/v1/sso/saml/login", on_sso_login]
+      - call: [srv.route, "POST", "/api/v1/sso/saml/acs", on_sso_acs]
       - call: [log.info, "cosmos-api: http://0.0.0.0:${port}/api/v1 → ${upstream}"]
       - call: [srv.start]
       - call: [log.error, "cosmos-api: beendet"]

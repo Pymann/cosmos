@@ -59,6 +59,7 @@
 - import: "sources/server/casc_catalog.aiml"         # … ihr Katalog-Teil + start_job_now
 - import: "sources/server/casc_handlers.aiml"        # config_plan/apply/read + API-Token-RPCs
 - import: "sources/server/campaign_logic.aiml"       # Rebuild-Kampagnen (doc/spec/111 §111.6)
+- import: "sources/auth/identity_login.aiml"         # LDAP/SAML (doc/spec/111 §111.5)
 
 - classgroup:
     name: CosmosRuntime
@@ -342,6 +343,8 @@
         instance: campaigns
         constructor: [init, db_dir]
         sees: [casc, cluster]
+      - { class: RpcHandlerBase, instance: saml_begin,       sees: [auth], implements: [mirror.RpcHandler] }
+      - { class: RpcHandlerBase, instance: saml_finish,      sees: [auth], implements: [mirror.RpcHandler] }
       - { class: RpcHandlerBase, instance: may_call,         sees: [auth], implements: [mirror.RpcHandler] }
       - { class: RpcHandlerBase, instance: museum_event,     sees: [campaigns], implements: [mirror.RpcHandler] }
       - { class: RpcHandlerBase, instance: list_campaigns,   sees: [auth, campaigns], implements: [mirror.RpcHandler] }

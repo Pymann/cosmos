@@ -104,6 +104,8 @@
             - call: [disp.register, "create_api_token",  g_runtime.create_api_token]
             - call: [disp.register, "list_api_tokens",   g_runtime.list_api_tokens]
             - call: [disp.register, "revoke_api_token",  g_runtime.revoke_api_token]
+            - call: [disp.register, "saml_begin",        g_runtime.saml_begin]
+            - call: [disp.register, "saml_finish",       g_runtime.saml_finish]
             - call: [disp.register, "may_call",          g_runtime.may_call]
             - call: [disp.register, "museum_event",      g_runtime.museum_event]
             - call: [disp.register, "list_campaigns",    g_runtime.list_campaigns]

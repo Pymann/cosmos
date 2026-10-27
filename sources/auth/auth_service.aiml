@@ -33,6 +33,11 @@
       # Die Liste aller Konten unter EINEM Schluessel ("all") — aiondb kann ein KV nicht
       # aufzaehlen (aiml spec/31 §11.2), also wird mitgeschrieben statt gesucht.
       - [uindex,  Kv<string:UserIndex>]
+      # doc/spec/111 §111.5: offene SAML-Anfragen (request_id → Ablauf in ms).
+      # Nur im Speicher: eine Anmeldung, die einen Neustart ueberspannt, faengt
+      # neu an — und eine Kennung, die nach dem Neustart noch gaelte, waere eine
+      # Wiederholungsluecke.
+      - [saml_pending, map<string:i64>]
     methods:
       - def:
           name: init
@@ -345,6 +350,74 @@
             - set: [out.display_name, usr.display_name]
             - set: [out.player_id,    { call: [<.pid_for, req.email] }]
             - return: out
+
+      # login_external: Anmeldung, die eine FREMDE Quelle (LDAP, SAML) schon
+      # geprueft hat (doc/spec/111 §111.5).  Fehlt das Konto, wird es angelegt —
+      # mit einem Zufalls-Passwort, das niemand kennt: ein solches Konto meldet
+      # sich nur ueber seine Quelle an.  Der Anzeigename wird eindeutig gemacht.
+      - def:
+          name: login_external
+          access: public
+          args: [[eml, string], [nick_hint, string]]
+          return: { type: AuthResult, lifetime: producer }
+          body:
+            - decl: [out, AuthResult]
+            - if:
+                condition: { eq: [{ call: [validate_email, eml] }, 0] }
+                then: [{ set: [out.message, "die Quelle liefert keine gueltige E-Mail ('${eml}')"] }, { return: out }]
+            - if:
+                condition: { eq: [{ call: [<.users.has, eml] }, 0] }
+                then:
+                  - decl: [nick, string, nick_hint]
+                  - if: { condition: { lt: [nick.len, 3] }, then: [{ set: [nick, "user"] }] }
+                  - decl: [taken, string, { call: [<.users.finding_by, "display_name", nick] }]
+                  - if:
+                      condition: { gt: [taken.len, 0] }
+                      then:
+                        - decl: [tail, string, { call: [math.random_hex, 2] }]
+                        - set: [nick, "${nick}-${tail}"]
+                  - decl: [now, i64, { call: [time.now] }]
+                  - decl: [usr, User]
+                  - set: [usr.email, eml]
+                  - set: [usr.password_hash, { call: [hash_password_new, { call: [math.random_hex, 32] }] }]
+                  - set: [usr.display_name, nick]
+                  - set: [usr.player_id, { call: [<.gen_player_id, eml, now] }]
+                  - set: [usr.created_at, now]
+                  - call: [<.users.set, eml, usr]
+                  - call: [log.info, "[identitaet] Konto ${eml} (${nick}) angelegt"]
+            - call: [<.clear_login_fails, eml]
+            - call: [<.index_user, eml]
+            - decl: [known, User, { call: [<.users.get_copy, eml] }]
+            - decl: [tok, string, { call: [<.issue_token, eml] }]
+            - set: [out.success, 1]
+            - set: [out.message, "logged in"]
+            - set: [out.token, tok]
+            - set: [out.email, eml]
+            - set: [out.display_name, known.display_name]
+            - set: [out.player_id, { call: [<.pid_for, eml] }]
+            - return: out
+
+      # saml_remember / saml_consume: eine Anfrage-Kennung gilt EINMAL und
+      # hoechstens zehn Minuten.
+      - def:
+          name: saml_remember
+          access: public
+          args: [[request_id, string]]
+          body:
+            - call: [<.saml_pending.put, request_id, { +: [{ call: [time.now] }, 600000] }]
+
+      - def:
+          name: saml_consume
+          access: public
+          args: [[request_id, string]]
+          return: i32
+          body:
+            - if: { condition: { eq: [request_id.len, 0] }, then: [{ return: 0 }] }
+            - if: { condition: { eq: [{ call: [<.saml_pending.contains, request_id] }, 0] }, then: [{ return: 0 }] }
+            - decl: [until, i64, { call: [<.saml_pending.get, request_id] }]
+            - call: [<.saml_pending.remove, request_id]
+            - if: { condition: { lt: [until, { call: [time.now] }] }, then: [{ return: 0 }] }
+            - return: 1
 
       - def:
           name: handle_validate

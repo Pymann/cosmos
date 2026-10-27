@@ -137,16 +137,48 @@ erzeugt, nicht aus einer zweiten Sprache.  Die Pipeline-Quelle IST schon aiml.
 
 ## 111.5 Identität: LDAP und SAML
 
-Der Vertrag (museum `doc/ecosystem.md` §6) gilt für beide Seiten gleich: LDAP mit simple
-bind (DN-Vorlage oder search-then-bind, Gruppen aus einem Attribut), SAML 2.0 SP-initiiert
-(Redirect-AuthnRequest, POST-Response, Signatur gegen das konfigurierte IdP-Zertifikat,
-Audience/Destination/Zeit/Issuer geprüft).
+Der Vertrag (museum `doc/ecosystem.md` §6) gilt für beide Seiten gleich.  Die Mechanik
+(LDAP-Client, XML-Signaturprüfung, base64) steckt in aiml selbst (spec/67, Zweig
+`feature/identity-builtins-memv3`); cosmos trägt nur die Politik
+(`sources/auth/identity_login.aiml`).
 
-Die Bausteine dafür (LDAP-Client, XML-Signaturprüfung, base64) gehören in aiml selbst — sie
-entstehen auf dem aiml-Zweig `feature/identity-builtins-memv3`.  In cosmos ist die
-**Konfiguration** fertig (`config.ldap`, `config.saml`) und die **Gruppen** haben ihren Ort
-(`user_groups`-KV, `ApiTokenStore.set_groups`/`groups_of`), aus dem das Rollen-Gate liest.
-Stand der Anmeldung selbst: siehe §111.10.
+**LDAP** — `config.ldap`.  Die Anmeldemaske und `POST /api/v1/login` bleiben dieselben:
+scheitert die lokale Anmeldung mit „unknown user" oder „wrong password", fragt cosmosd das
+Verzeichnis.  **Lokale Konten gehen vor** (Notfall-Admin ohne Verzeichnis).
+
+- DN-Vorlage (`user_dn: "uid={user},ou=people,dc=…"`, Eingabe durch `ldap.escape_dn`) oder
+  suchen-dann-binden (`search_base` + `search_filter`, Vorgabe `(uid={user})`, Eingabe durch
+  `ldap.escape_filter`, gesucht mit `bind_dn`/`bind_secret`; genau EIN Treffer).
+- E-Mail aus `mail_attr` (Vorgabe `mail`), Gruppen aus `group_attr` (Vorgabe `memberOf`).
+  Zu jedem DN-Wert wird auch sein erstes RDN gemerkt: `cn=devs,ou=groups,…` erfüllt
+  `grant: { group: devs }`.
+- Fehlt das Konto, wird es angelegt — mit einem Zufalls-Passwort, das niemand kennt.
+
+**SAML 2.0** — `config.saml`, SP-initiiert:
+
+| Schritt | REST | RPC |
+|---|---|---|
+| Anmeldung beginnen | `GET /api/v1/sso/saml/login?relay=/pfad` → 302 zum IdP | `saml_begin` |
+| Antwort annehmen | `POST /api/v1/sso/saml/acs` (POST-Bindung) | `saml_finish` |
+
+- Die Antwort muss mit `idp_cert_file` signiert sein; Audience = `sp_entity_id`,
+  Destination/Recipient = `acs_url`, Zeitfenster, keine Signatur-Umhüllung — das prüft der
+  Baustein (spec/67 §4.3).  `idp_entity_id` (optional) prüft zusätzlich den Aussteller.
+- **Nur Antworten auf eine offene Anfrage** zählen, jede Anfrage-Kennung **einmal** und
+  höchstens 10 Minuten (im Speicher von cosmosd).  Damit gibt es weder IdP-initiierte
+  Anmeldungen noch Wiederholungen.
+- Erfolg: mit einem `RelayState`, der ein **Pfad** dieses Dienstes ist (`/…`, nicht `//…`),
+  302 dorthin mit `#token=<sitzung>` (das Fragment erreicht keinen Server); sonst die
+  Sitzung als JSON.  Fremde Ziele werden nie angesprungen.
+- E-Mail aus `email_attr` oder `NameID`, Gruppen aus `group_attr`.
+
+Beide Wege enden in `AuthService.login_external` und melden die Gruppen an
+`ApiTokenStore.set_groups` — von dort liest das Rollen-Gate (§111.3).
+
+Belegt: `run_e2e_identity.sh` — Wegwerf-slapd und ein gespielter IdP (Schlüssel per openssl,
+Signatur per xmlsec1): LDAP-Anmeldung, Gruppe → Rolle, falsches/leeres Passwort, `*` als
+Login; SAML-Hin- und Rückweg, Gruppe → Rolle, Wiederholung, fremdes Zertifikat,
+unangefragte Antwort, offener Umleiter — 20 Prüfungen.
 
 ---
 
@@ -260,7 +292,8 @@ NUL ab — eine Schicht ist Binärdaten.
   `# pipeline:` liest.  Die einzige Änderung an der echten Datei ist `known_image` für
   `museum:` (sechs Zeilen).  → Mit der lokalen aiml einmal `./run_e2e_api.sh` laufen lassen.
 - **`from_code:`** (spec/100 §100.6) fehlt, siehe F111-5.
-- **LDAP-/SAML-Anmeldung in cosmos** hängt am aiml-Zweig für die Bausteine (§111.5).
+- **LDAP/SAML** brauchen den aiml-Zweig `feature/identity-builtins-memv3` (libldap,
+  xmlsec1).  `memberOf` als Gruppen-Attribut setzt das memberof-Overlay im Verzeichnis voraus.
 - **Schicht-Annotationen** (`cosmos.stage`, `cosmos.bindings`, …) setzt cosmos-oci noch nicht;
   das Artefakt trägt bisher nur den `artifactType`.
 - **Ob die aiml-Pipeline-Prüfung `push: to: "museum:…"` annimmt**, ist in der lokalen

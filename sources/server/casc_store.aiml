@@ -209,6 +209,7 @@
             - call: [<.plan_field, "saml.acs_url", want.saml.acs_url, have.saml.acs_url, plan]
             - call: [<.plan_field, "saml.email_attr", want.saml.email_attr, have.saml.email_attr, plan]
             - call: [<.plan_field, "saml.group_attr", want.saml.group_attr, have.saml.group_attr, plan]
+            - call: [<.plan_field, "saml.idp_entity_id", want.saml.idp_entity_id, have.saml.idp_entity_id, plan]
 
       # Gegenproben, die nur mit dem GANZEN Soll gehen: jede Zuordnung nennt
       # eine erklaerte Rolle, jeder Geheimnis-Verweis ein erklaertes Geheimnis.

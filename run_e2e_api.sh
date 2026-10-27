@@ -24,7 +24,9 @@ if [ "${1:-}" != "--no-build" ]; then
         exodus build -c "$cfg" || { echo "BUILD FAILED $cfg"; exit 1; }
     done
 fi
-cp cosmosd cosmos-api "$WORK/"
+# COSMOSD_BIN / COSMOS_API_BIN: andere Binaries pruefen (z. B. mit einer
+# anderen aiml-Fassung gebaut), ohne die Vorgaben zu ueberschreiben.
+cp "${COSMOSD_BIN:-cosmosd}" "$WORK/cosmosd"; cp "${COSMOS_API_BIN:-cosmos-api}" "$WORK/cosmos-api"
 export AIONDB_PATH="$WORK/aiondb"
 
 SRV_PID=""; API_PID=""

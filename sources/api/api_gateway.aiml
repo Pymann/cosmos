@@ -29,6 +29,7 @@
 - import: "sources/models/museum_event.aiml"
 - import: "sources/models/api_views.aiml"
 - import: "sources/models/api_may.aiml"
+- import: "sources/models/sso_reqs.aiml"
 
 - class:
     name: ApiGateway
@@ -401,6 +402,48 @@
             - decl: [code, i32, { call: [xch.status_for, out.success, out.message] }]
             - if: { condition: { ge: [{ call: [out.message.index_of, "unbekannt"] }, 0] }, then: [{ set: [code, 404] }] }
             - call: [xch.json, code, { call: [sys.serialize, out, <.style] }]
+
+      # ---------------------------------------------------------------- SAML
+
+      # sso_login: GET /sso/saml/login?relay=/pfad → 302 zum IdP.
+      - def:
+          name: sso_login
+          access: public
+          args: [[xch, ref<ApiExchange>]]
+          body:
+            - if: { condition: { eq: [{ call: [<.up, xch] }, 0] }, then: [{ return: [] }] }
+            - decl: [req, SamlBeginReq]
+            - set: [req.relay_state, { call: [xch.query, "relay"] }]
+            - decl: [out, ptr<SamlBegin>, { new: SamlBegin }]
+            - decl: [got, i32, { call: [<.link.sess.send_and_await, 0, "saml_begin", req, out, <.link.timeout_ms] }]
+            - if: { condition: { eq: [{ call: [<.no_answer, xch, got] }, 1] }, then: [{ return: [] }] }
+            - if: { condition: { neq: [out.success, 1] }, then: [{ call: [xch.error, 404, "saml_off", out.message] }, { return: [] }] }
+            - call: [xch.redirect, out.url]
+
+      # sso_acs: POST /sso/saml/acs (SAMLResponse, RelayState).  Erfolg: mit
+      # einem RelayState, der ein PFAD dieses Dienstes ist ("/…", nicht "//…"),
+      # 302 dorthin mit `#token=…` — das Fragment geht an keinen Server.  Ohne
+      # RelayState die Sitzung als JSON.  Fremde Ziele werden nie angesprungen
+      # (sonst waere der ACS ein offener Umleiter fuer frische Tokens).
+      - def:
+          name: sso_acs
+          access: public
+          args: [[xch, ref<ApiExchange>]]
+          body:
+            - if: { condition: { eq: [{ call: [<.up, xch] }, 0] }, then: [{ return: [] }] }
+            - decl: [req, SamlFinishReq]
+            - set: [req.saml_response, { call: [xch.form, "SAMLResponse"] }]
+            - decl: [relay, string, { call: [xch.form, "RelayState"] }]
+            - if: { condition: { eq: [req.saml_response.len, 0] }, then: [{ call: [xch.error, 400, "bad_request", "SAMLResponse fehlt"] }, { return: [] }] }
+            - decl: [out, ptr<AuthResult>, { new: AuthResult }]
+            - decl: [got, i32, { call: [<.link.sess.send_and_await, 0, "saml_finish", req, out, <.link.timeout_ms] }]
+            - if: { condition: { eq: [{ call: [<.no_answer, xch, got] }, 1] }, then: [{ return: [] }] }
+            - if: { condition: { neq: [out.success, 1] }, then: [{ call: [xch.error, 401, "saml_rejected", out.message] }, { return: [] }] }
+            - decl: [local, i32, 0]
+            - if: { condition: { '&&': [{ eq: [{ call: [relay.starts_with, "/"] }, 1] }, { eq: [{ call: [relay.starts_with, "//"] }, 0] }] }, then: [{ set: [local, 1] }] }
+            - if: { condition: { ge: [{ call: [relay.index_of, "\\"] }, 0] }, then: [{ set: [local, 0] }] }
+            - if: { condition: { eq: [local, 1] }, then: [{ call: [xch.redirect, "${relay}#token=${out.token}"] }, { return: [] }] }
+            - call: [xch.json, 200, { call: [sys.serialize, out, <.style] }]
 
       # ---------------------------------------------------------------- museum
 
