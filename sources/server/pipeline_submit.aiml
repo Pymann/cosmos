@@ -28,89 +28,592 @@
 - import: "sources/shared/pipeline_run.aiml"
 - import: "sources/shared/job_params.aiml"
 
-# LOCAL TEST STUB — never committed.  The real file needs aiml features
-# (ctx.new, pipeline introspection) that are not on GitHub mem-v3-compiler yet.
-# check/expand accept any source whose first line is "# pipeline: <name>" and
-# produce a one-stage run, so the control plane around it can be exercised.
 - class:
     name: PipelineSubmit
     members:
+      # Nur Diagnose, nie Quelltext: der kann gross sein und gehoert in den
+      # Lauf (F96-32), nicht in ein Member.
       - [last_error, string, ""]
     methods:
-      - def:
-          name: name_of
-          access: public
-          args: [[source, string]]
-          return: { type: string, lifetime: producer }
-          body:
-            - decl: [lines, list<string>, { call: [source.split, "\n"] }]
-            - if: { condition: { eq: [lines.len, 0] }, then: [{ return: "" }] }
-            - decl: [first, string, { at: [lines, 0] }]
-            - if: { condition: { neq: [{ call: [first.starts_with, "# pipeline: "] }, 1] }, then: [{ return: "" }] }
-            - return: { call: [first.substr, 12] }
+      # ── check: ist die Quelle brauchbar? ─────────────────────────────────
       - def:
           name: check
           access: public
+          static_off: ["str_cmp"]
           args: [[source, string], [prm_src, string]]
           return: { type: SubmitCheck, lifetime: producer }
           body:
             - decl: [out, SubmitCheck]
-            - decl: [pname, string, { call: [<.name_of, source] }]
+            - set: [out.accepted, 0]
+            - set: [out.lane_count, 0]
+            - set: [out.stage_count, 0]
+            - if:
+                condition: { eq: [source.len, 0] }
+                then: [{ set: [out.message, "leere Quelle"] }, { return: out }]
+
+            - decl: [kontext, ctx_handle, { call: [ctx.new] }]
+            # doc/spec/106 §106.6c: die Parameter ZUERST — die Quelle liest sie
+            # als `${prm.name}`, und was sie nicht kennt, ist ein Fehler.  Beim
+            # Pruefen stehen dieselben Werte wie beim Start, sonst bestaetigt
+            # die Pruefung eine Quelle, die der Start ablehnt.
+            - if:
+                condition: { gt: [prm_src.len, 0] }
+                then:
+                  - decl: [rc_prm, i32, { call: [kontext.load, { call: [sys.code_from, prm_src] }] }]
+                  - if:
+                      condition: { lt: [rc_prm, 0] }
+                      then:
+                        - set: [out.message, "Parameter nicht uebersetzbar: ${ { call: [<.trouble, kontext] } }"]
+                        - call: [kontext.close]
+                        - return: out
+            - decl: [rc_load, i32, { call: [kontext.load, { call: [sys.code_from, source] }] }]
+            - if:
+                condition: { lt: [rc_load, 0] }
+                then:
+                  - set: [out.message, { call: [<.trouble, kontext] }]
+                  - call: [kontext.close]
+                  - return: out
+            - decl: [pname, string, { call: [<.name_in, kontext] }]
             - if:
                 condition: { eq: [pname.len, 0] }
                 then:
-                  - set: [out.message, "stub: erste Zeile muss '# pipeline: <name>' sein"]
+                  - set: [out.message, "keine '- pipeline:'-Deklaration gefunden"]
+                  - call: [kontext.close]
+                  - return: out
+            - if:
+                condition: { eq: [pname, "mehrere"] }
+                then:
+                  - set: [out.message, "mehr als eine Pipeline in einer Einreichung — ein Auftrag ist eine Pipeline"]
+                  - call: [kontext.close]
+                  - return: out
+
+            - decl: [pipe, pipeline, { call: [kontext.call, pname, "fn() -> pipeline"] }]
+            - set: [out.name, { call: [pipe.name] }]
+            - set: [out.lane_count, { call: [pipe.lane_count] }]
+            - set: [out.stage_count, { call: [pipe.stage_count] }]
+            - if:
+                condition: { eq: [out.stage_count, 0] }
+                then:
+                  - set: [out.message, "keine Stufen — eine Pipeline ohne Stufe hat nichts zu tun"]
+                  - call: [kontext.close]
+                  - return: out
+            - if:
+                condition: { le: [out.lane_count, 0] }
+                then:
+                  - set: [out.message, "`exclude` schliesst JEDE Lane aus — es bleibt nichts zu tun (aiml F62-5)"]
+                  - call: [kontext.close]
+                  - return: out
+            # Die LAGE: kennt dieser Cluster die genannten Abbilder?
+            - decl: [img_bad, string, { call: [<.image_trouble, pipe] }]
+            - if:
+                condition: { gt: [img_bad.len, 0] }
+                then:
+                  - set: [out.message, img_bad]
+                  - call: [kontext.close]
                   - return: out
             - set: [out.accepted, 1]
-            - set: [out.name, pname]
-            - set: [out.lane_count, 1]
-            - set: [out.stage_count, 1]
-            - set: [out.message, "stub ok"]
+            - set: [out.message, "ok: ${out.lane_count} Lane(s) x ${out.stage_count} Stufe(n)"]
+            - call: [kontext.close]
             - return: out
+
+      # ── expand: aus der Quelle den LAUF machen ───────────────────────────
       - def:
           name: expand
           access: public
+          static_off: ["str_cmp"]
           args: [[source, string], [run_id, string], [prm_src, string]]
           return: { type: PipelineRun, lifetime: producer }
           body:
             - decl: [run, PipelineRun]
-            - decl: [pname, string, { call: [<.name_of, source] }]
-            - if: { condition: { eq: [pname.len, 0] }, then: [{ return: run }] }
+            - decl: [kontext, ctx_handle, { call: [ctx.new] }]
+            # Die Parameter zuerst (F106-20), dann die Einreichung.
+            - if:
+                condition: { gt: [prm_src.len, 0] }
+                then:
+                  - decl: [rc_prm, i32, { call: [kontext.load, { call: [sys.code_from, prm_src] }] }]
+                  - if: { condition: { lt: [rc_prm, 0] }, then: [{ call: [kontext.close] }, { return: run }] }
+            - decl: [rc_load, i32, { call: [kontext.load, { call: [sys.code_from, source] }] }]
+            # F96-30: scheitert die Uebersetzung, entsteht KEIN Lauf.  Die
+            # Begruendung hat `check` schon an den Einreicher gegeben.
+            - if:
+                condition: { lt: [rc_load, 0] }
+                then: [{ call: [kontext.close] }, { return: run }]
+            - decl: [pname, string, { call: [<.name_in, kontext] }]
+            - if:
+                condition: { '||': [{ eq: [pname.len, 0] }, { eq: [pname, "mehrere"] }] }
+                then: [{ call: [kontext.close] }, { return: run }]
+            - decl: [pipe, pipeline, { call: [kontext.call, pname, "fn() -> pipeline"] }]
+
             - set: [run.run_id, run_id]
-            - set: [run.pipeline_name, pname]
-            - set: [run.status, "queued"]
-            - set: [run.started_ms, { call: [time.now] }]
-            - decl: [stg, PipelineStage]
-            - set: [stg.name, "build"]
-            - set: [stg.status, "pending"]
-            - call: [run.stages.push, stg]
+            - set: [run.pipeline_name, { call: [pipe.name] }]
+            - set: [run.status, "pending"]
+            - call: [<.take_axes, pipe, run]
+            - call: [<.take_pushes, pipe, run]
+            - call: [<.take_stages, pipe, run, run_id]
+            - call: [kontext.close]
             - return: run
+
+      # base_in: WORAUF der Lauf aufsetzt (aiml F62-144, doc/spec/110 §110.36).
+      # Der Wert gilt fuer den LAUF, steht aber aufgeloest an jeder Stufe — die
+      # erste genuegt, und der Controller rechnet den Vorrang nicht nach
+      # (aiml F62-151).
       - def:
           name: base_in
           access: public
+          static_off: ["str_cmp"]
           args: [[source, string], [prm_src, string]]
           return: { type: string, lifetime: producer }
-          body: [{ return: "" }]
+          body:
+            - decl: [kontext, ctx_handle, { call: [ctx.new] }]
+            - if:
+                condition: { gt: [prm_src.len, 0] }
+                then: [{ decl: [rc_prm, i32, { call: [kontext.load, { call: [sys.code_from, prm_src] }] }] }]
+            - decl: [rc_load, i32, { call: [kontext.load, { call: [sys.code_from, source] }] }]
+            - if: { condition: { lt: [rc_load, 0] }, then: [{ call: [kontext.close] }, { return: "" }] }
+            - decl: [pname, string, { call: [<.name_in, kontext] }]
+            - if:
+                condition: { '||': [{ eq: [pname.len, 0] }, { eq: [pname, "mehrere"] }] }
+                then: [{ call: [kontext.close] }, { return: "" }]
+            - decl: [pipe, pipeline, { call: [kontext.call, pname, "fn() -> pipeline"] }]
+            - if: { condition: { eq: [{ call: [pipe.stage_count] }, 0] }, then: [{ call: [kontext.close] }, { return: "" }] }
+            - decl: [first, stage, { call: [pipe.stage_at, 0] }]
+            - decl: [got, string, { call: [first.base] }]
+            - call: [kontext.close]
+            - return: got
+
+      # ── doc/spec/106 §106.6c: die Parameter als eigenes Bundle ───────────
+      #
+      # FUNKTIONEN, keine Globalen (F106-19): an eine Funktion kann man nichts
+      # zuweisen, also sind die Werte konstant, sobald die Pipeline laeuft —
+      # und ein Global muesste zur Laufzeit initialisiert werden, was heisst,
+      # die oberste Ebene eines fremden Bundles zu rufen (F96-28).
+      #
+      # EIGENES Bundle, nicht an die Quelle gehaengt (F106-20): `- namespace:`
+      # gilt fuer die ganze Datei und haette die Pipeline mit umbenannt.
       - def:
           name: prm_bundle
           access: public
+          static_off: ["str_cmp"]
           args: [[bag, ref<JobParams>], [run_id, string]]
           return: { type: string, lifetime: producer }
-          body: [{ return: "" }]
+          body:
+            - decl: [out, string, ""]
+            - if: { condition: { eq: [bag.rows.len, 0] }, then: [{ return: out }] }
+            - set: [out, "- namespace: prm\n"]
+            - decl: [rix, i32, 0]
+            - while:
+                condition: { lt: [rix, bag.rows.len] }
+                body:
+                  - decl: [row, ParamRow, { at: [bag.rows, rix] }]
+                  - set: [rix, { +: [rix, 1] }]
+                  - if: { condition: { eq: [row.name.len, 0] }, then: [{ set: [rix, rix] }] }
+                  - decl: [typ, string, "string"]
+                  - decl: [lit, string, ""]
+                  - if:
+                      condition: { eq: [row.kind, "zahl"] }
+                      then:
+                        - set: [typ, "i64"]
+                        # Leer heisst 0 und nicht „leere Zahl": ein Literal
+                        # muss dastehen, sonst ist die erzeugte Quelle kaputt.
+                        - decl: [num, i64, { call: [row.value.parse_i32] }]
+                        - set: [lit, "${num}"]
+                      else:
+                        - if:
+                            condition: { eq: [row.kind, "bool"] }
+                            then:
+                              - set: [typ, "bool"]
+                              - if:
+                                  condition: { '||': [{ eq: [row.value, "1"] }, { eq: [row.value, "true"] }] }
+                                  then: [{ set: [lit, "true"] }]
+                                  else: [{ set: [lit, "false"] }]
+                            else:
+                              # text | langtext | datei — alle drei sind eine
+                              # Zeichenkette.  Bei `datei` ist es der PFAD im
+                              # Lauf (F106-17), nicht der Inhalt.
+                              - decl: [raw, string, row.value]
+                              - if:
+                                  condition: { eq: [row.kind, "datei"] }
+                                  then: [{ set: [raw, "/work/${run_id}/params/${row.name}"] }]
+                              - set: [lit, "\"${ { call: [<.as_literal, raw] } }\""]
+                  - set: [out, "${out}- def:\n    name: ${row.name}\n    return: ${typ}\n    body: [{ return: ${lit} }]\n"]
+            - return: out
+
+      # as_literal: ein Wert, der als LITERAL in erzeugte Quelle geht, wird
+      # maskiert.  Ohne das endet das Literal mitten im Wert und der Rest ist
+      # aiml — bei einem Wert aus der Oberflaeche waere das eingeschleuster
+      # Code (aiml spec/62 §20.5 sagt dasselbe fuer die Umschreibung).
+      - def:
+          name: as_literal
+          access: public
+          static_off: ["str_cmp"]
+          args: [[raw, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [out, string, { call: [raw.replace, "\\", "\\\\"] }]
+            - set: [out, { call: [out.replace, "\"", "\\\""] }]
+            - set: [out, { call: [out.replace, "\n", "\\n"] }]
+            - set: [out, { call: [out.replace, "\t", "\\t"] }]
+            - return: out
+
+      # param_problem: "" wenn die Liste brauchbar ist, sonst die Begruendung.
+      # Geprueft wird beim SPEICHERN (F106-5): ein Parameter, der erst beim
+      # Start auffaellt, kostet einen Lauf.
       - def:
           name: param_problem
           access: public
+          static_off: ["str_cmp"]
           args: [[bag, ref<JobParams>]]
           return: { type: string, lifetime: producer }
-          body: [{ return: "" }]
+          body:
+            - decl: [seen, map<string:i32>]
+            - decl: [rix, i32, 0]
+            - while:
+                condition: { lt: [rix, bag.rows.len] }
+                body:
+                  - decl: [row, ParamRow, { at: [bag.rows, rix] }]
+                  - set: [rix, { +: [rix, 1] }]
+                  - if:
+                      condition: { eq: [row.name.len, 0] }
+                      then: [{ return: "Ein Parameter braucht einen Namen" }]
+                  # F106-18: der Name wird ein SYMBOL, also gelten die Regeln
+                  # von aiml — Buchstaben, Ziffern, Unterstrich, nicht mit
+                  # einer Ziffer anfangen, mindestens drei Zeichen (spec/02).
+                  - if:
+                      condition: { eq: [{ call: [<.ident_ok, row.name] }, 0] }
+                      then: [{ return: "`${row.name}` ist kein Bezeichner — Buchstaben, Ziffern und `_`, nicht mit einer Ziffer beginnend, mindestens drei Zeichen (er wird ein Symbol, doc/spec/106 F106-18)" }]
+                  - if:
+                      condition: { gt: [{ call: [seen.contains, row.name] }, 0] }
+                      then: [{ return: "`${row.name}` kommt zweimal vor — dann ist nicht entscheidbar, welchen Wert `prm.${row.name}` meint" }]
+                  - call: [seen.put, row.name, 1]
+                  - if:
+                      condition: { eq: [{ call: [<.kind_ok, row.kind] }, 0] }
+                      then: [{ return: "`${row.name}`: unbekannter Typ `${row.kind}` — text, langtext, zahl, bool oder datei" }]
+                  - if:
+                      condition: { '&&': [{ eq: [row.kind, "zahl"] }, { eq: [{ call: [<.number_ok, row.value] }, 0] }] }
+                      then: [{ return: "`${row.name}`: `${row.value}` ist keine Zahl" }]
+            - return: ""
+
+      - def:
+          name: ident_ok
+          access: public
+          static_off: ["str_cmp"]
+          args: [[name, string]]
+          return: i32
+          body:
+            - if: { condition: { lt: [name.len, 3] }, then: [{ return: 0 }] }
+            - decl: [cix, i32, 0]
+            - while:
+                condition: { lt: [cix, name.len] }
+                body:
+                  - decl: [sign, string, { call: [name.substr, cix, 1] }]
+                  - decl: [low, string, { call: [sign.lower] }]
+                  - decl: [is_alpha, i32, { call: [<.letter_ok, low] }]
+                  - decl: [is_digit, i32, { call: [<.digit_ok, sign] }]
+                  - if:
+                      condition: { '&&': [{ eq: [is_alpha, 0] }, { '&&': [{ eq: [is_digit, 0] }, { neq: [sign, "_"] }] }] }
+                      then: [{ return: 0 }]
+                  - if:
+                      condition: { '&&': [{ eq: [cix, 0] }, { eq: [is_digit, 1] }] }
+                      then: [{ return: 0 }]
+                  - set: [cix, { +: [cix, 1] }]
+            - return: 1
+
+      - def:
+          name: letter_ok
+          access: public
+          static_off: ["str_cmp"]
+          args: [[low, string]]
+          return: i32
+          body:
+            - decl: [abc, string, "abcdefghijklmnopqrstuvwxyz"]
+            - if: { condition: { ge: [{ call: [abc.index_of, low] }, 0] }, then: [{ return: 1 }] }
+            - return: 0
+
+      - def:
+          name: digit_ok
+          access: public
+          static_off: ["str_cmp"]
+          args: [[sign, string]]
+          return: i32
+          body:
+            - decl: [nums, string, "0123456789"]
+            - if: { condition: { ge: [{ call: [nums.index_of, sign] }, 0] }, then: [{ return: 1 }] }
+            - return: 0
+
+      - def:
+          name: number_ok
+          access: public
+          static_off: ["str_cmp"]
+          args: [[text, string]]
+          return: i32
+          body:
+            - if: { condition: { eq: [text.len, 0] }, then: [{ return: 0 }] }
+            - decl: [cix, i32, 0]
+            - while:
+                condition: { lt: [cix, text.len] }
+                body:
+                  - decl: [sign, string, { call: [text.substr, cix, 1] }]
+                  - if:
+                      condition: { '&&': [{ eq: [{ call: [<.digit_ok, sign] }, 0] }, { '||': [{ neq: [sign, "-"] }, { gt: [cix, 0] }] }] }
+                      then: [{ return: 0 }]
+                  - set: [cix, { +: [cix, 1] }]
+            - return: 1
+
+      - def:
+          name: kind_ok
+          access: public
+          static_off: ["str_cmp"]
+          args: [[kind, string]]
+          return: i32
+          body:
+            - if: { condition: { eq: [kind, "text"] }, then: [{ return: 1 }] }
+            - if: { condition: { eq: [kind, "langtext"] }, then: [{ return: 1 }] }
+            - if: { condition: { eq: [kind, "zahl"] }, then: [{ return: 1 }] }
+            - if: { condition: { eq: [kind, "bool"] }, then: [{ return: 1 }] }
+            - if: { condition: { eq: [kind, "datei"] }, then: [{ return: 1 }] }
+            - return: 0
+
+      # ── Hilfen am Kontext ────────────────────────────────────────────────
+      # name_in: wie heisst die Pipeline in dieser Einreichung?  Der KONTEXT
+      # sagt es (aiml F29_2-…i) — sie aus dem Quelltext zu lesen hiesse, den
+      # Quelltext zu lesen.  "" = keine, "mehrere" = mehr als eine.
+      - def:
+          name: name_in
+          access: public
+          static_off: ["str_cmp"]
+          args: [[kontext, ref<ctx_handle>]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [namen, list<string>, { call: [kontext.names, "fn() -> pipeline"] }]
+            - if: { condition: { eq: [namen.len, 0] }, then: [{ return: "" }] }
+            - if: { condition: { gt: [namen.len, 1] }, then: [{ return: "mehrere" }] }
+            - return: { at: [namen, 0] }
+
+      # trouble: die Meldung des UEBERSETZERS, unveraendert weiter (F29_2-…l).
+      # Sie nennt Datei, Zeile und Grund; eine eigene Formulierung daneben
+      # waere eine zweite Wahrheit.
+      - def:
+          name: trouble
+          access: public
+          static_off: ["str_cmp"]
+          args: [[kontext, ref<ctx_handle>]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [why, list<string>, { call: [kontext.errors] }]
+            - if:
+                condition: { eq: [why.len, 0] }
+                then: [{ return: "die Quelle liess sich nicht uebersetzen (ohne Meldung)" }]
+            - decl: [first, string, { at: [why, 0] }]
+            - if: { condition: { eq: [why.len, 1] }, then: [{ return: first }] }
+            - decl: [more, i32, { -: [why.len, 1] }]
+            - return: "${first} (und ${more} weitere)"
+
+      # ── Hilfen am gelesenen Wert ─────────────────────────────────────────
+      - def:
+          name: take_axes
+          access: public
+          static_off: ["str_cmp"]
+          args: [[pipe, ref<pipeline>], [run, ref<PipelineRun>]]
+          return: i32
+          body:
+            # F96-34: die Achsen gehoeren in den Datensatz — sonst ist die
+            # Gestalt des Laufs nur im Quelltext, und eine Matrix-Darstellung
+            # muesste Anzeigetext parsen (doc/spec/97 F97-14).
+            - decl: [aix, i32, 0]
+            - while:
+                condition: { lt: [aix, { call: [pipe.axis_count] }] }
+                body:
+                  - decl: [axis, PipelineAxis]
+                  - set: [axis.name, { call: [pipe.axis_name, aix] }]
+                  - decl: [vix, i32, 0]
+                  - while:
+                      condition: { lt: [vix, { call: [pipe.axis_value_count, aix] }] }
+                      body:
+                        - call: [axis.values.push, { call: [pipe.axis_value, aix, vix] }]
+                        - set: [vix, { +: [vix, 1] }]
+                  - call: [run.axes.push, axis]
+                  - set: [aix, { +: [aix, 1] }]
+            - return: 0
+
+      - def:
+          name: take_pushes
+          access: public
+          static_off: ["str_cmp"]
+          args: [[pipe, ref<pipeline>], [run, ref<PipelineRun>]]
+          return: i32
+          body:
+            - decl: [pix, i32, 0]
+            - while:
+                condition: { lt: [pix, { call: [pipe.push_count] }] }
+                body:
+                  - decl: [tgt, PushTarget]
+                  - set: [tgt.from_stage, { call: [pipe.push_from, pix] }]
+                  - set: [tgt.target, { call: [pipe.push_to, pix] }]
+                  - set: [tgt.tag, { call: [pipe.push_tag, pix] }]
+                  - set: [tgt.status, "pending"]
+                  - call: [run.pushes.push, tgt]
+                  - set: [pix, { +: [pix, 1] }]
+            - return: 0
+
+      # take_stages: eine Zeile je (Lane, Stufe).  Das Kreuzprodukt baut der
+      # LESER, weil nur er weiss, dass er Zeilen braucht (aiml F62-155).
+      - def:
+          name: take_stages
+          access: public
+          static_off: ["str_cmp"]
+          args: [[pipe, ref<pipeline>], [run, ref<PipelineRun>], [run_id, string]]
+          return: i32
+          body:
+            - decl: [lix, i32, 0]
+            - while:
+                condition: { lt: [lix, { call: [pipe.lane_count] }] }
+                body:
+                  - decl: [btxt, string, { call: [pipe.lane_bindings, lix] }]
+                  - decl: [six, i32, 0]
+                  - while:
+                      condition: { lt: [six, { call: [pipe.stage_count] }] }
+                      body:
+                        - decl: [stg, stage, { call: [pipe.stage_at, six] }]
+                        - decl: [entry, PipelineStage]
+                        - set: [entry.stage_id, "${run_id}-${lix}-${six}"]
+                        - decl: [sname, string, { call: [stg.name] }]
+                        - if:
+                            condition: { gt: [btxt.len, 0] }
+                            then: [{ set: [entry.name, "${sname} [${btxt}]"] }]
+                            else: [{ set: [entry.name, sname] }]
+                        - set: [entry.stage_kind, "pipeline"]
+                        - set: [entry.status, "pending"]
+                        - set: [entry.script_ref, ""]
+                        - set: [entry.bindings, btxt]
+                        # Alles Folgende ist AUFGELOEST (aiml F62-151): den
+                        # Vorrang Stufe-vor-Pipeline hat der Uebersetzer schon
+                        # angewandt, `shares` sind schon zusammengelegt.
+                        - set: [entry.command, { call: [stg.command] }]
+                        - set: [entry.required_label, { call: [stg.agent] }]
+                        - set: [entry.image, { call: [stg.image] }]
+                        - set: [entry.requires, { call: [stg.requires] }]
+                        - set: [entry.shares, { call: [stg.shares] }]
+                        - set: [entry.cpu_cores, { call: [stg.cpu_cores] }]
+                        - set: [entry.mem_mb, { call: [stg.mem_mb] }]
+                        - set: [entry.pids_max, { call: [stg.pids_max] }]
+                        - set: [entry.timeout_ms, { call: [stg.timeout_ms] }]
+                        - call: [run.stages.push, entry]
+                        - set: [six, { +: [six, 1] }]
+                  - set: [lix, { +: [lix, 1] }]
+            - return: 0
+
+      # ── Lage: was dieser Cluster hat (aiml §20.2) ────────────────────────
+      # image_trouble: jede Stufe, denn eine Stufe mit eigenem `image:` ist der
+      # gefaehrlichere Fall — sie wird nie zugeteilt (kein Agent hat diese
+      # Umgebung) und wartet still bis zum Zeitablauf.  Ein Tippfehler darf
+      # nicht als Geduld durchgehen.
+      - def:
+          name: image_trouble
+          access: public
+          static_off: ["str_cmp"]
+          args: [[pipe, ref<pipeline>]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [six, i32, 0]
+            - while:
+                condition: { lt: [six, { call: [pipe.stage_count] }] }
+                body:
+                  - decl: [stg, stage, { call: [pipe.stage_at, six] }]
+                  - set: [six, { +: [six, 1] }]
+                  - decl: [want, string, { call: [stg.image] }]
+                  # Kein `continue` in aiml — die Pruefung haengt am Block.
+                  - if:
+                      condition: { gt: [want.len, 0] }
+                      then:
+                        - decl: [bad, string, { call: [<.one_image_problem, pipe, want] }]
+                        - if:
+                            condition: { gt: [bad.len, 0] }
+                            then:
+                              - decl: [sname, string, { call: [stg.name] }]
+                              - return: "stage '${sname}': ${bad}"
+            - return: ""
+
+      # one_image_problem: ein einzelner Name — kennt ihn der Wirt, oder stellt
+      # diese Pipeline ihn selbst her (aiml F62-129)?
+      - def:
+          name: one_image_problem
+          access: public
+          static_off: ["str_cmp"]
+          args: [[pipe, ref<pipeline>], [img_want, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - if: { condition: { eq: [img_want.len, 0] }, then: [{ return: "" }] }
+            - if: { condition: { eq: [{ call: [<.known_image, img_want] }, 1] }, then: [{ return: "" }] }
+            # Stellt diese Pipeline das Abbild selbst her?  Dann ist der Name
+            # erst nach ihrem Lauf bekannt, und das ist kein Fehler (F62-129).
+            - decl: [pix, i32, 0]
+            - while:
+                condition: { lt: [pix, { call: [pipe.push_count] }] }
+                body:
+                  - decl: [to_where, string, { call: [pipe.push_to, pix] }]
+                  - set: [pix, { +: [pix, 1] }]
+                  - if: { condition: { eq: [to_where, img_want] }, then: [{ return: "" }] }
+            # Ein `oci:`-Ziel, das es noch nicht gibt, ist ein anderer Fall als
+            # ein unbekannter NAME: dort fehlt die Zuordnung, hier fehlt nur
+            # der Lauf, der es herstellt.  Die Meldung soll das unterscheiden,
+            # sonst sucht man an der falschen Stelle.
+            - if:
+                condition: { eq: [{ call: [img_want.starts_with, "oci:"] }, 1] }
+                then:
+                  - return: "`image: ${img_want}` — dieses Abbild gibt es noch nicht.  Es entsteht durch den `push:` einer anderen Pipeline; erst die laufen lassen, dann diese hier."
+            - return: "`image: ${img_want}` — dieses Abbild kennt der Wirt nicht, und diese Pipeline stellt es auch nicht her.  Bekannt sind: ${{ call: [<.image_list] }}"
+
+      # known_image: kennt der Wirt dieses Abbild?  Die Zuordnung Name → Ort
+      # steht in COSMOS_RT_IMAGES (doc/spec/110 F110-72); eine Pipeline traegt
+      # nie einen Pfad (aiml F62-17).
       - def:
           name: known_image
           access: public
+          static_off: ["str_cmp"]
           args: [[name, string]]
           return: i32
-          body: [{ return: 1 }]
+          body:
+            - if: { condition: { eq: [name.len, 0] }, then: [{ return: 1 }] }
+            # Ein LAYOUT auf Platte ist ein bekanntes Abbild (doc/spec/110
+            # F110-113): `oci:<pfad>` braucht keine Zuordnung durch den Wirt,
+            # der Pfad IST die Zuordnung — und die Laufzeit legt es genauso aus
+            # (rt_launcher.bundle_for).
+            - if:
+                condition: { eq: [{ call: [name.starts_with, "oci:"] }, 1] }
+                then:
+                  - decl: [lay_at, string, { call: [name.substr, 4] }]
+                  - if: { condition: { eq: [{ call: [io.is_file, "${lay_at}/index.json"] }, true] }, then: [{ return: 1 }] }
+                  - return: 0
+            # `museum:<repo>:<tag>` (doc/spec/111 §111.9): das Abbild liegt in
+            # museum und wird beim Start geholt (rt_launcher.pull_museum).  Ob
+            # es dort WIRKLICH liegt, zeigt erst das Holen — hier nachzufragen
+            # hiesse, beim Pruefen einer Pipeline ins Netz zu gehen.
+            - if: { condition: { eq: [{ call: [name.starts_with, "museum:"] }, 1] }, then: [{ return: 1 }] }
+            - decl: [env_all, map<string:string>, { call: [sys.env] }]
+            - if: { condition: { eq: [{ call: [env_all.contains, "COSMOS_RT_IMAGES"] }, 0] }, then: [{ return: 0 }] }
+            - decl: [raw, string, { call: [env_all.get, "COSMOS_RT_IMAGES"] }]
+            - decl: [parts, list<string>, { call: [raw.split, ","] }]
+            - decl: [kix, i32, 0]
+            - while:
+                condition: { lt: [kix, parts.len] }
+                body:
+                  - decl: [one, string, { at: [parts, kix] }]
+                  - set: [kix, { +: [kix, 1] }]
+                  - decl: [cut, i32, { call: [one.index_of, "="] }]
+                  - if:
+                      condition: { ge: [cut, 0] }
+                      then:
+                        - decl: [key_raw, string, { call: [one.substr, 0, cut] }]
+                        - decl: [key, string, { call: [key_raw.trim] }]
+                        - if: { condition: { eq: [key, name] }, then: [{ return: 1 }] }
+            - return: 0
+
       - def:
           name: image_list
           access: public
+          static_off: ["str_cmp"]
           return: { type: string, lifetime: producer }
-          body: [{ return: "" }]
+          body:
+            - decl: [env_all, map<string:string>, { call: [sys.env] }]
+            - if: { condition: { eq: [{ call: [env_all.contains, "COSMOS_RT_IMAGES"] }, 0] }, then: [{ return: "(keine — COSMOS_RT_IMAGES ist nicht gesetzt)" }] }
+            - return: { call: [env_all.get, "COSMOS_RT_IMAGES"] }
