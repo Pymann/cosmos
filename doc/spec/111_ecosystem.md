@@ -178,7 +178,7 @@ Beide Wege enden in `AuthService.login_external` und melden die Gruppen an
 Belegt: `run_e2e_identity.sh` — Wegwerf-slapd und ein gespielter IdP (Schlüssel per openssl,
 Signatur per xmlsec1): LDAP-Anmeldung, Gruppe → Rolle, falsches/leeres Passwort, `*` als
 Login; SAML-Hin- und Rückweg, Gruppe → Rolle, Wiederholung, fremdes Zertifikat,
-unangefragte Antwort, offener Umleiter — 20 Prüfungen.
+unangefragte Antwort, offener Umleiter — 19 Prüfungen.
 
 ---
 
@@ -287,11 +287,23 @@ Belegt: `run_e2e_museum.sh` gegen ein echtes museum — Webhook-ping mit Signatu
 `package.published` öffnet die Kampagne (Welle 1 läuft), die nächste Veröffentlichung setzt
 **dieselbe** Kampagne fort (Welle 2 startet, Projekt ohne Job → `no_job`), push/pull per Tag
 und Digest byte-gleich, push ohne Token abgewiesen, `image.pushed` kommt bei cosmos an —
-21 Prüfungen.
+18 Prüfungen.
 
 ---
 
-## 111.10 Was NICHT läuft, und warum das hier steht
+## 111.10 Bauen
+
+cosmosd braucht ab hier die aiml-Bausteine aus drei Zweigen (alle von `mem-v3-compiler`):
+`feature/identity-builtins-memv3` (LDAP/SAML/base64 — `libaiml.so` hängt dann an libldap,
+libxmlsec1, libxml2, libxslt), `feature/http-client-files-memv3` (binäre HTTP-Körper für
+cosmos-museum) und — für museum — `feature/http-registry-support-memv3`.
+`ecosystem/integration-memv3` ist `mem-v3-compiler` mit allen dreien; darauf laufen die
+aiml-Suite (keine neuen Fehler gegenüber `mem-v3-compiler`), museum `tests/run_all.sh` und
+`run_e2e_api.sh`, `run_e2e_identity.sh`, `run_e2e_museum.sh`.
+
+Neue Programme: `cosmos-api` (`exodus-api.json`), `cosmos-museum` (`exodus-museum-client.json`).
+
+## 111.11 Was NICHT läuft, und warum das hier steht
 
 - **`pipeline_submit.aiml` ließ sich hier nicht übersetzen** (braucht eine neuere aiml-Fassung
   als die auf GitHub).  Die Abnahmen liefen mit einem Platzhalter, der nur den Namen aus
