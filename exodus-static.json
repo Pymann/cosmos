@@ -1,0 +1,40 @@
+{
+  "jobs": 16,
+  "$schema": "exodus.project.config-1.0",
+  "name": "static",
+  "version": "0.0.1",
+  "output_type": "executable",
+  "sources": [
+    "sources/client/web/static_main.aiml"
+  ],
+  "compiler": {
+    "name": "/media/nikolai/95a208ef-ffa2-478b-abdd-ff394baa6a76/projects/python/test/aiml/out/aiml/aiml",
+    "lang_standard": "17",
+    "flags": []
+  },
+  "linker": {
+    "name": "g++",
+    "flags": [
+      "-Wl,-rpath,/media/nikolai/95a208ef-ffa2-478b-abdd-ff394baa6a76/projects/python/test/aiml/out/libaiml"
+    ],
+    "libraries": [
+      "aiml",
+      "pthread",
+      "ssl",
+      "crypto",
+      "dl"
+    ],
+    "library_paths": [
+      "/media/nikolai/95a208ef-ffa2-478b-abdd-ff394baa6a76/projects/python/test/aiml/out/libaiml"
+    ]
+  },
+  "artifact_in_cwd": true,
+  "optimization": "0",
+  "debug": false,
+  "warnings": [],
+  "env": {
+    "AIML_STRICT_TOPLEVEL": "1",
+    "AIML_LIFETIME_DROPS": "1",
+    "AIML_MEM_V3": "1"
+  }
+}

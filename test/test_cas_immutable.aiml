@@ -1,0 +1,93 @@
+# Abnahme C8 (doc/spec/92 §92.7, Befund 1): ein Objekt im Store teilt NIE eine
+# Inode mit einer Datei ausserhalb des Stores.
+#
+# Zwei Richtungen, und beide müssen gelten — sonst stimmt die Adresse
+# irgendwann nicht mehr mit dem Inhalt überein, und Snapshots wie
+# Cache-Treffer wären wertlos:
+#   1. Quelle nach put_file überschreiben → Blob unverändert
+#   2. materialisierte Datei überschreiben → Objekt unverändert, und der Baum
+#      ergibt erneut dieselbe Adresse
+# Expected exit code: 0
+
+- import: "sources/server/cas_trees.aiml"
+
+- def:
+    name: expect
+    args: [[what, string], [cond, i32]]
+    return: i32
+    body:
+      - if:
+          condition: { eq: [cond, 1] }
+          then: [{ print: ["  ok   ${what}"] }, { return: 0 }]
+      - print: ["  FAIL ${what}"]
+      - return: 1
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      - decl: [work, string, "/tmp/cosmos_cas_immut"]
+      - decl: [work_p, path, work]
+      - call: [io.remove_all, work_p]
+      - decl: [src_dir, path, "${work}/src"]
+      - call: [io.mkdir_all, src_dir]
+
+      - decl: [store, ptr<CasStore>, { new: CasStore }]
+      - call: [store.init, "${work}/cas"]
+      - decl: [trees, ptr<CasTrees>, { new: CasTrees }]
+      - call: [trees.init, store]
+
+      # ── Richtung 1: Quelle nach der Aufnahme ändern ─────────────────────
+      - decl: [src_file, path, "${work}/src/datei.txt"]
+      - call: [io.write_file, src_file, "originalinhalt"]
+      - decl: [blob_id, string, { call: [store.put_file, src_file] }]
+      - set: [fails, { +: [fails, { call: [expect, "put_file liefert eine Adresse", { eq: [blob_id.len, 64] }] }] }]
+
+      - decl: [obj_path, string, { call: [store.blob_path, blob_id] }]
+      - decl: [obj_p, path, obj_path]
+      - decl: [before, string, { call: [io.read_file, obj_p] }]
+
+      # Die Quelle überschreiben — bei einem Hardlink änderte das das Objekt.
+      - call: [io.write_file, src_file, "ANGEGRIFFEN-anderer-inhalt"]
+      - decl: [after, string, { call: [io.read_file, obj_p] }]
+      - set: [fails, { +: [fails, { call: [expect, "C8 Blob unveraendert nach Aenderung der Quelle", { eq: [after, before] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "C8 Blob enthaelt weiter das Original", { eq: [after, "originalinhalt"] }] }] }]
+      # Und die Adresse muss den Inhalt noch beschreiben.
+      - decl: [rehash, string, { call: [hash.sha256_file, obj_p] }]
+      - set: [fails, { +: [fails, { call: [expect, "C8 Adresse beschreibt den Inhalt noch", { eq: [rehash, blob_id] }] }] }]
+
+      # ── Richtung 2: materialisierte Datei ändern ────────────────────────
+      - decl: [tree_src, path, "${work}/tree"]
+      - call: [io.mkdir_all, tree_src]
+      - decl: [tree_file, path, "${work}/tree/inhalt.txt"]
+      - call: [io.write_file, tree_file, "baum-original"]
+      - decl: [tree_id, string, { call: [trees.put_tree, "${work}/tree"] }]
+      - set: [fails, { +: [fails, { call: [expect, "put_tree liefert eine Adresse", { eq: [tree_id.len, 64] }] }] }]
+
+      - decl: [out_dir, string, "${work}/out"]
+      - decl: [out_p, path, out_dir]
+      - call: [io.mkdir_all, out_p]
+      - decl: [rc_mat, i32, { call: [trees.materialize, tree_id, out_dir] }]
+      - set: [fails, { +: [fails, { call: [expect, "materialize gelingt", { eq: [rc_mat, 0] }] }] }]
+
+      # Die materialisierte Datei beschreiben — genau das tut ein Build-Schritt.
+      - decl: [mat_file, path, "${out_dir}/inhalt.txt"]
+      - call: [io.write_file, mat_file, "VOM-SCHRITT-UEBERSCHRIEBEN"]
+
+      - decl: [tree_again, string, { call: [trees.put_tree, "${work}/tree"] }]
+      - set: [fails, { +: [fails, { call: [expect, "C8 Quellbaum unveraendert (gleiche Adresse)", { eq: [tree_again, tree_id] }] }] }]
+
+      # Das Objekt des Baums muss den Originalinhalt behalten.
+      - decl: [orig_blob, string, { call: [hash.sha256_file, tree_file] }]
+      - decl: [ob_path, path, { call: [store.blob_path, orig_blob] }]
+      - decl: [ob_txt, string, { call: [io.read_file, ob_path] }]
+      - set: [fails, { +: [fails, { call: [expect, "C8 Objekt unveraendert nach Aenderung der Materialisierung", { eq: [ob_txt, "baum-original"] }] }] }]
+
+      - call: [io.remove_all, work_p]
+      - if:
+          condition: { neq: [fails, 0] }
+          then: [{ print: ["test_cas_immutable FAIL (${fails})"] }, { return: 1 }]
+      - print: ["test_cas_immutable PASS"]
+      - return: 0

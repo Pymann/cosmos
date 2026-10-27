@@ -1,0 +1,786 @@
+# rt_launcher — cosmos startet sich einen Agenten im Container (doc/spec/110 M7).
+#
+# Der Agent ZIEHT (doc/spec/103 F103-2), also braucht es keinen Scheduler: ein
+# frisch gestarteter Agent meldet sich und greift zu.  Zu entscheiden bleibt
+# nur: „es liegt Arbeit an, für die kein freier Agent da ist — starte einen."
+# Das ist genau die Aufgabe, die bei Jenkins das kubernetes-Plugin hat.
+#
+# Was hier NICHT passiert: ein rootfs je Lauf.  Der Inhalt ist für alle Läufe
+# derselbe; nur das Token unterscheidet sie, und das reist als eigene Datei in
+# den Container.  Ein Abbild je Lauf zu kopieren wäre Platz und Zeit für nichts.
+
+- import: "sources/server/agent_token_store.aiml"
+- import: "sources/shared/claim_who.aiml"
+
+- model:
+    name: RtLaunch
+    fields:
+      - [agent_id,  string]
+      # In WELCHEM Abbild laeuft dieser Container (Name, nicht Pfad).  Die
+      # Kapazitaetsschleife fragt danach (doc/spec/110 F110-73/74).
+      - [image,     string]
+      - [token_id,  string]   # zum Widerrufen beim Abräumen
+      - [bundle,    string]   # Verzeichnis, wird beim Abräumen gelöscht
+      - [started_ms, i64]
+      - [alive,     i32]
+      # Zum Abraeumen: die PID der abgeloesten Runtime und ihre Statusdatei.
+      # Ein `process`-Griff liesse sich in einem Modell nicht halten; ueber
+      # `sys.process_attach` kommt er bei Bedarf zurueck (aiml spec/23 §5.4).
+      - [rt_pid,    i64]
+      - [status_at, string]
+
+- class:
+    name: RtLauncher
+    members:
+      # Vorlage: ein fertiges rootfs (deploy/runtime.tar.gz + agent), das ALLE
+      # Läufe teilen.  Leer = nicht eingerichtet, dann startet nichts.
+      - [tmpl_root, string]
+      - [rt_binary, string]
+      - [work_dir,  string]
+      - [exec_url,  string]
+      # Welche Schritte ein gestarteter Agent nehmen DARF.  Ohne Etikett nimmt
+      # er nur Schritte ohne `required_label` — und genau das war der Grund,
+      # warum der erste automatisch gestartete Container nichts tun konnte.
+      - [labels,    string]
+      - [running,   list<RtLaunch>]
+      # Wie viele Container NACHEINANDER beim Start gestorben sind (F110-106).
+      # 0 nach jedem, der wirklich gelaufen ist.
+      - [early_deaths, i32]
+    methods:
+      - def:
+          name: init
+          access: public
+          static_off: ["str_cmp"]
+          args: [[tmpl, string], [binary, string], [work, string], [url, string]]
+          body:
+            - set: [<.tmpl_root, tmpl]
+            - set: [<.rt_binary, binary]
+            - set: [<.work_dir, work]
+            - set: [<.exec_url, url]
+            - set: [<.labels, "container"]
+            - call: [io.mkdir_all, work]
+
+      - def:
+          name: set_labels
+          access: public
+          static_off: ["str_cmp"]
+          args: [[given, string]]
+          body: [{ set: [<.labels, given] }]
+
+      - def:
+          name: labels_now
+          access: public
+          return: { type: string, lifetime: producer }
+          body: [{ return: "${<.labels}" }]
+
+      - def:
+          name: ready
+          access: public
+          return: i32
+          body:
+            - if: { condition: { eq: [{ call: [io.is_dir, <.tmpl_root] }, false] }, then: [{ return: 0 }] }
+            - if: { condition: { eq: [{ call: [io.is_file, <.rt_binary] }, false] }, then: [{ return: 0 }] }
+            - return: 1
+
+      # bundle_for: das Bundle eines Laufs schreiben.  Das rootfs wird GEBUNDEN,
+      # nicht kopiert; das Token liegt daneben und wird einzeln eingehängt.
+      - def:
+          name: bundle_for
+          access: public
+          static_off: ["str_cmp"]
+          args: [[agent_id, string], [secret, string], [image, string], [shares, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [dir, string, "${<.work_dir}/${agent_id}"]
+            - call: [io.mkdir_all, "${dir}/rootfs"]
+            - decl: [tok_at, string, "${dir}/token"]
+            # Der Arbeitsbereich gehoert dem WIRT, nicht dem Container
+            # (doc/spec/110 F110-94/F110-110).  Laege er im Buendel, waere er
+            # mit dem Container weg — und „ab Stufe X nochmal" liefe gegen das
+            # nackte Abbild, obwohl die Schichten der frueheren Stufen noch da
+            # sind.  Ein Verzeichnis je WIRT, darin eines je Lauf.
+            - decl: [work_at, string, "${<.work_dir}/lauf"]
+            - call: [io.mkdir_all, work_at]
+            # Optional: eine Zugangsdatei fuer git (COSMOS_RT_GIT_CRED).  Sie
+            # reist als EIGENER Bind, nicht im Abbild — ein Geheimnis in einer
+            # geteilten Vorlage waere fuer alle da.  Fehlt die Angabe, gibt es
+            # den Bind nicht: ein Container ohne Zugang ist der Normalfall.
+            - decl: [cred_env, map<string:string>, { call: [sys.env] }]
+            - decl: [cred_at, string, ""]
+            - if:
+                condition: { gt: [{ call: [cred_env.contains, "COSMOS_RT_GIT_CRED"] }, 0] }
+                then: [{ set: [cred_at, { call: [cred_env.get, "COSMOS_RT_GIT_CRED"] }] }]
+            # Optional: ein Verzeichnis mit lokalen Spiegeln (COSMOS_RT_SRC).
+            # Damit laeuft dieselbe Pipeline ohne Zugangsdaten — sie klont dann
+            # `file:///src/<repo>` statt `https://github.com/...`.
+            - decl: [src_at, string, ""]
+            - if:
+                condition: { gt: [{ call: [cred_env.contains, "COSMOS_RT_SRC"] }, 0] }
+                then: [{ set: [src_at, { call: [cred_env.get, "COSMOS_RT_SRC"] }] }]
+            # Abbild-Betrieb (COSMOS_RT_IMAGE): der Container bringt sein EIGENES
+            # Betriebssystem mit, und seine Wurzel gehoert dem Lauf — nur so kann
+            # eine Pipeline `apt-get install` sagen.  Ohne die Angabe bleibt es
+            # bei der geteilten Vorlage, die sich /usr vom Wirt borgt.
+            # Der NAME kommt aus der Pipeline, der ORT vom Wirt (F110-72):
+            #   COSMOS_RT_IMAGES="ubuntu-base=/…/rt_image,builder=/…/oci/builder"
+            # Ohne Namen gilt das Vorgabe-Abbild COSMOS_RT_IMAGE.  Eine Pipeline
+            # traegt NIE einen Wirtspfad (aiml F62-17).
+            - decl: [image_at, string, ""]
+            - if:
+                condition: { gt: [{ call: [cred_env.contains, "COSMOS_RT_IMAGE"] }, 0] }
+                then: [{ set: [image_at, { call: [cred_env.get, "COSMOS_RT_IMAGE"] }] }]
+            # Ein Abbild, das eine Pipeline selbst hergestellt hat, heisst
+            # `oci:<pfad>` (aiml F62-122/F62-129).  Dann wird es MATERIALISIERT,
+            # nicht kopiert: der Wandler legt das Layout als Wurzel aus
+            # (doc/spec/110 §110.25).
+            - decl: [from_layout, i32, 0]
+            - if:
+                condition: { '&&': [{ gt: [image.len, 0] }, { eq: [{ call: [image.starts_with, "oci:"] }, 1] }] }
+                then:
+                  - set: [from_layout, 1]
+                  - decl: [layout_at, string, { call: [image.substr, 4] }]
+                  - if:
+                      condition: { eq: [{ call: [io.is_file, "${layout_at}/index.json"] }, false] }
+                      then:
+                        - call: [log.error, "[rt_launch] '${image}': kein OCI-Layout unter ${layout_at} — wurde die Stufe, die es herstellt, schon ausgefuehrt?"]
+                        - return: ""
+                  - decl: [imp_argv, list<string>, ["./cosmos-oci"]]
+                  - call: [imp_argv.push, "--image"]
+                  - call: [imp_argv.push, layout_at]
+                  - call: [imp_argv.push, "--bundle"]
+                  - call: [imp_argv.push, dir]
+                  - call: [imp_argv.push, "--quiet"]
+                  - call: [imp_argv.push, "1"]
+                  - decl: [imp, process, { call: [sys.exe, imp_argv, { capture: true, timeout: 600000 }] }]
+                  - if:
+                      condition: { eq: [imp, null] }
+                      then: [{ call: [log.error, "[rt_launch] cosmos-oci nicht startbar"] }, { return: "" }]
+                  - decl: [imp_rc, i32, { call: [imp.wait] }]
+                  - if:
+                      condition: { neq: [imp_rc, 0] }
+                      then:
+                        - call: [log.error, "[rt_launch] ${image} liess sich nicht auslegen (${imp_rc}): ${imp.stderr_buffer}"]
+                        - return: ""
+                  - call: [log.info, "[rt_launch] ${agent_id}: Wurzel aus dem Abbild ${image}"]
+            - if:
+                condition: { '&&': [{ gt: [image.len, 0] }, { eq: [from_layout, 0] }] }
+                then:
+                  - decl: [found_img, string, { call: [<.image_path, image] }]
+                  - if:
+                      condition: { eq: [found_img.len, 0] }
+                      then:
+                        - call: [log.error, "[rt_launch] unbekanntes Abbild '${image}' — bekannt sind: ${{ call: [<.image_names] }} (COSMOS_RT_IMAGES)"]
+                        - return: ""
+                      else: [{ set: [image_at, found_img] }]
+            - decl: [own_root, i32, 0]
+            - if: { condition: { eq: [from_layout, 1] }, then: [{ set: [own_root, 1] }] }
+            - if:
+                condition: { '&&': [{ eq: [from_layout, 0] }, { '&&': [{ gt: [image_at.len, 0] }, { eq: [{ call: [io.is_dir, image_at] }, true] }] }] }
+                then:
+                  - set: [own_root, 1]
+                  - decl: [cp_argv, list<string>, ["cp"]]
+                  - call: [cp_argv.push, "-a"]
+                  - call: [cp_argv.push, "${image_at}/."]
+                  - call: [cp_argv.push, "${dir}/rootfs"]
+                  - decl: [cp_proc, process, { call: [sys.exe, cp_argv, { capture: true, timeout: 120000 }] }]
+                  - if:
+                      condition: { eq: [cp_proc, null] }
+                      then: [{ call: [log.error, "[rt_launch] Abbild ${image_at} liess sich nicht kopieren"] }, { return: "" }]
+                  - decl: [cp_rc, i32, { call: [cp_proc.wait] }]
+                  - if:
+                      condition: { neq: [cp_rc, 0] }
+                      then: [{ call: [log.error, "[rt_launch] Abbild-Kopie endete mit ${cp_rc}: ${cp_proc.stderr_buffer}"] }, { return: "" }]
+                  - call: [log.info, "[rt_launch] ${agent_id}: eigene Wurzel aus ${image_at}"]
+
+            - decl: [out, file_handle, { call: [io.open, tok_at, "w"] }]
+            - if: { condition: { eq: [out, null] }, then: [{ return: "" }] }
+            - call: [io.write, out, "${secret}\n"]
+            - call: [io.close, out]
+
+            # Die Vorlage wird read-only untergelegt; der Container sieht sie als
+            # seine Wurzel.  `/token` kommt als eigener Bind obendrauf — so
+            # bleibt das Geheimnis AUSSERHALB des geteilten Abbilds.
+            - decl: [conf, string, "{\n"]
+            - set: [conf, "${conf}  \"ociVersion\": \"1.0.2\",\n"]
+            - set: [conf, "${conf}  \"process\": {\n"]
+            - set: [conf, "${conf}    \"terminal\": false,\n"]
+            - set: [conf, "${conf}    \"user\": { \"uid\": 0, \"gid\": 0 },\n"]
+            - decl: [agent_bin, string, "/agent"]
+            - decl: [bwrap_bin, string, "/bwrap"]
+            - decl: [lib_path, string, "/lib:/usr/lib/x86_64-linux-gnu:/usr/lib64"]
+            - if:
+                condition: { eq: [own_root, 1] }
+                then:
+                  - set: [agent_bin, "/opt/cosmos/agent"]
+                  - set: [bwrap_bin, "/opt/cosmos/bwrap"]
+                  - set: [lib_path, "/opt/cosmos/lib:/usr/lib/x86_64-linux-gnu"]
+            - set: [conf, "${conf}    \"args\": [ \"${agent_bin}\", \"--exec-url\", \"${<.exec_url}\", \"--agent-id\", \"${agent_id}\", \"--agent-token-file\", \"/token\", \"--labels\", \"${<.labels}\", \"--work-root\", \"/work\", \"--bwrap-path\", \"${bwrap_bin}\", \"--in-container\", \"1\", \"--image\", \"${image}\", \"--shares\", \"${shares}\" ],\n"]
+            - set: [conf, "${conf}    \"env\": [ \"PATH=/usr/sbin:/usr/bin:/sbin:/bin\", \"LD_LIBRARY_PATH=${lib_path}\", \"HOME=/root\", \"TZ=UTC\", \"LC_ALL=C\", \"DEBIAN_FRONTEND=noninteractive\", \"AIML_MEM_V3=1\" ],\n"]
+            - set: [conf, "${conf}    \"cwd\": \"/\",\n"]
+            - set: [conf, "${conf}    \"noNewPrivileges\": true\n"]
+            - set: [conf, "${conf}  },\n"]
+            - if:
+                condition: { eq: [own_root, 1] }
+                then: [{ set: [conf, "${conf}  \"root\": { \"path\": \"rootfs\", \"readonly\": false },\n"] }]
+                else: [{ set: [conf, "${conf}  \"root\": { \"path\": \"rootfs\", \"readonly\": true },\n"] }]
+            - set: [conf, "${conf}  \"hostname\": \"${agent_id}\",\n"]
+            - set: [conf, "${conf}  \"mounts\": [\n"]
+            - if:
+                condition: { eq: [own_root, 0] }
+                then: [{ set: [conf, "${conf}    { \"destination\": \"/\", \"type\": \"\", \"source\": \"${<.tmpl_root}\", \"options\": [ \"rbind\", \"ro\" ] },\n"] }]
+            - set: [conf, "${conf}    { \"destination\": \"/proc\", \"type\": \"proc\", \"source\": \"proc\", \"options\": [] },\n"]
+            - if:
+                condition: { eq: [own_root, 0] }
+                then:
+                  - set: [conf, "${conf}    { \"destination\": \"/usr/bin\", \"type\": \"\", \"source\": \"/usr/bin\", \"options\": [ \"rbind\", \"ro\" ] },\n"]
+            - if:
+                condition: { eq: [own_root, 0] }
+                then:
+                  - set: [conf, "${conf}    { \"destination\": \"/etc\", \"type\": \"\", \"source\": \"/etc\", \"options\": [ \"rbind\", \"ro\" ] },\n"]
+            # Namensaufloesung: auf systemd-Rechnern ist /etc/resolv.conf ein
+            # Symlink nach /run/systemd/resolve — ohne dieses Verzeichnis zeigt
+            # er ins Leere, und im Container gibt es kein DNS (gemessen
+            # 21.10.2026: `getent hosts github.com` blieb stumm).  Nur binden,
+            # wenn es den Ort hier gibt: auf einem Rechner ohne resolved waere
+            # ein fester Bind ein Startfehler.
+            # Im Abbild-Betrieb nicht: dort steht eine ECHTE resolv.conf in der
+            # Wurzel, und das Bind-Ziel gaebe es gar nicht (Startfehler).
+            - if:
+                condition: { '&&': [{ eq: [own_root, 0] }, { eq: [{ call: [io.is_dir, "/run/systemd/resolve"] }, true] }] }
+                then:
+                  - set: [conf, "${conf}    { \"destination\": \"/run/systemd/resolve\", \"type\": \"\", \"source\": \"/run/systemd/resolve\", \"options\": [ \"rbind\", \"ro\" ] },\n"]
+            - if:
+                condition: { eq: [own_root, 0] }
+                then:
+                  - set: [conf, "${conf}    { \"destination\": \"/usr/lib\", \"type\": \"\", \"source\": \"/usr/lib\", \"options\": [ \"rbind\", \"ro\" ] },\n"]
+            - if:
+                condition: { eq: [own_root, 0] }
+                then:
+                  - set: [conf, "${conf}    { \"destination\": \"/usr/lib64\", \"type\": \"\", \"source\": \"/usr/lib64\", \"options\": [ \"rbind\", \"ro\" ] },\n"]
+            - set: [conf, "${conf}    { \"destination\": \"/dev/null\", \"type\": \"\", \"source\": \"/dev/null\", \"options\": [ \"bind\" ] },\n"]
+            # Der Sandkasten legt dem SCHRITT ein eigenes /dev an und bindet
+            # dafuer diese Geraete weiter — fehlt eines, bricht bwrap ab
+            # (gemessen 21.10.2026).
+            - set: [conf, "${conf}    { \"destination\": \"/dev/zero\", \"type\": \"\", \"source\": \"/dev/zero\", \"options\": [ \"bind\" ] },\n"]
+            - set: [conf, "${conf}    { \"destination\": \"/dev/full\", \"type\": \"\", \"source\": \"/dev/full\", \"options\": [ \"bind\" ] },\n"]
+            - set: [conf, "${conf}    { \"destination\": \"/dev/random\", \"type\": \"\", \"source\": \"/dev/random\", \"options\": [ \"bind\" ] },\n"]
+            - set: [conf, "${conf}    { \"destination\": \"/dev/urandom\", \"type\": \"\", \"source\": \"/dev/urandom\", \"options\": [ \"bind\" ] },\n"]
+            - set: [conf, "${conf}    { \"destination\": \"/dev/tty\", \"type\": \"\", \"source\": \"/dev/tty\", \"options\": [ \"bind\" ] },\n"]
+            - set: [conf, "${conf}    { \"destination\": \"/token\", \"type\": \"\", \"source\": \"${tok_at}\", \"options\": [ \"bind\", \"ro\" ] },\n"]
+            - set: [conf, "${conf}    { \"destination\": \"/work\", \"type\": \"\", \"source\": \"${work_at}\", \"options\": [ \"rbind\" ] },\n"]
+            - if:
+                condition: { '&&': [{ gt: [cred_at.len, 0] }, { eq: [{ call: [io.is_file, cred_at] }, true] }] }
+                then:
+                  - set: [conf, "${conf}    { \"destination\": \"/gitcred\", \"type\": \"\", \"source\": \"${cred_at}\", \"options\": [ \"bind\", \"ro\" ] },\n"]
+            - if:
+                condition: { '&&': [{ gt: [src_at.len, 0] }, { eq: [{ call: [io.is_dir, src_at] }, true] }] }
+                then:
+                  - set: [conf, "${conf}    { \"destination\": \"/src\", \"type\": \"\", \"source\": \"${src_at}\", \"options\": [ \"rbind\", \"ro\" ] },\n"]
+            # Die Freigaben des Laufs (doc/spec/110 §110.35).  Sie stehen vor
+            # dem /tmp, weil das die letzte Zeile OHNE Komma ist.
+            - decl: [sh_rows, string, { call: [<.share_mounts, shares, "${dir}/rootfs"] }]
+            - if:
+                condition: { eq: [{ call: [sh_rows.starts_with, "!"] }, 1] }
+                then:
+                  - call: [log.error, "[rt_launch] ${agent_id}: ${{ call: [sh_rows.substr, 1] }}"]
+                  - return: ""
+            - set: [conf, "${conf}${sh_rows}"]
+            - set: [conf, "${conf}    { \"destination\": \"/tmp\", \"type\": \"tmpfs\", \"source\": \"tmpfs\", \"options\": [ \"nosuid\", \"nodev\", \"mode=1777\" ] }\n"]
+            - set: [conf, "${conf}  ],\n"]
+            - set: [conf, "${conf}  \"linux\": {\n"]
+            - set: [conf, "${conf}    \"namespaces\": [ { \"type\": \"pid\" }, { \"type\": \"mount\" }, { \"type\": \"user\" }, { \"type\": \"ipc\" }, { \"type\": \"uts\" } ],\n"]
+            # KEINE Maskierungen ueber /proc in diesem Container.  Sie sind
+            # gesperrte Untermounts, und solange sie liegen, verweigert der
+            # Kernel im verschachtelten Namespace ein frisches `proc` — der
+            # Sandkasten des Agenten scheitert an „Can't mount proc"
+            # (gemessen 21.10.2026, doc/spec/110 F110-59).  Die Maskierung
+            # gehoert hier eine Ebene tiefer: bwrap setzt dem SCHRITT ein
+            # eigenes /proc in einem eigenen PID-Namespace vor.
+            - set: [conf, "${conf}    \"maskedPaths\": [],\n"]
+            - set: [conf, "${conf}    \"readonlyPaths\": []\n"]
+            - set: [conf, "${conf}  }\n}\n"]
+
+            - decl: [cfg_at, string, "${dir}/config.json"]
+            - decl: [cfg_out, file_handle, { call: [io.open, cfg_at, "w"] }]
+            - if: { condition: { eq: [cfg_out, null] }, then: [{ return: "" }] }
+            - call: [io.write, cfg_out, conf]
+            - call: [io.close, cfg_out]
+            - return: dir
+
+      # spawn: Token prägen, Bundle schreiben, Container ablösen starten.
+      # Der Lauf überlebt den Aufrufer NICHT: cosmos-rt bindet ihn an sich
+      # (doc/spec/110 F110-30), und das Abräumen widerruft das Token.
+      - def:
+          name: spawn
+          access: public
+          static_off: ["str_cmp"]
+          args: [[store, ref<AgentTokenStore>], [agent_id, string], [limit_mb, i32]]
+          return: RtLaunch
+          body:
+            - decl: [plain, PendingWant]
+            - set: [plain.mem_mb, limit_mb]
+            - return: { call: [<.spawn_image, store, agent_id, plain, ""] }
+
+      # spawn_image: wie `spawn`, aber mit NAMEN des Abbilds (doc/spec/110
+      # F110-74).  "" = das Vorgabe-Abbild des Wirts.
+      - def:
+          name: spawn_image
+          access: public
+          static_off: ["str_cmp"]
+          # Die Grenzen reisen als MODELL mit, nicht als vier Einzelwerte: fuenf
+          # Argumente sind aimls Grenze (spec/49 §15), und vier Zahlen
+          # nebeneinander verwechselt man beim Aufrufen.
+          args: [[store, ref<AgentTokenStore>], [agent_id, string], [want, PendingWant], [image, string]]
+          return: RtLaunch
+          body:
+            - decl: [out, RtLaunch]
+            - set: [out.image, "${image}"]
+            # `"${…}"` statt direkter Zuweisung: ein GELIEHENER String in ein Modellfeld
+            # ueberlebt den Weg in die Liste nicht (aiml: borrowed-string-into-
+            # model-field).  Gemessen 18.10.2026: das Abraeumen meldete einen
+            # LEEREN Namen und loeschte das Bundle nicht.
+            - set: [out.agent_id, "${agent_id}"]
+            - set: [out.alive, 0]
+            - if:
+                condition: { eq: [{ call: [<.ready] }, 0] }
+                then: [{ call: [log.error, "[rt_launch] Vorlage oder cosmos-rt fehlt"] }, { return: out }]
+
+            # Drei Startfehler hintereinander heissen: der naechste wird auch
+            # scheitern (F110-106).  Lieber stehenbleiben und es SAGEN, als
+            # weiter Container zu verbrennen.
+            - if:
+                condition: { ge: [<.early_deaths, 3] }
+                then:
+                  - if:
+                      condition: { eq: [<.early_deaths, 3] }
+                      then:
+                        - set: [<.early_deaths, 4]
+                        - call: [log.error, "[rt_launch] drei Container sind beim Start gestorben — es wird keiner mehr gestartet.  Der Grund steht im letzten run.log; nach dem Beheben den Controller neu starten."]
+                  - return: out
+
+            - decl: [made, AgentTokenNew, { call: [store.create, "container ${agent_id}", "controller"] }]
+            - if:
+                condition: { neq: [made.accepted, 1] }
+                then: [{ call: [log.error, "[rt_launch] kein Token fuer ${agent_id}"] }, { return: out }]
+            # Das Token gehoert DEM, der es gepraegt hat: scheitert der Start,
+            # wird es hier widerrufen — nicht in `spawn_token`, das keinen
+            # Speicher kennt und auf einem fremden Wirt auch keinen haette.
+            - decl: [started, RtLaunch, { call: [<.spawn_token, agent_id, made.secret, want, image, made.token_id] }]
+            - if: { condition: { neq: [started.alive, 1] }, then: [{ call: [store.revoke, made.token_id] }] }
+            - return: started
+
+      # spawn_token: starten mit einem SCHON GEPRAEGTEN Token.
+      #
+      # Der Teil von `spawn_image` ohne die Token-Ausgabe — gebraucht auf einem
+      # fremden Wirt (doc/spec/110 F110-118): dort praegt der Controller das
+      # Token und schickt es im Auftrag mit, der Agent startet nur noch.  Ein
+      # leeres `token_id` heisst: dieses Token gehoert nicht mir, beim
+      # Abraeumen wird es nicht widerrufen.
+      - def:
+          name: spawn_token
+          access: public
+          static_off: ["str_cmp"]
+          args: [[agent_id, string], [secret, string], [want, PendingWant], [image, string], [token_id, string]]
+          return: RtLaunch
+          body:
+            - decl: [out, RtLaunch]
+            - set: [out.image, "${image}"]
+            - set: [out.agent_id, "${agent_id}"]
+            - set: [out.alive, 0]
+            - set: [out.token_id, "${token_id}"]
+            - if:
+                condition: { eq: [{ call: [<.ready] }, 0] }
+                then: [{ call: [log.error, "[rt_launch] Vorlage oder cosmos-rt fehlt"] }, { return: out }]
+            - decl: [dir, string, { call: [<.bundle_for, agent_id, secret, image, want.shares] }]
+            - if:
+                condition: { eq: [dir.len, 0] }
+                then:
+                  - call: [log.error, "[rt_launch] Bundle fuer ${agent_id} nicht schreibbar"]
+                  - return: out
+            - set: [out.bundle, "${dir}"]
+
+            - decl: [argv, list<string>]
+            - call: [argv.push, <.rt_binary]
+            - call: [argv.push, "--bundle"]
+            - call: [argv.push, dir]
+            # `want.mem_mb` ist schon entschieden: der Aufrufer setzt die
+            # Vorgabe des Wirts ein, wenn die Stufe nichts sagt (F110-91).
+            - decl: [use_mb, i32, want.mem_mb]
+            - call: [argv.push, "--limit-mb"]
+            - call: [argv.push, "${use_mb}"]
+            - if:
+                condition: { gt: [want.cpu_cores, 0] }
+                then:
+                  - call: [argv.push, "--cpu"]
+                  - call: [argv.push, "${want.cpu_cores}"]
+            - if:
+                condition: { gt: [want.pids_max, 0] }
+                then:
+                  - call: [argv.push, "--pids"]
+                  - call: [argv.push, "${want.pids_max}"]
+            # Die Rechte IM Namespace bleiben: der Agent sperrt jeden Schritt
+            # selbst noch einmal ein (bwrap), und das braucht CAP_SYS_ADMIN im
+            # eigenen Namespace.  Die Grenze nach aussen ist davon unberuehrt —
+            # sie ist der User-Namespace des Containers (doc/spec/110 F110-57).
+            - call: [argv.push, "--build"]
+            - call: [argv.push, "1"]
+            - call: [argv.push, "--nested"]
+            - call: [argv.push, "1"]
+            - decl: [proc, process, { call: [sys.exe, argv, { detach: true, stdout: "${dir}/run.log", stderr: "${dir}/run.log", status_file: "${dir}/run.status" }] }]
+            - if:
+                condition: { eq: [proc, null] }
+                then:
+                  - call: [log.error, "[rt_launch] cosmos-rt liess sich nicht starten"]
+                  - return: out
+            - set: [out.rt_pid, proc.pid]
+            - set: [out.status_at, "${dir}/run.status"]
+            - set: [out.started_ms, { call: [time.now] }]
+            - set: [out.alive, 1]
+            # NICHT dasselbe Modell einfuegen, das auch zurueckgegeben wird:
+            # unmittelbar nach dem Einfuegen steht alles richtig in der Liste
+            # (gemessen), aber der Rueckgabewert nimmt die Strings beim
+            # Freigeben mit — danach meldete das Abraeumen einen LEEREN Namen
+            # und liess das Bundle liegen.  Ein eigener Satz Kopien ("${...}")
+            # fuer die Liste loest das.
+            - decl: [keep, RtLaunch]
+            - set: [keep.agent_id, "${agent_id}"]
+            - set: [keep.token_id, "${token_id}"]
+            - set: [keep.bundle, "${dir}"]
+            - set: [keep.status_at, "${dir}/run.status"]
+            - set: [keep.rt_pid, proc.pid]
+            - set: [keep.started_ms, out.started_ms]
+            - set: [keep.alive, 1]
+            - call: [<.running.push, keep]
+            - call: [log.info, "[rt_launch] ${agent_id} gestartet (Bundle ${dir}, Grenze ${use_mb} MB, ${want.cpu_cores} Kerne)"]
+            - return: out
+
+      # reap: einen Lauf abräumen.  Das Token wird WIDERRUFEN, nicht nur das
+      # Verzeichnis gelöscht — eine gelöschte Datei macht ein Token nicht
+      # ungültig (dieselbe Lehre wie beim Rückbau eines Knotens, doc/spec/94).
+      - def:
+          name: reap
+          access: public
+          static_off: ["str_cmp"]
+          args: [[store, ref<AgentTokenStore>], [agent_id, string]]
+          return: i32
+          body:
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, <.running.len] }
+                body:
+                  - decl: [one, RtLaunch, { at: [<.running, idx] }]
+                  - if:
+                      condition: { eq: [one.agent_id, agent_id] }
+                      then:
+                        # Erst beenden, dann vergessen: ein Eintrag, den man
+                        # nur aus der Liste nimmt, laeuft weiter.
+                        - if:
+                            condition: { gt: [one.rt_pid, 0] }
+                            then:
+                              - decl: [back, process, { call: [sys.process_attach, one.rt_pid, one.status_at] }]
+                              - if: { condition: { neq: [back, null] }, then: [{ call: [back.kill] }] }
+                        - call: [store.revoke, one.token_id]
+                        # Das Geheimnis und die Wurzel gehen, das PROTOKOLL
+                        # bleibt: ein abgeraeumter Container, dessen Log mit ihm
+                        # verschwindet, laesst sich nicht nachsehen (gemessen
+                        # 21.10.2026 — genau das kostete den ersten Befund).
+                        - if:
+                            condition: { gt: [one.bundle.len, 0] }
+                            then:
+                              - call: [io.remove, "${one.bundle}/token"]
+                              - call: [io.remove_all, "${one.bundle}/rootfs"]
+                        - call: [<.running.remove, idx]
+                        - call: [log.info, "[rt_launch] ${agent_id} abgeraeumt, Token widerrufen"]
+                        - return: 1
+                  - set: [idx, { +: [idx, 1] }]
+            - return: 0
+
+      # sweep_dead: Container, deren Prozess nicht mehr lebt, aus der Liste
+      # nehmen.
+      #
+      # Ohne das blockiert ein Container, der beim Start stirbt (fehlendes
+      # Bind-Ziel, kaputtes Abbild), seinen Platz FUER IMMER: `live_count` zaehlt
+      # ihn weiter, die Kapazitaetsschleife startet keinen Ersatz, und der
+      # Aufraeumer laesst ihn stehen, weil fuer ihn ja Schritte warten
+      # (gemessen 21.10.2026: ein fehlendes /dev/zero im Abbild legte die ganze
+      # Schleife still).  Ein Eintrag ohne Prozess ist kein Container.
+      - def:
+          name: sweep_dead
+          access: public
+          static_off: ["str_cmp"]
+          args: [[store, ref<AgentTokenStore>]]
+          return: i32
+          body:
+            - decl: [gone, i32, 0]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, <.running.len] }
+                body:
+                  - decl: [one, RtLaunch, { at: [<.running, idx] }]
+                  - decl: [alive, i32, 0]
+                  - if:
+                      condition: { gt: [one.rt_pid, 0] }
+                      then:
+                        - decl: [back, process, { call: [sys.process_attach, one.rt_pid, one.status_at] }]
+                        - if:
+                            condition: { neq: [back, null] }
+                            then:
+                              - if: { condition: { eq: [{ call: [back.running] }, true] }, then: [{ set: [alive, 1] }] }
+                  - if:
+                      condition: { eq: [alive, 1] }
+                      then: [{ set: [idx, { +: [idx, 1] }] }]
+                      else:
+                        - call: [log.warn, "[rt_launch] ${one.agent_id} laeuft nicht mehr — Platz wird frei (Protokoll: ${one.bundle}/run.log)"]
+                        # Starb er SOFORT, war es kein Betrieb, sondern ein
+                        # Startfehler (doc/spec/110 F110-106).  Mitzaehlen —
+                        # sonst startet der Wirt im Fuenf-Sekunden-Takt immer
+                        # denselben kaputten Container, und im Protokoll steht
+                        # hundertmal dieselbe Zeile statt einmal der Grund.
+                        - decl: [lived, i64, { -: [{ call: [time.now] }, one.started_ms] }]
+                        - if:
+                            condition: { lt: [lived, 15000] }
+                            then: [{ set: [<.early_deaths, { +: [<.early_deaths, 1] }] }]
+                            else: [{ set: [<.early_deaths, 0] }]
+                        - call: [<.reap, store, one.agent_id]
+                        - set: [gone, { +: [gone, 1] }]
+            - return: gone
+
+      # image_path / image_names: die Zuordnung NAME → ORT (doc/spec/110 F110-72).
+      # Sie steht beim Wirt, nicht in der Pipeline — wie jeder andere
+      # `host:`-Wert (aiml F62-17).  Format: "name=/pfad,name2=/pfad2".
+      - def:
+          name: image_path
+          access: public
+          static_off: ["str_cmp"]
+          args: [[name, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [env_all, map<string:string>, { call: [sys.env] }]
+            - if: { condition: { eq: [{ call: [env_all.contains, "COSMOS_RT_IMAGES"] }, 0] }, then: [{ return: "" }] }
+            - decl: [raw, string, { call: [env_all.get, "COSMOS_RT_IMAGES"] }]
+            - decl: [parts, list<string>, { call: [raw.split, ","] }]
+            - decl: [pix, i32, 0]
+            - while:
+                condition: { lt: [pix, parts.len] }
+                body:
+                  - decl: [one, string, { at: [parts, pix] }]
+                  - set: [pix, { +: [pix, 1] }]
+                  - decl: [cut, i32, { call: [one.index_of, "="] }]
+                  - if: { condition: { lt: [cut, 0] }, then: [{ set: [pix, pix] }] }
+                  - if:
+                      condition: { ge: [cut, 0] }
+                      then:
+                        - decl: [key_raw, string, { call: [one.substr, 0, cut] }]
+                        - decl: [key, string, { call: [key_raw.trim] }]
+                        - decl: [val_raw, string, { call: [one.substr, { +: [cut, 1] }] }]
+                        - decl: [val, string, { call: [val_raw.trim] }]
+                        - if: { condition: { eq: [key, name] }, then: [{ return: val }] }
+            - return: ""
+
+      - def:
+          name: image_names
+          access: public
+          static_off: ["str_cmp"]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [env_all, map<string:string>, { call: [sys.env] }]
+            - if: { condition: { eq: [{ call: [env_all.contains, "COSMOS_RT_IMAGES"] }, 0] }, then: [{ return: "(keine)" }] }
+            - return: { call: [env_all.get, "COSMOS_RT_IMAGES"] }
+
+      # ── Freigaben (doc/spec/110 §110.35, aiml spec/62 §18.1b) ──────────
+      #
+      # share_path: NAME → Pfad des Wirts.  Form der Zuordnung:
+      #   COSMOS_RT_SHARES="quellen=/srv/nfs/quellen,ablage=/srv/out:ro"
+      # Das angehaengte ":ro" ist die Zusage des BETREIBERS (F110-103): es
+      # schlaegt ein `mode: rw` der Pipeline.  "" = der Name ist unbekannt.
+      - def:
+          name: share_path
+          access: public
+          static_off: ["str_cmp"]
+          args: [[name, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [env_all, map<string:string>, { call: [sys.env] }]
+            - if: { condition: { eq: [{ call: [env_all.contains, "COSMOS_RT_SHARES"] }, 0] }, then: [{ return: "" }] }
+            - decl: [raw, string, { call: [env_all.get, "COSMOS_RT_SHARES"] }]
+            - decl: [parts, list<string>, { call: [raw.split, ","] }]
+            - decl: [pix, i32, 0]
+            - while:
+                condition: { lt: [pix, parts.len] }
+                body:
+                  - decl: [one, string, { at: [parts, pix] }]
+                  - set: [pix, { +: [pix, 1] }]
+                  - decl: [cut, i32, { call: [one.index_of, "="] }]
+                  - if:
+                      condition: { ge: [cut, 0] }
+                      then:
+                        - decl: [key_raw, string, { call: [one.substr, 0, cut] }]
+                        - decl: [key, string, { call: [key_raw.trim] }]
+                        - decl: [val_raw, string, { call: [one.substr, { +: [cut, 1] }] }]
+                        - decl: [val, string, { call: [val_raw.trim] }]
+                        - if: { condition: { eq: [key, name] }, then: [{ return: val }] }
+            - return: ""
+
+      - def:
+          name: share_names
+          access: public
+          static_off: ["str_cmp"]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [env_all, map<string:string>, { call: [sys.env] }]
+            - if: { condition: { eq: [{ call: [env_all.contains, "COSMOS_RT_SHARES"] }, 0] }, then: [{ return: "(keine)" }] }
+            - return: { call: [env_all.get, "COSMOS_RT_SHARES"] }
+
+      # share_mounts: die kompakte Form "name:/ziel:modus,…" in Mount-Zeilen
+      # der config.json.  Leere Rueckgabe heisst: nichts einzuhaengen.  Ein
+      # unbekannter Name oder ein fehlender Pfad gibt "!<begruendung>" zurueck
+      # — der Aufrufer bricht dann ab, statt einen Container mit leeren
+      # Ordnern zu starten (F110-102).
+      - def:
+          name: share_mounts
+          access: public
+          static_off: ["str_cmp"]
+          args: [[shares, string], [root_dir, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [out, string, ""]
+            - if: { condition: { eq: [shares.len, 0] }, then: [{ return: out }] }
+            - decl: [rows, list<string>, { call: [shares.split, ","] }]
+            - decl: [rix, i32, 0]
+            - while:
+                condition: { lt: [rix, rows.len] }
+                body:
+                  - decl: [row, string, { at: [rows, rix] }]
+                  - set: [rix, { +: [rix, 1] }]
+                  - decl: [fields, list<string>, { call: [row.split, ":"] }]
+                  - if:
+                      condition: { ge: [fields.len, 2] }
+                      then:
+                        - decl: [name, string, { at: [fields, 0] }]
+                        - decl: [dest, string, { at: [fields, 1] }]
+                        - decl: [mode, string, "ro"]
+                        - if: { condition: { ge: [fields.len, 3] }, then: [{ set: [mode, { at: [fields, 2] }] }] }
+                        - decl: [where, string, { call: [<.share_path, name] }]
+                        - if:
+                            condition: { eq: [where.len, 0] }
+                            then: [{ return: "!Freigabe '${name}' ist diesem Wirt unbekannt — er kennt: ${{ call: [<.share_names] }} (COSMOS_RT_SHARES)" }]
+                        # Die Zusage des Betreibers schlaegt die Bitte der
+                        # Pipeline (F110-103).
+                        - decl: [fix_ro, i32, 0]
+                        - decl: [tail, i32, { call: [where.index_of, ":ro"] }]
+                        - if:
+                            condition: { ge: [tail, 1] }
+                            then:
+                              - set: [fix_ro, 1]
+                              - set: [where, { call: [where.substr, 0, tail] }]
+                        - if:
+                            condition: { eq: [{ call: [io.is_dir, where] }, false] }
+                            then: [{ return: "!Freigabe '${name}' zeigt auf ${where} — das gibt es auf diesem Wirt nicht" }]
+                        # Das ZIEL muss es geben, sonst scheitert der Bind —
+                        # und zwar beim Start des Containers, nicht beim Lesen
+                        # (gemessen 22.10.2026: „mount … No such file or
+                        # directory", der Container kam gar nicht hoch).  Das
+                        # Abbild kann die Punkte nicht kennen; die Pipeline
+                        # waehlt sie.
+                        - call: [io.mkdir_all, "${root_dir}${dest}"]
+                        - decl: [opts, string, "\"rbind\", \"ro\""]
+                        - if:
+                            condition: { '&&': [{ eq: [mode, "rw"] }, { eq: [fix_ro, 0] }] }
+                            then: [{ set: [opts, "\"rbind\""] }]
+                        - set: [out, "${out}    { \"destination\": \"${dest}\", \"type\": \"\", \"source\": \"${where}\", \"options\": [ ${opts} ] },\n"]
+            - return: out
+
+      # rootfs_of: wo liegt die Wurzel dieses Containers?  Der Push schneidet
+      # sie (aiml spec/62 §18) — ohne diesen Weg wuesste der Wirt nicht, WAS er
+      # ablegen soll.
+      - def:
+          name: rootfs_of
+          access: public
+          static_off: ["str_cmp"]
+          args: [[agent_id, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, <.running.len] }
+                body:
+                  - decl: [one, RtLaunch, { at: [<.running, idx] }]
+                  - set: [idx, { +: [idx, 1] }]
+                  - if:
+                      condition: { eq: [one.agent_id, agent_id] }
+                      then:
+                        - if: { condition: { eq: [one.bundle.len, 0] }, then: [{ return: "" }] }
+                        - return: "${one.bundle}/rootfs"
+            - return: ""
+
+      # image_of: in welchem Abbild laeuft dieser Container?
+      - def:
+          name: image_of
+          access: public
+          static_off: ["str_cmp"]
+          args: [[agent_id, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, <.running.len] }
+                body:
+                  - decl: [one, RtLaunch, { at: [<.running, idx] }]
+                  - set: [idx, { +: [idx, 1] }]
+                  - if: { condition: { eq: [one.agent_id, agent_id] }, then: [{ return: one.image }] }
+            - return: ""
+
+      # ids_now: die Kennungen der laufenden Container.
+      #
+      # Wer entscheidet, ob einer ueberfluessig ist, braucht den ZUSTAND DES
+      # CLUSTERS (wartet etwas? laeuft etwas?) — den kennt der Wirt, nicht der
+      # Starter.  Also gibt der Starter die Namen heraus und raeumt auf Zuruf
+      # einzeln ab, statt selbst zu raten (vorher: `reap_idle` raeumte jeden
+      # Container ab, sobald nichts mehr WARTETE — auch den, der gerade lief).
+      - def:
+          name: ids_now
+          access: public
+          static_off: ["str_cmp"]
+          return: { type: list<string>, lifetime: producer }
+          body:
+            - decl: [out, list<string>]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, <.running.len] }
+                body:
+                  - decl: [one, RtLaunch, { at: [<.running, idx] }]
+                  - call: [out.push, one.agent_id]
+                  - set: [idx, { +: [idx, 1] }]
+            - return: out
+
+      # reap_if_idle: diesen einen Container abraeumen, WENN er die Schonfrist
+      # hinter sich hat.  Die Frist ist noetig, weil ein frisch gestarteter
+      # Agent ein paar Sekunden braucht, bis er sich anmeldet — ohne sie raeumte
+      # man ihn ab, bevor er zum Zug kommt.  Ob er etwas zu tun hat, entscheidet
+      # der Aufrufer.
+      - def:
+          name: reap_if_idle
+          access: public
+          static_off: ["str_cmp"]
+          args: [[store, ref<AgentTokenStore>], [agent_id, string], [now_ms, i64], [idle_ms, i64]]
+          return: i32
+          body:
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, <.running.len] }
+                body:
+                  - decl: [one, RtLaunch, { at: [<.running, idx] }]
+                  - set: [idx, { +: [idx, 1] }]
+                  - if:
+                      condition: { '&&': [{ eq: [one.agent_id, agent_id] },
+                                          { gt: [{ -: [now_ms, one.started_ms] }, idle_ms] }] }
+                      then:
+                        - call: [log.info, "[rt_launch] ${agent_id} hat nichts zu tun — wird abgeraeumt"]
+                        - return: { call: [<.reap, store, agent_id] }
+            - return: 0
+
+      - def:
+          name: live_count
+          access: public
+          return: i32
+          body: [{ return: <.running.len }]

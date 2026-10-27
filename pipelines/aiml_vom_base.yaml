@@ -1,0 +1,122 @@
+# aiml bauen — vom nackten Ubuntu-Base an, jede Stufe sichtbar.
+#
+# Die WURZEL des Containers ist das Base-Image (deploy/rt_image, gebaut von
+# tools/make_agent_image.sh aus ubuntu-base).  Sie gehoert diesem Lauf: was eine
+# Stufe installiert, findet die naechste vor.  Darum braucht hier niemand ein
+# chroot — der Container IST die Umgebung (doc/spec/110 F110-61).
+#
+# Die Quellen kommen aus /src (lokale Spiegel, COSMOS_RT_SRC).  Fuer GitHub
+# genuegt es, die beiden `file://`-Adressen gegen `https://github.com/...` zu
+# tauschen und eine Zugangsdatei zu hinterlegen (COSMOS_RT_GIT_CRED).
+- pipeline:
+    name: aiml_vom_base
+    # WORIN gearbeitet wird (aiml spec/62 §18, F62-66/67): ein NAME, kein Pfad —
+    # den Ort kennt der Wirt (COSMOS_RT_IMAGES, doc/spec/110 F110-72).
+    #
+    # Frueher stand hier `runs_on: container` (heute `agent:`).  Das war eine Verzerrung: ein
+    # Etikett sagt, WO ein Knoten steht, und ist nie Schluesselmaterial (F62-49)
+    # — die Umgebung ist es sehr wohl (F62-67, doc/spec/110 §110.29).
+    image: ubuntu-base
+    # Wohin das Ergebnis geht (aiml spec/62 §18, F62-122): ein OCI-Layout auf
+    # Platte.  `from:` nennt die STUFE, deren Dateisystem abgelegt wird — ein
+    # Abbild ist ein Dateisystem, und das gehoert der Stufe (F62-71).
+    # Geschnitten wird NACH `aiml_ablegen`, nicht nach `aiml_bauen`: der Bau
+    # liegt unter /ws, und /ws ist eine EINHAENGUNG (doc/spec/110 F110-104/111)
+    # — sie gehoert dem Lauf, nicht dem Abbild, und erscheint im Schnitt
+    # darum zu Recht nicht.  Erst `aiml_ablegen` legt den fertigen Compiler in
+    # die WURZEL; damit traegt ihn die Schicht, und das Abbild hat ihn.
+    push:
+      - { from: aiml_ablegen, to: "oci:deploy/oci/aiml-builder", tag: "nightly" }
+    steps:
+
+      - stage:
+          name: basis_zeigen
+          timeout: 120000
+          run: "set -e; echo '== Wurzel =='; cat /etc/os-release | head -2; echo '== Dateisystem =='; mount | grep -E ' / | /ws | /work ' | head -3; df -h / /ws | tail -2; echo '== Pakete vorher =='; (dpkg -l 2>/dev/null | grep -c '^ii' || true); echo '== Platz =='; df -h / | tail -1; id"
+
+      - stage:
+          name: apt_installieren
+          timeout: 1800000
+          # Die Ausgabe wird GEZEIGT, nicht weggeschrieben.  Vorher ging alles
+          # nach /tmp/apt.log, und die Stufe stand 14 Minuten stumm da — wer
+          # zusieht, kann dann nicht unterscheiden zwischen „arbeitet" und
+          # „haengt" (gemeldet 22.10.2026).  `-o Dpkg::Use-Pty=0` nimmt die
+          # Fortschrittsbalken raus, die ohne Terminal nur Steuerzeichen sind.
+          run: "set -e; export DEBIAN_FRONTEND=noninteractive; apt-get update; apt-get install -y --no-install-recommends -o Dpkg::Use-Pty=0 ca-certificates git build-essential cmake ninja-build python3 python3-venv python3-pip pkg-config zlib1g-dev libssl-dev libyaml-cpp-dev llvm-18-dev libclang-18-dev libbrotli-dev libzstd-dev liblz4-dev libzip-dev libassimp-dev libgl-dev libglew-dev libglfw3-dev libglu1-mesa-dev libvulkan-dev libglm-dev libpng-dev libwebp-dev libstb-dev libopenblas-dev libxtst-dev libcap-dev libseccomp-dev libssh-dev; echo '== installiert =='; git --version; gcc --version | head -1; python3 --version; llvm-config-18 --version; echo '== Pakete nachher =='; (dpkg -l 2>/dev/null | grep -c '^ii' || true)"
+
+      - stage:
+          name: venv_bauen
+          timeout: 900000
+          run: "set -e; python3 -m venv /opt/venv; /opt/venv/bin/pip install --quiet --upgrade pip wheel; /opt/venv/bin/python --version; /opt/venv/bin/pip --version"
+
+      - stage:
+          name: exodus_klonen
+          timeout: 900000
+          run: "set -e; rm -rf /ws/exodus; git clone --depth 1 file:///src/exodus /ws/exodus; git -C /ws/exodus log -1 --format='exodus %h %s'"
+
+      - stage:
+          name: exodus_installieren
+          timeout: 900000
+          # NICHT editierbar (`-e`): ein editierbarer Einbau legt nur einen
+          # Verweis auf /ws/exodus in die venv — und /ws ist eine Einhaengung
+          # (doc/spec/110 F110-111).  Wer diesen Stapel spaeter erbt, haette
+          # eine venv mit einem Verweis ins Leere.  Fest eingebaut liegt das
+          # Paket in /opt/venv und damit IN der Schicht.
+          run: "set -e; cd /ws/exodus; /opt/venv/bin/pip install --quiet .; /opt/venv/bin/exodus --help | head -5"
+
+      - stage:
+          name: aiml_klonen
+          timeout: 1800000
+          run: "set -e; rm -rf /ws/aiml; git clone file:///src/test/aiml /ws/aiml; git -C /ws/aiml log -1 --format='aiml %h %s'; du -sh /ws/aiml"
+
+      # aiml deklariert seine Systempakete SELBST (exodus.json, apt_packages)
+      # und sucht ihre Header unter `__exodus_cache/apt/<paket>/<arch>/<version>/payload`.
+      # In einem frischen Klon gibt es den Cache nicht — und `exodus deps install`
+      # ist bis heute ein Stub (tut nichts, meldet nichts).
+      #
+      # Hier liegen die Pakete aber bereits im Container: die apt-Stufe hat sie
+      # installiert.  Also ZEIGT der Cache auf das System — ein Symlink je
+      # Paket, `payload -> /`.  Das ist ehrlicher als eine Kopie: es gibt nur
+      # EINE Fassung dieser Dateien, und sie liegt in der Wurzel.
+      - stage:
+          name: abhaengigkeiten_verknuepfen
+          timeout: 600000
+          run: "set -e; cd /ws/aiml; python3 -c \"import json,os;c=json.load(open('exodus.json'));n=0\nfor p in c.get('apt_packages',[]):\n    d=os.path.join('__exodus_cache','apt',p['name'],p.get('arch','amd64'),p['version']);os.makedirs(d,exist_ok=True);l=os.path.join(d,'payload')\n    if not os.path.islink(l): os.symlink('/',l); n+=1\nprint('verknuepft:',n,'von',len(c.get('apt_packages',[])))\"; ls __exodus_cache/apt | head -5; ls -l __exodus_cache/apt/llvm-18-dev/amd64/*/payload"
+
+      # Gebaut wird ALLES, geurteilt wird am ERGEBNIS: drei Konfigurationen in
+      # aiml sind hier nicht baubar und sagen das auch — zwei Repro-Faelle mit
+      # fest eingetragenem Host-Pfad, und der wasm-Lauf braucht emsdk (eine
+      # git-Abhaengigkeit, die niemand wiederherstellt).  Ein Bau, der daran
+      # scheitert, verschweigt, dass Compiler und Bibliothek fertig sind.
+      - stage:
+          name: aiml_bauen
+          # Was diese Stufe braucht (aiml spec/62 §18.2, F62-126).  Geprueft
+          # VOR dem ersten Befehl, einmal, und die Meldung nennt alles
+          # Fehlende — statt nach fuenf Minuten eine fehlende Header-Datei.
+          requires: [git, "gcc>=13", python3, llvm-config-18]
+          timeout: 5400000
+          # Auch hier: mitlesen statt warten.  `tee` behaelt das volle
+          # Protokoll fuer die Auswertung unten, `grep` laesst waehrenddessen
+          # sehen, WAS gerade uebersetzt wird — 40 Minuten ohne eine Zeile sind
+          # von einem Haenger nicht zu unterscheiden.
+          run: "set -e; cd /ws/aiml; export PATH=/opt/venv/bin:$PATH AIML_MEM_V3=1; exodus build --all 2>&1 | tee /ws/build.log | grep --line-buffered -E 'compiling |linking |ERROR|error:' || true; echo '== nicht baubar (mit Grund) =='; grep -E '_run_config.*ERROR' /ws/build.log | sed -E 's/.*for //; s/: \\[Errno 2\\] No such file or directory: /  → fehlt: /' | head -5; echo '== gebaut =='; grep -E 'linking' /ws/build.log | sed -E 's/.*linking //' | tr '\\n' ' '; echo; ls -lh out/aiml/aiml out/libaiml/libaiml.so"
+
+      # Den fertigen Compiler in die WURZEL legen — nur so reist er im Abbild
+      # mit (doc/spec/110 F110-112).  Zwei Dateien reichen: das Binary und die
+      # Laufzeitbibliothek; fremde Projekte verlangen genau diese beiden Pfade
+      # (51× bzw. 48× in den exodus-*.json von 9rooms).
+      #
+      # Der SYMLINK auf den Wirtspfad ist kein Schoenheitsfehler, sondern die
+      # ehrliche Haelfte: Projekte tragen den Pfad ihres Autors fest in ihren
+      # Konfigurationen, und ein Abbild, das sie bauen soll, muss ihn anbieten.
+      # Die Alternative waere, in jeder fremden Datei herumzuschreiben — das
+      # waere die Aenderung, die man spaeter nicht mehr findet.
+      - stage:
+          name: aiml_ablegen
+          timeout: 600000
+          run: "set -e; install -D /ws/aiml/out/aiml/aiml /opt/aiml/out/aiml/aiml; install -D /ws/aiml/out/libaiml/libaiml.so /opt/aiml/out/libaiml/libaiml.so; echo '/opt/aiml/out/libaiml' > /etc/ld.so.conf.d/aiml.conf; ldconfig; HOSTDIR=/media/nikolai/95a208ef-ffa2-478b-abdd-ff394baa6a76/projects/python/test; mkdir -p $HOSTDIR; ln -sfn /opt/aiml $HOSTDIR/aiml; ls -lh /opt/aiml/out/aiml/aiml /opt/aiml/out/libaiml/libaiml.so; /opt/aiml/out/aiml/aiml --version 2>&1 | head -2 || true"
+
+      - stage:
+          name: nachweis
+          timeout: 300000
+          run: "set -e; cd /ws/aiml; printf -- '- def:\\n    name: main\\n    return: i32\\n    body:\\n      - print: [\"hallo aus dem frisch gebauten aiml\"]\\n      - return: 0\\n' > /tmp/hallo.aiml; ./out/aiml/aiml /tmp/hallo.aiml"

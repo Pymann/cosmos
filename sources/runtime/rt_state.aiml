@@ -1,0 +1,169 @@
+# rt_state — der Lebenszyklus eines Containers (doc/spec/110 §110.1).
+#
+# Die OCI-Spec kennt vier Zustände: creating → created → running → stopped.
+# Sie sind kein Beiwerk: `start` auf einem beendeten Container, zweimal
+# `create` unter derselben Kennung oder `delete` auf einem laufenden sind die
+# Fälle, in denen eine Runtime Waisen hinterlässt — also Prozesse mit Rechten,
+# die niemand mehr abräumt.  Darum ist der Automat hier eine eigene, ohne root
+# prüfbare Einheit, und jede verbotene Kante hat einen Test.
+#
+# `state.json` wird in OCI-Form geschrieben (die Felder, die `runc state`
+# ausgibt) — NICHT im aiml-Serialisierungsformat: die Datei ist eine
+# Schnittstelle nach außen, kein internes Abbild.
+
+- import: "sources/runtime/rt_model_config.aiml"
+
+- model:
+    name: RtState
+    fields:
+      - [ociVersion, string]
+      # Heißt draußen `id`.  aiml verbietet Feldnamen unter drei Zeichen; der
+      # Alias überbrückt das in BEIDE Richtungen (aiml spec/15, seit 18.10.2026).
+      - [ident,      string, "", { alias: "id" }]
+      - [status,     string]   # creating | created | running | stopped
+      - [pid,        i32]      # 0 solange kein Prozess lebt
+      - [bundle,     string]
+      - [started_ms, i64]      # cosmos-eigen, siehe to_json
+
+- class:
+    name: RtLifecycle
+    members:
+      - [here, RtState]
+    methods:
+      # begin: die Kennung belegen.  Ab hier existiert der Container, auch
+      # wenn noch kein Prozess läuft — genau das bedeutet `creating`.
+      - def:
+          name: begin
+          access: public
+          static_off: ["str_cmp"]
+          args: [[con_id, string], [bundle_at, string]]
+          return: RtVerdict
+          body:
+            - decl: [out, RtVerdict]
+            - set: [out.holds, 0]
+            - if:
+                condition: { gt: [<.here.ident.len, 0] }
+                then: [{ set: [out.field, "id"] }, { set: [out.detail, "Kennung '${<.here.ident}' ist schon belegt (${<.here.status})"] }, { return: out }]
+            - if:
+                condition: { eq: [con_id.len, 0] }
+                then: [{ set: [out.field, "id"] }, { set: [out.detail, "leere Kennung"] }, { return: out }]
+            - set: [<.here.ociVersion, "1.0.2"]
+            - set: [<.here.ident, con_id]
+            - set: [<.here.bundle, bundle_at]
+            - set: [<.here.status, "creating"]
+            - set: [<.here.pid, 0]
+            - set: [out.holds, 1]
+            - return: out
+
+      # ready: Einrichtung fertig, der Prozess wartet auf `start`.
+      - def:
+          name: ready
+          access: public
+          static_off: ["str_cmp"]
+          args: [[pid, i32]]
+          return: RtVerdict
+          body:
+            - return: { call: [<.step_to, "created", "creating", pid] }
+
+      - def:
+          name: start
+          access: public
+          static_off: ["str_cmp"]
+          return: RtVerdict
+          body:
+            - return: { call: [<.step_to, "running", "created", <.here.pid] }
+
+      # exited: der Prozess ist weg.  Der Zustand ist damit endgültig — ein
+      # beendeter Container wird nicht wieder lebendig, er wird gelöscht und
+      # neu erzeugt.
+      - def:
+          name: exited
+          access: public
+          static_off: ["str_cmp"]
+          return: RtVerdict
+          body:
+            - decl: [out, RtVerdict]
+            - set: [out.holds, 0]
+            - if:
+                condition: { '&&': [{ neq: [<.here.status, "running"] }, { neq: [<.here.status, "created"] }] }
+                then:
+                  - set: [out.field, "status"]
+                  - set: [out.detail, "'${<.here.status}' kann nicht enden"]
+                  - return: out
+            - set: [<.here.status, "stopped"]
+            - set: [<.here.pid, 0]
+            - set: [out.holds, 1]
+            - return: out
+
+      # step_to: eine Kante, die ihren Ausgangszustand verlangt.  Eine
+      # gemeinsame Stelle statt dreimal derselben Prüfung — und damit eine
+      # Stelle, an der eine verbotene Kante auffällt.
+      - def:
+          name: step_to
+          static_off: ["str_cmp"]
+          args: [[want, string], [from, string], [pid, i32]]
+          return: RtVerdict
+          body:
+            - decl: [out, RtVerdict]
+            - set: [out.holds, 0]
+            - if:
+                condition: { neq: [<.here.status, from] }
+                then:
+                  - set: [out.field, "status"]
+                  - set: [out.detail, "'${want}' verlangt '${from}', ist aber '${<.here.status}'"]
+                  - return: out
+            - set: [<.here.status, want]
+            - set: [<.here.pid, pid]
+            - set: [out.holds, 1]
+            - return: out
+
+      # removable: Löschen ist nur erlaubt, wenn nichts mehr läuft.  Der
+      # Rückgabewert nennt den Grund, damit `delete --force` eine bewusste
+      # Entscheidung bleibt und kein Reflex.
+      - def:
+          name: removable
+          access: public
+          static_off: ["str_cmp"]
+          return: RtVerdict
+          body:
+            - decl: [out, RtVerdict]
+            - set: [out.holds, 0]
+            - if:
+                condition: { eq: [<.here.status, "running"] }
+                then: [{ set: [out.field, "status"] }, { set: [out.detail, "läuft noch (pid ${<.here.pid})"] }, { return: out }]
+            - if:
+                condition: { eq: [<.here.ident.len, 0] }
+                then: [{ set: [out.field, "id"] }, { set: [out.detail, "nichts zu löschen"] }, { return: out }]
+            - set: [out.holds, 1]
+            - return: out
+
+      # to_json: die Form, die `runc state` ausgibt — von Hand gebaut, weil
+      # `sys.serialize` sein eigenes `__type` mitschreibt und diese Datei eine
+      # SCHNITTSTELLE ist.  `started_ms` reist als Annotation mit, damit das
+      # Fremdformat nicht verletzt wird.
+      - def:
+          name: to_json
+          access: public
+          static_off: ["str_cmp"]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [out, string, "{"]
+            - set: [out, '${out}"ociVersion":"${<.here.ociVersion}",']
+            - set: [out, '${out}"id":"${<.here.ident}",']
+            - set: [out, '${out}"status":"${<.here.status}",']
+            - set: [out, '${out}"pid":${<.here.pid},']
+            - set: [out, '${out}"bundle":"${<.here.bundle}",']
+            - set: [out, '${out}"annotations":{"org.cosmos.started_ms":"${<.here.started_ms}"}']
+            - return: "${out}}"
+
+      - def:
+          name: status
+          access: public
+          return: { type: string, lifetime: producer }
+          body: [{ return: "${<.here.status}" }]
+
+      - def:
+          name: pid_now
+          access: public
+          return: i32
+          body: [{ return: <.here.pid }]

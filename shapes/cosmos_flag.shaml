@@ -1,0 +1,32 @@
+# Ein Haltepunkt als Flagge (doc/spec/107 §107.1d).
+#
+# Sie steht am ROHR, nicht an der Kugel: ein Lauf haelt am Stufen-RAND (aiml
+# spec/62 F62-53), und der Rand ist das Rohr — eine Flagge an der Kugel liesze
+# offen, ob davor oder danach angehalten wird.
+#
+# Was die Formel nicht kann und darum hier steht: ein TUCH.  Ein Quader weht
+# nicht; eine unterteilte Flaeche schon, weil der Shader ihre Punkte entlang
+# der Bahn auslenken kann (`subdivisions`).  Der Mast koennte ein Grundzylinder
+# sein — er gehoert aber ins selbe Modell, sonst steht das Tuch allein im Raum,
+# wenn jemand nur ein Teil laedt.
+#
+# EINHEITSGROSS: Mast 1 hoch, Fuss im Ursprung, Tuch nach +X.
+shapeml: 2
+materials:
+  mast: { base_color: [0.62, 0.58, 0.70, 1], metallic: 0.6, roughness: 0.35 }
+  tuch: { base_color: [0.71, 0.55, 0.91, 1], metallic: 0.0, roughness: 0.75 }
+model:
+  operation: group
+  children:
+    - { type: cylinder, radius: 0.028, height: 1.0, segments: 10, position: [0, 0.5, 0], material: mast }
+    # Die Spitze, damit der Mast oben nicht abgeschnitten wirkt.
+    - { type: sphere, radius: 0.045, segments: 10, rings: 6, position: [0, 1.0, 0], material: mast }
+    # Das Tuch: eine Bahn vom Mast nach +X, fein genug unterteilt, dass eine
+    # Welle darueber laufen kann.  u laeuft vom Mast (0) zur Spitze (1) — genau
+    # daran haengt die Auslenkung im Shader.
+    - type: surface
+      material: tuch
+      subdivisions: 5
+      points: [[0.0, 0.99, 0.0], [0.78, 0.93, 0.0], [0.78, 0.58, 0.0], [0.0, 0.52, 0.0]]
+      uv:     [[0.0, 0.0],       [1.0, 0.0],        [1.0, 1.0],        [0.0, 1.0]]
+output: { file: cosmos_flag.glb }

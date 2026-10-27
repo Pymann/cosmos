@@ -1,0 +1,33 @@
+# Was der Agent ueber einen laufenden Schritt festhaelt, damit er ihn nach
+# einem eigenen Neustart (oder dem des RECHNERS) wiederfindet.
+#
+# Je Schritt EIN Datensatz in einem KV, nicht ein gemeinsamer Merkzettel:
+#   • atomar — ein KV schreibt ueber ein WAL; eine halb geschriebene Notiz
+#     (io.write_file mitten im Absturz) galt als verloren und liess den Schritt
+#     ein zweites Mal laufen;
+#   • mehrzahlfaehig — mehrere Schritte gleichzeitig brauchen mehrere Eintraege
+#     (doc/spec/103 §103.8 nennt die Parallelitaet als eigene Scheibe; die
+#     Ablage ist jetzt schon dafuer gebaut, nur die Obergrenze fehlt noch).
+- model:
+    name: AgentStepNote
+    fields:
+      - [run_id,     string]
+      - [stage_id,   string]
+      - [step_dir,   string]
+      - [pid,        i64]
+      - [started_ms, i64]
+      # Fertig, aber noch nicht bestaetigt (doc/spec/103 F103-16).  `pid == 0`
+      # heisst: vorgemerkt, aber noch nicht gestartet (F103-15) — beim Neustart
+      # ist dann UNKLAR, ob er lief.
+      - [done,       i32]
+      - [exit_code,  i32]
+      # Welcher Versuch (doc/spec/101 F101-7).  Gehoert in die Ablage, weil die
+      # nachgeholte Meldung nach einem Neustart sonst ohne Nummer kaeme — und
+      # der Server sie dann nicht von einer alten unterscheiden koennte.
+      - [attempt,    i32]
+      # Wieviel aus `out`/`err` bereits an den Server geschickt wurde
+      # (doc/spec/103 §103.4e).  In der ABLAGE, nicht nur im Speicher: nach
+      # einem Agenten-Neustart geht es hier weiter, ohne doppelte Zeilen und
+      # ohne Loch.
+      - [sent_out,   i64]
+      - [sent_err,   i64]

@@ -1,0 +1,157 @@
+# RPCs der Ausfuehrungskette (doc/spec/103 §103.2) — Agent -> Server.
+#
+# Der Agent ZIEHT (F103-2).  Alle drei pruefen zuerst, ob der Anrufer wirklich
+# der Agent ist, der an dieser Verbindung haengt: ein Agent darf keine Schritte
+# unter fremdem Namen holen oder melden.
+
+- import: "sources/shared/claim_who.aiml"
+- import: "sources/models/step_dispatch.aiml"
+- import: "sources/models/step_report.aiml"
+
+- groupmethods:
+    group: CosmosRuntime
+    instances:
+      # ── claim_step: gib mir Arbeit ───────────────────────────────────────
+      - instance: claim_step
+        methods:
+          - def:
+              name: run
+              static_off: ["str_cmp"]
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, StepClaimReq]
+                - decl: [out, StepAssignment]
+                - set: [out.found, 0]
+                - if:
+                    condition: { neq: [{ call: [session.decode_rpc, rpc, req] }, 0] }
+                    then:
+                      - call: [session.reply_rpc, rpc, "set_result", 0, out]
+                      - return: []
+                - decl: [bound, string, { call: [<.agents.agent_of_peer, rpc.peer_id] }]
+                - if:
+                    condition: { neq: [bound, req.agent_id] }
+                    then:
+                      - call: [log.warn, "[dispatch] claim_step unter fremdem Namen: ${req.agent_id}"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, out]
+                      - return: []
+                - decl: [nowm, i64, { call: [time.now] }]
+                # Die Frist kommt aus EINER Quelle (cluster.lease_ms).
+                - decl: [who, ClaimWho]
+                - set: [who.agent_id, req.agent_id]
+                - set: [who.labels, req.labels]
+                - set: [who.image, req.image]
+                - set: [out, { call: [<.cluster.claim_for, who, nowm] }]
+                - if:
+                    condition: { eq: [out.found, 1] }
+                    then:
+                      - call: [<.agents.set_current_run, req.agent_id, out.run_id]
+                      # F103-19: das Protokoll entsteht beim ZUTEILEN, nicht
+                      # beim ersten Byte — und eine Neuzuteilung (Versuch 2,
+                      # F101-7) beginnt es neu: zu sehen ist der Versuch, der
+                      # zaehlt.  Bezeichner ist die STUFEN-Kennung, damit zwei
+                      # Lanes sich nicht in eine Datei schreiben.
+                      - call: [<.runs.begin, out.stage_id, req.agent_id, out.command, ""]
+                      - call: [log.info, "[dispatch] ${out.stage_name} -> ${req.agent_id}"]
+                - call: [session.reply_rpc, rpc, "set_result", 0, out]
+
+      # ── report_step: das ist daraus geworden ─────────────────────────────
+      - instance: report_step
+        methods:
+          - def:
+              name: run
+              static_off: ["str_cmp"]
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, StepReportReq]
+                - decl: [ack, StepAck]
+                - set: [ack.accepted, 0]
+                - if:
+                    condition: { neq: [{ call: [session.decode_rpc, rpc, req] }, 0] }
+                    then:
+                      - set: [ack.reason, "decode failed"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, ack]
+                      - return: []
+                - decl: [bound, string, { call: [<.agents.agent_of_peer, rpc.peer_id] }]
+                - if:
+                    condition: { neq: [bound, req.agent_id] }
+                    then:
+                      - set: [ack.reason, "peer is not this agent"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, ack]
+                      - return: []
+                - decl: [nowm, i64, { call: [time.now] }]
+                - decl: [took, i32, { call: [<.cluster.report_for, req, nowm] }]
+                # Protokoll schliessen (F103-19) — auch bei einem verspaeteten
+                # Bericht: die Datei gehoert der Stufe, nicht der Annahme.
+                - call: [<.runs.finish, req.stage_id, req.exit_code]
+                - set: [ack.accepted, took]
+                # F103-4: abgelehnt heisst "Lehen war abgelaufen" — der Agent
+                # verwirft dann sein Ergebnis, statt es zu wiederholen.
+                - if: { condition: { eq: [took, 0] }, then: [{ set: [ack.reason, "Lehen abgelaufen oder fremder Schritt"] }] }
+                - call: [<.agents.set_current_run, req.agent_id, ""]
+                - call: [session.reply_rpc, rpc, "set_result", 0, ack]
+
+      # ── release_step: ich habe ihn verloren, nimm ihn zurueck ────────────
+      # Nach einem Neustart des Agenten oder seines RECHNERS: er liest seine
+      # Schritt-Ablage, findet die Prozesse nicht mehr und sagt es.  Ohne das
+      # haengt der Lauf bis zum Ablauf des Lehens — eine halbe Minute, in der
+      # die Antwort schon bekannt ist (User 2026-10-15).
+      - instance: release_step
+        methods:
+          - def:
+              name: run
+              static_off: ["str_cmp"]
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, StepReportReq]
+                - decl: [ack, StepAck]
+                - set: [ack.accepted, 0]
+                - if:
+                    condition: { neq: [{ call: [session.decode_rpc, rpc, req] }, 0] }
+                    then:
+                      - call: [session.reply_rpc, rpc, "set_result", 0, ack]
+                      - return: []
+                - decl: [bound, string, { call: [<.agents.agent_of_peer, rpc.peer_id] }]
+                - if:
+                    condition: { neq: [bound, req.agent_id] }
+                    then:
+                      - set: [ack.reason, "peer is not this agent"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, ack]
+                      - return: []
+                - decl: [gave, i32, { call: [<.cluster.release_for, req.run_id, req.stage_id, req.agent_id, req.attempt] }]
+                - set: [ack.accepted, gave]
+                - if:
+                    condition: { eq: [gave, 1] }
+                    then:
+                      - call: [log.warn, "[dispatch] ${req.agent_id} gab ${req.stage_id} zurueck: ${req.output} — wird neu zugeteilt"]
+                      - call: [<.agents.set_current_run, req.agent_id, ""]
+                    else: [{ set: [ack.reason, "nicht sein Schritt oder schon abgeschlossen"] }]
+                - call: [session.reply_rpc, rpc, "set_result", 0, ack]
+
+      # ── renew_lease: ich lebe noch und arbeite daran ─────────────────────
+      - instance: renew_lease
+        methods:
+          - def:
+              name: run
+              static_off: ["str_cmp"]
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, StepReportReq]
+                - decl: [ack, StepAck]
+                - set: [ack.accepted, 0]
+                - if:
+                    condition: { neq: [{ call: [session.decode_rpc, rpc, req] }, 0] }
+                    then:
+                      - call: [session.reply_rpc, rpc, "set_result", 0, ack]
+                      - return: []
+                - decl: [bound, string, { call: [<.agents.agent_of_peer, rpc.peer_id] }]
+                - if:
+                    condition: { neq: [bound, req.agent_id] }
+                    then:
+                      - set: [ack.reason, "peer is not this agent"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, ack]
+                      - return: []
+                - decl: [nowm, i64, { call: [time.now] }]
+                - decl: [until, i64, { call: [<.cluster.renew_for, req.run_id, req.stage_id, req.agent_id, nowm, req.attempt] }]
+                - set: [ack.lease_until, until]
+                - if: { condition: { gt: [until, 0] }, then: [{ set: [ack.accepted, 1] }] }
+                - call: [session.reply_rpc, rpc, "set_result", 0, ack]

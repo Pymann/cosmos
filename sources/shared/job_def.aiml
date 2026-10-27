@@ -1,0 +1,31 @@
+# JobDef — die dauerhafte Sache (doc/spec/106 §106.1).
+#
+# Ein Job traegt Name und Quelle und ueberlebt jeden Lauf; ein Lauf gehoert
+# immer zu einem Job und traegt eine Nummer, die nie neu vergeben wird.
+#
+# Die `last_*`-Felder sind ABGELEITET und werden beim Melden eines Laufs
+# fortgeschrieben.  Sie stehen hier, weil die Uebersicht sonst fuer jede Zeile
+# die ganze Lauf-Geschichte lesen muesste — eine Dashboard-Zeile darf keinen
+# Scan kosten (F106-1).
+
+- model:
+    name: JobDef
+    fields:
+      - [job_id,      string]
+      - [name,        string]
+      - [source,      string]   # das Pipeline-Dokument (spec/62)
+      - [enabled,     i32]      # F106-6: abschalten statt loeschen
+      - [created_ms,  i64]
+      # F106-2: die Nummer vergibt der Server, monoton.
+      - [next_build,  i32]
+      - [last_run_id, string]
+      - [last_status, string]   # "" = noch nie gelaufen
+      - [last_ms,     i64]      # Dauer des letzten Laufs
+      - [runs_total,  i32]
+      - [runs_failed, i32]
+      # doc/spec/106 G2: der Auslöser.  INTERVALL, nicht Cron — der Wert ist
+      # der Auslöser, nicht die Syntax; Cron-Ausdruecke sind die naechste
+      # Scheibe und aendern nur, WIE die Faelligkeit ausgerechnet wird.
+      # 0 = laeuft nur von Hand.
+      - [interval_s,       i32]
+      - [last_started_ms,  i64]

@@ -1,0 +1,19 @@
+# Kleine Probe fuer das Anhalten (doc/spec/101 §101.7): drei Stufen, jede
+# langsam genug, um zuzusehen.  Mehr braucht der Nachweis nicht — gezeigt wird
+# die GRENZE zwischen Stufen, nicht was in ihnen passiert.
+- pipeline:
+    name: schritt_probe
+    image: ubuntu-base
+    steps:
+      - stage:
+          name: eins
+          timeout: 120000
+          run: "echo 'Stufe eins faengt an'; sleep 4; echo 'Stufe eins fertig'"
+      - stage:
+          name: zwei
+          timeout: 120000
+          run: "echo 'Stufe zwei faengt an'; sleep 4; echo 'Stufe zwei fertig'"
+      - stage:
+          name: drei
+          timeout: 120000
+          run: "echo 'Stufe drei faengt an'; sleep 4; echo 'Stufe drei fertig'"

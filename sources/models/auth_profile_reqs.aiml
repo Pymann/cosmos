@@ -1,0 +1,26 @@
+# Profil-RPC-Models — Account-Einstellungen eines eingeloggten Spielers.
+# auth_reqs.aiml ist bereits am 3-Model-Cap (spec/49 §14) → eigene Datei.
+#
+# Static-Check (spec/49 §14): 3 models — OK.
+
+- model:
+    name: SetNicknameReq
+    fields:
+      - [token,    string]
+      - [new_nick, string]
+
+# ChangePasswordReq — altes Passwort verifizieren, neues setzen (pbkdf2).
+- model:
+    name: ChangePasswordReq
+    fields:
+      - [token,        string]
+      - [old_password, string]
+      - [new_password, string]
+
+# ChangeEmailReq — Email umschlüsseln (users+tokens); Passwort bestätigt die Aktion.
+- model:
+    name: ChangeEmailReq
+    fields:
+      - [token,     string]
+      - [new_email, string]
+      - [password,  string]

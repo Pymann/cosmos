@@ -1,0 +1,388 @@
+# JobParamsScreen (doc/spec/106 §106.6a) — der Reiter „Parameter" eines Jobs.
+#
+# Gelesen wird aus EINEM Schnappschuss (doc/spec/104 F104-1): die Parameter
+# reisen mit den Jobs mit (`ClusterView.job_params`).  Geschrieben wird per
+# RPC, und zwar die GANZE Liste (F106-16) — so gibt es keinen Zustand, in dem
+# die Haelfte einer Aenderung gilt.
+#
+# Die Zeilen leben in diesem Bildschirm, nicht in der Szene: wer tippt, soll
+# nicht bei jedem Schnappschuss seinen halb geschriebenen Namen verlieren.
+# Darum wird aus dem Schnappschuss nur geladen, wenn sich der JOB wechselt
+# oder der Server bestaetigt hat.
+- import: "sources/client/prefabs.aiml"
+- import: "sources/client/net/pipeline_state.aiml"
+- import: "sources/client/net/live_state.aiml"
+- import: "sources/shared/job_params.aiml"
+- import: "sources/shared/job_policy.aiml"
+
+- class:
+    name: JobParamsScreen
+    members:
+      - [pipelines,   ref<PipelineState>]
+      - [live,        ref<LiveState>]
+      - [initialized, i32]
+      - [scene,       prefab_instance]
+      - [is_visible,  i32]
+      - [job_id,      string]
+      - [job_name,    string]
+      # Die Zeilen, wie sie gerade auf dem Schirm stehen (noch nicht
+      # gespeichert).  `row_keys` treibt den Container (spec/44_6 §5c).
+      - [rows,        list<ParamRow>]
+      - [row_keys,    list<string>]
+      # Fuer WELCHEN Job die Zeilen geladen wurden — ohne diese Notiz
+      # ueberschriebe der naechste Schnappschuss die Eingabe.
+      - [loaded_for,  string]
+      # doc/spec/101 §101.9: der Vorrang dieses Jobs, wie er auf dem Schirm steht.
+      - [priority,    i32]
+      # 1 = die Werte muessen noch in die Felder.  Der Container legt seine
+      # Zeilen erst beim ZEICHNEN an (container_sync laeuft im Rahmen), also
+      # gibt es im Rahmen des Ladens noch nichts zu beschreiben.  Danach wird
+      # NICHT mehr geschrieben: wer tippt, soll seinen Text behalten.
+      - [apply_vals,  i32]
+      # Wuensche, die der Wirt ausfuehrt (ein Bildschirm schickt keine RPCs).
+      - [want_runs,   i32]
+      - [want_src,    i32]
+      - [want_back,   i32]
+      - [want_start,  i32]
+    methods:
+      - def:
+          name: init
+          body:
+            - if: { condition: { eq: [<.initialized, 1] }, then: [{ return }] }
+            - set: [<.scene, { call: [engine.instantiate, "JobParamsScene"] }]
+            - call: [<.scene.set_pos, 0.0, 0.0]
+            - call: [<.scene.set_z, 0]
+            # `${` laesst sich nicht hinschreiben, ohne dass diese Datei es
+            # einsetzt — also zusammengesetzt.
+            - decl: [dollar, string, "$"]
+            - call: [<.scene.set_text, "prm_hint", "Im Quelltext lesbar als ${dollar}{prm.NAME} — in `run:`, `image:`, `requires:`.  Konstant, sobald der Lauf beginnt; eine Aenderung gilt ab dem NAECHSTEN Lauf."]
+            - set: [<.initialized, 1]
+            - set: [<.is_visible, 1]
+
+      - def:
+          name: set_visible
+          access: public
+          args: [[vis, i32]]
+          body:
+            - if: { condition: { eq: [<.initialized, 0] }, then: [{ call: [<.init] }] }
+            - set: [<.is_visible, vis]
+            - call: [<.scene.set_visible, vis]
+
+      # open_job: von aussen gesetzt, wie bei der Lauf-Ansicht.
+      - def:
+          name: open_job
+          access: public
+          static_off: ["str_cmp"]
+          args: [[jid, string], [jname, string]]
+          body:
+            - if: { condition: { eq: [<.initialized, 0] }, then: [{ call: [<.init] }] }
+            - set: [<.job_id, jid]
+            - set: [<.job_name, jname]
+            - call: [<.scene.set_text, "title_lbl", jname]
+            # Ein anderer Job heisst: neu laden.
+            - if:
+                condition: { neq: [jid, <.loaded_for] }
+                then:
+                  - set: [<.loaded_for, ""]
+                  - call: [<.scene.set_text, "prm_stat", ""]
+
+      - def:
+          name: selected_job
+          access: public
+          static_off: ["str_cmp"]
+          return: { type: string, lifetime: producer }
+          body:
+            - return: <.job_id
+
+      # ── die EINMAL abholbaren Wuensche ───────────────────────────────────
+      - def:
+          name: take_runs
+          access: public
+          return: i32
+          body:
+            - decl: [val, i32, <.want_runs]
+            - set: [<.want_runs, 0]
+            - return: val
+
+      - def:
+          name: take_src
+          access: public
+          return: i32
+          body:
+            - decl: [val, i32, <.want_src]
+            - set: [<.want_src, 0]
+            - return: val
+
+      - def:
+          name: take_back
+          access: public
+          return: i32
+          body:
+            - decl: [val, i32, <.want_back]
+            - set: [<.want_back, 0]
+            - return: val
+
+      - def:
+          name: take_start
+          access: public
+          return: i32
+          body:
+            - decl: [val, i32, <.want_start]
+            - set: [<.want_start, 0]
+            - return: val
+
+      # load_from: die Zeilen aus dem Schnappschuss uebernehmen — nur wenn fuer
+      # diesen Job noch nichts geladen ist (sonst gingen Eingaben verloren).
+      - def:
+          name: load_from
+          access: public
+          static_off: ["str_cmp"]
+          args: [[view, ref<ClusterView>]]
+          body:
+            - if: { condition: { eq: [<.job_id.len, 0] }, then: [{ return }] }
+            - if: { condition: { eq: [<.job_id, <.loaded_for] }, then: [{ return }] }
+            - call: [<.rows.clear]
+            - decl: [pix, i32, 0]
+            - while:
+                condition: { lt: [pix, view.job_params.len] }
+                body:
+                  - decl: [bag, JobParams, { at: [view.job_params, pix] }]
+                  - set: [pix, { +: [pix, 1] }]
+                  - if:
+                      condition: { eq: [bag.owner_id, <.job_id] }
+                      then:
+                        - decl: [rix, i32, 0]
+                        - while:
+                            condition: { lt: [rix, bag.rows.len] }
+                            body:
+                              - decl: [row, ParamRow, { at: [bag.rows, rix] }]
+                              - call: [<.rows.push, row]
+                              - set: [rix, { +: [rix, 1] }]
+            # Der Vorrang kommt aus demselben Schnappschuss (F101-32: kein
+            # Eintrag heisst 0).
+            - set: [<.priority, 0]
+            - decl: [qix, i32, 0]
+            - while:
+                condition: { lt: [qix, view.job_policy.len] }
+                body:
+                  - decl: [pol, JobPolicy, { at: [view.job_policy, qix] }]
+                  - set: [qix, { +: [qix, 1] }]
+                  - if: { condition: { eq: [pol.owner_id, <.job_id] }, then: [{ set: [<.priority, pol.priority] }] }
+            - call: [<.scene.set_text, "prio_inp", "${<.priority}"]
+            - set: [<.loaded_for, <.job_id]
+            - set: [<.apply_vals, 1]
+            - call: [<.sync_rows]
+
+      # sync_rows: so viele Zeilen im Container wie in der Liste.
+      - def:
+          name: sync_rows
+          static_off: ["str_cmp"]
+          body:
+            - call: [<.row_keys.clear]
+            - decl: [rix, i32, 0]
+            - while:
+                condition: { lt: [rix, <.rows.len] }
+                body:
+                  - call: [<.row_keys.push, "prm-${rix}"]
+                  - set: [rix, { +: [rix, 1] }]
+            - call: [<.scene.bind_list, "prm_rows", <.row_keys]
+            - decl: [leer, string, ""]
+            - if:
+                condition: { eq: [<.rows.len, 0] }
+                then: [{ set: [leer, "Noch keine Parameter — „+ neu\" legt einen an."] }]
+            - call: [<.scene.set_text, "prm_none", leer]
+
+      # kind_next: der Typ-Knopf schaltet durch (F106-15).
+      - def:
+          name: kind_next
+          static_off: ["str_cmp"]
+          args: [[kind, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - if: { condition: { eq: [kind, "text"] }, then: [{ return: "langtext" }] }
+            - if: { condition: { eq: [kind, "langtext"] }, then: [{ return: "zahl" }] }
+            - if: { condition: { eq: [kind, "zahl"] }, then: [{ return: "bool" }] }
+            - if: { condition: { eq: [kind, "bool"] }, then: [{ return: "datei" }] }
+            - return: "text"
+
+      - def:
+          name: kind_label
+          static_off: ["str_cmp"]
+          args: [[kind, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - if: { condition: { eq: [kind, "langtext"] }, then: [{ return: "Langtext" }] }
+            - if: { condition: { eq: [kind, "zahl"] }, then: [{ return: "Zahl" }] }
+            - if: { condition: { eq: [kind, "bool"] }, then: [{ return: "Bool" }] }
+            - if: { condition: { eq: [kind, "datei"] }, then: [{ return: "Datei" }] }
+            - return: "Text"
+
+      - def:
+          name: render
+          access: public
+          static_off: ["str_cmp"]
+          args: [[view, ref<ClusterView>]]
+          body:
+            - if: { condition: { eq: [<.is_visible, 0] }, then: [{ return }] }
+            - call: [<.load_from, view]
+            - call: [<.fill_rows]
+            # Die Reiter und die Koepfe: gemerkt, nicht ausgefuehrt.
+            - if: { condition: { eq: [{ call: [<.scene.child_clicked, "tab_runsx"] }, 1] }, then: [{ set: [<.want_runs, 1] }] }
+            - if: { condition: { eq: [{ call: [<.scene.child_clicked, "tab_srcx"] }, 1] }, then: [{ set: [<.want_src, 1] }] }
+            - if: { condition: { eq: [{ call: [<.scene.child_clicked, "back_btnp"] }, 1] }, then: [{ set: [<.want_back, 1] }] }
+            - if: { condition: { eq: [{ call: [<.scene.child_clicked, "start_btn"] }, 1] }, then: [{ set: [<.want_start, 1] }] }
+            - if:
+                condition: { eq: [{ call: [<.scene.child_clicked, "add_btnp"] }, 1] }
+                then:
+                  - decl: [fresh, ParamRow]
+                  - set: [fresh.kind, "text"]
+                  - call: [<.rows.push, fresh]
+                  - set: [<.apply_vals, 1]
+                  - call: [<.sync_rows]
+                  - call: [<.scene.set_text, "prm_stat", "Zeile angelegt — Name und Wert eintragen, dann Speichern."]
+            - if:
+                condition: { eq: [{ call: [<.scene.child_clicked, "save_btnp"] }, 1] }
+                then: [{ call: [<.save_now] }]
+
+      # save_now: erst die Felder EINLESEN, dann schicken.  Ohne das Einlesen
+      # waere gespeichert, was beim letzten Rahmen im Modell stand — und nicht,
+      # was dasteht.
+      - def:
+          name: save_now
+          static_off: ["str_cmp"]
+          body:
+            - if:
+                condition: { eq: [<.job_id.len, 0] }
+                then: [{ call: [<.scene.set_text, "prm_stat", "Kein Job gewaehlt"] }, { return }]
+            - call: [<.read_fields]
+            - decl: [prio_txt, string, { call: [<.scene.text_value, "prio_inp"] }]
+            - set: [<.priority, { call: [prio_txt.parse_i32] }]
+            - decl: [ack, JobAck, { call: [<.pipelines.set_job_params, <.job_id, <.rows, <.priority] }]
+            - call: [<.scene.set_text, "prm_stat", ack.message]
+            # Angenommen heisst: der Server hat die Liste.  Beim naechsten
+            # Schnappschuss darf neu geladen werden.
+            - if: { condition: { eq: [ack.accepted, 1] }, then: [{ set: [<.loaded_for, ""] }] }
+
+      # read_fields: die Eingaben der Zeilen ins Modell holen.
+      - def:
+          name: read_fields
+          static_off: ["str_cmp"]
+          body:
+            - decl: [cnt, i32, { call: [<.scene.container_row_count, "prm_rows"] }]
+            - decl: [rix, i32, 0]
+            - while:
+                condition: { lt: [rix, cnt] }
+                body:
+                  - decl: [row, prefab_instance, { call: [<.scene.container_row, "prm_rows", rix] }]
+                  - if:
+                      condition: { '&&': [{ neq: [row, null] }, { lt: [rix, <.rows.len] }] }
+                      then:
+                        - decl: [mine, ParamRow, { at: [<.rows, rix] }]
+                        - set: [mine.name, { call: [row.text_value, "name_inp"] }]
+                        - if:
+                            condition: { eq: [mine.kind, "bool"] }
+                            then:
+                              - decl: [onoff, i32, { call: [row.is_checked, "val_chk"] }]
+                              - if: { condition: { eq: [onoff, 1] }, then: [{ set: [mine.value, "1"] }], else: [{ set: [mine.value, "0"] }] }
+                            else:
+                              - if:
+                                  condition: { neq: [mine.kind, "datei"] }
+                                  then: [{ set: [mine.value, { call: [row.text_value, "val_inp"] }] }]
+                        - idx: [<.rows, rix, mine]
+                  - set: [rix, { +: [rix, 1] }]
+
+      # fill_rows: die Zeilen zeichnen und ihre Klicks einsammeln.
+      - def:
+          name: fill_rows
+          static_off: ["str_cmp"]
+          body:
+            - decl: [cnt, i32, { call: [<.scene.container_row_count, "prm_rows"] }]
+            - decl: [rix, i32, 0]
+            - decl: [drop_at, i32, -1]
+            - while:
+                condition: { lt: [rix, cnt] }
+                body:
+                  - decl: [row, prefab_instance, { call: [<.scene.container_row, "prm_rows", rix] }]
+                  - if:
+                      condition: { '&&': [{ neq: [row, null] }, { lt: [rix, <.rows.len] }] }
+                      then:
+                        - decl: [mine, ParamRow, { at: [<.rows, rix] }]
+                        # Der Typ entscheidet, WELCHES Bedienteil sichtbar ist
+                        # (F106-15) — ein Schalter ist kein Textfeld.
+                        - decl: [is_bool, i32, 0]
+                        - if: { condition: { eq: [mine.kind, "bool"] }, then: [{ set: [is_bool, 1] }] }
+                        - decl: [is_file, i32, 0]
+                        - if: { condition: { eq: [mine.kind, "datei"] }, then: [{ set: [is_file, 1] }] }
+                        - decl: [is_text, i32, 1]
+                        - if: { condition: { '||': [{ eq: [is_bool, 1] }, { eq: [is_file, 1] }] }, then: [{ set: [is_text, 0] }] }
+                        - call: [row.set_child_visible, "val_inp", is_text]
+                        - call: [row.set_child_visible, "val_chk", is_bool]
+                        - call: [row.set_child_visible, "file_btn", is_file]
+                        - call: [row.set_child_visible, "file_lbl", is_file]
+                        - call: [row.set_text, "kind_btn", { call: [<.kind_label, mine.kind] }]
+                        # Nur SETZEN, was der Nutzer nicht gerade tippt: ein
+                        # Feld je Rahmen neu zu beschreiben loescht den Cursor.
+                        # EINMAL nach dem Laden: Modell -> Felder.  Jeden
+                        # Rahmen zu schreiben wuerde den Cursor loeschen und
+                        # jede Eingabe sofort ueberschreiben.
+                        - if:
+                            condition: { eq: [<.apply_vals, 1] }
+                            then:
+                              - call: [row.set_text, "name_inp", mine.name]
+                              - if: { condition: { eq: [is_text, 1] }, then: [{ call: [row.set_text, "val_inp", mine.value] }] }
+                              - if:
+                                  condition: { eq: [is_bool, 1] }
+                                  then:
+                                    - decl: [flag, i32, 0]
+                                    - if: { condition: { '||': [{ eq: [mine.value, "1"] }, { eq: [mine.value, "true"] }] }, then: [{ set: [flag, 1] }] }
+                                    - call: [row.set_checked, "val_chk", flag]
+                        - if:
+                            condition: { eq: [is_file, 1] }
+                            then:
+                              - decl: [fname, string, mine.file_name]
+                              - if: { condition: { eq: [fname.len, 0] }, then: [{ set: [fname, "(keine Datei)"] }] }
+                              - call: [row.set_text, "file_lbl", "${fname} · ${mine.file_size} B"]
+                        - if:
+                            condition: { eq: [{ call: [row.child_clicked, "kind_btn"] }, 1] }
+                            then:
+                              - set: [mine.kind, { call: [<.kind_next, mine.kind] }]
+                              - idx: [<.rows, rix, mine]
+                        - if:
+                            condition: { eq: [{ call: [row.child_clicked, "file_btn"] }, 1] }
+                            then:
+                              - call: [<.scene.set_text, "prm_stat", "Datei-Parameter: das Hochladen kommt mit dem CAS-Weg (doc/spec/106 §106.6e Schritt 4)."]
+                        - if:
+                            condition: { eq: [{ call: [row.child_clicked, "del_btnp"] }, 1] }
+                            then: [{ set: [drop_at, rix] }]
+                  - set: [rix, { +: [rix, 1] }]
+            # Geschrieben wurde jetzt — beim naechsten Rahmen gehoeren die
+            # Felder dem Nutzer.
+            - if: { condition: { gt: [cnt, 0] }, then: [{ set: [<.apply_vals, 0] }] }
+            # Geloescht wird NACH der Schleife: wer die Liste unter dem
+            # Container wegzieht, zeichnet den Rest des Rahmens auf Zeilen, die
+            # es nicht mehr gibt.
+            - if:
+                condition: { ge: [drop_at, 0] }
+                then:
+                  - call: [<.read_fields]
+                  - decl: [kept, list<ParamRow>]
+                  - decl: [kix, i32, 0]
+                  - while:
+                      condition: { lt: [kix, <.rows.len] }
+                      body:
+                        - if:
+                            condition: { neq: [kix, drop_at] }
+                            then:
+                              - decl: [keep, ParamRow, { at: [<.rows, kix] }]
+                              - call: [kept.push, keep]
+                        - set: [kix, { +: [kix, 1] }]
+                  - call: [<.rows.clear]
+                  - decl: [mix, i32, 0]
+                  - while:
+                      condition: { lt: [mix, kept.len] }
+                      body:
+                        - decl: [back, ParamRow, { at: [kept, mix] }]
+                        - call: [<.rows.push, back]
+                        - set: [mix, { +: [mix, 1] }]
+                  - call: [<.sync_rows]
+                  - call: [<.scene.set_text, "prm_stat", "Zeile entfernt — „Speichern\" uebernimmt es."]

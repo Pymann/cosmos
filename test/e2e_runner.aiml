@@ -1,0 +1,319 @@
+# E2eRunner — Testclient für die AP1-Abnahme (doc/spec/90 §AP1.5).
+# Spricht dasselbe Protokoll wie der WASM-Client: anmelden, Agentenliste
+# abonnieren, Kommando beauftragen, Ausgabe-Pushes einsammeln, danach das
+# Ausgabe-Fenster und die Lauf-Metadaten lesen.
+#
+# keep_text=1 sammelt die Ausgabe für die Inhaltsprüfung (kleine Läufe);
+# bei grossen Läufen bleibt es 0 — dann werden nur Bytes gezählt, so wie der
+# echte Client nur ein begrenztes Tail-Fenster hält (§AP1.5a).
+
+- import: "sources/models/agent_exec.aiml"
+- import: "sources/models/auth_reqs.aiml"
+- import: "sources/models/auth_result.aiml"
+
+- class:
+    name: E2eRunner
+    members:
+      - [sess,       mirror_session]
+      - [token,      string, ""]
+      - [run_ref,    string, ""]
+      - [out_text,   string, ""]
+      - [err_text,   string, ""]
+      - [out_bytes,  i64, 0]
+      - [err_bytes,  i64, 0]
+      - [exit_code,  i32, -99]
+      - [got_result, i32, 0]
+      - [keep_text,  i32, 1]
+    methods:
+      - def:
+          name: connect
+          access: public
+          args: [[url, string]]
+          return: i32
+          body:
+            - set: [<.sess, { call: [mirror.connect_timeout, url, 4000] }]
+            - if: { condition: { eq: [<.sess, null] }, then: [{ print: ["E2E: connect to ${url} failed"] }, { return: 0 }] }
+            - call: [time.sleep_ms, 150]
+            - call: [<.sess.update]
+            - return: 1
+
+      # login: Konto anlegen (existiert es schon, ist das ok) und anmelden.
+      # ensure: haelt die Sitzung am Leben.  Stirbt der Server mitten im Lauf,
+      # hing der Testclient an einer toten Sitzung („peer does not support RPC
+      # v3") — gemessen im Chaos-Lauf 2026-10-15.  Dann maesse die Abnahme die
+      # Schwaeche des Pruefstands statt die des Systems.
+      - def:
+          name: ensure
+          access: public
+          static_off: ["str_cmp"]
+          args: [[url, string]]
+          return: i32
+          body:
+            - if:
+                condition: { '&&': [{ pneq: [<.sess, null] }, { eq: [{ call: [<.sess.is_connected] }, 1] }] }
+                then: [{ return: 1 }]
+            - call: [log.warn, "E2E: Verbindung weg — Wiederaufnahme"]
+            - decl: [keep, string, <.token]
+            - set: [<.sess, { call: [mirror.connect_timeout, url, 2000] }]
+            - if: { condition: { eq: [<.sess, null] }, then: [{ return: 0 }] }
+            - call: [<.sess.update]
+            - if: { condition: { eq: [keep.len, 0] }, then: [{ return: 1 }] }
+            - decl: [vreq, TokenReq]
+            - set: [vreq.token, keep]
+            - decl: [vres, ptr<AuthResult>, { new: AuthResult }]
+            - decl: [vgot, i32, { call: [<.sess.send_and_await, 0, "validate_token", vreq, vres, 4000] }]
+            - if: { condition: { '&&': [{ eq: [vgot, 1] }, { eq: [vres.success, 1] }] }, then: [{ return: 1 }] }
+            - return: 0
+
+      - def:
+          name: login
+          access: public
+          args: [[email, string], [pass, string]]
+          return: i32
+          body:
+            - decl: [rreq, RegisterReq]
+            - set: [rreq.email, email]
+            - set: [rreq.password, pass]
+            # Der Anzeigename muss EINDEUTIG sein.  Fest "e2e" bedeutete: der
+            # zweite Prüfstand-Nutzer im selben Speicher scheitert mit
+            # „nickname already taken" — und meldet sich dann als „unknown user".
+            - decl: [at_pos, i32, { call: [email.index_of, "@"] }]
+            - decl: [nick, string, email]
+            - if: { condition: { gt: [at_pos, 0] }, then: [{ set: [nick, { call: [email.substr, 0, at_pos] }] }] }
+            - set: [rreq.display_name, nick]
+            - decl: [rres, ptr<AuthResult>, { new: AuthResult }]
+            - decl: [rgot, i32, { call: [<.sess.send_and_await, 0, "submit_register", rreq, rres, 4000] }]
+            - decl: [lreq, LoginReq]
+            - set: [lreq.email, email]
+            - set: [lreq.password, pass]
+            - decl: [lres, ptr<AuthResult>, { new: AuthResult }]
+            - decl: [lgot, i32, { call: [<.sess.send_and_await, 0, "submit_login", lreq, lres, 4000] }]
+            - if: { condition: { neq: [lgot, 1] }, then: [{ print: ["E2E: login got no answer"] }, { return: 0 }] }
+            # Scheitert die Anmeldung, lag es fast immer an der REGISTRIERUNG
+            # davor — deren Antwort wurde bis 2026-10-15 verworfen, und uebrig
+            # blieb ein „unknown user", der die Ursache verschweigt.
+            - if:
+                condition: { neq: [lres.success, 1] }
+                then:
+                  - if: { condition: { neq: [rgot, 1] }, then: [{ print: ["E2E: Registrierung ohne Antwort"] }] }
+                  - if: { condition: { '&&': [{ eq: [rgot, 1] }, { neq: [rres.success, 1] }] }, then: [{ print: ["E2E: Registrierung abgelehnt: ${rres.message}"] }] }
+                  - print: ["E2E: login refused: ${lres.message}"]
+                  - return: 0
+            - set: [<.token, lres.token]
+            - return: 1
+
+      # wait_agent: Agentenliste abonnieren und warten, bis der Agent connected ist.
+      - def:
+          name: wait_agent
+          access: public
+          static_off: ["str_cmp"]
+          args: [[agent_id, string], [timeout_ms, i64]]
+          return: i32
+          body:
+            - decl: [deadline, i64, { +: [{ call: [time.now] }, timeout_ms] }]
+            - while:
+                condition: { lt: [{ call: [time.now] }, deadline] }
+                body:
+                  - call: [<.sess.update]
+                  - decl: [req, TokenReq]
+                  - set: [req.token, <.token]
+                  - decl: [lst, ptr<AgentList>, { new: AgentList }]
+                  - decl: [got, i32, { call: [<.sess.send_and_await, 0, "subscribe_agents", req, lst, 3000] }]
+                  - if:
+                      condition: { eq: [got, 1] }
+                      then:
+                        - decl: [adx, i32, 0]
+                        - while:
+                            condition: { lt: [adx, lst.agents.len] }
+                            body:
+                              - decl: [row, AgentInfo, { at: [lst.agents, adx] }]
+                              - if:
+                                  condition: { '&&': [{ eq: [row.agent_id, agent_id] }, { eq: [row.status, AgentStatus.connected] }] }
+                                  then: [{ return: 1 }]
+                              - set: [adx, { +: [adx, 1] }]
+                  - call: [time.sleep_ms, 200]
+            - return: 0
+
+      - def:
+          name: start
+          access: public
+          args: [[agent_id, string], [command, string], [cwd, string]]
+          return: i32
+          body:
+            - set: [<.run_ref, ""]
+            - set: [<.out_text, ""]
+            - set: [<.err_text, ""]
+            - set: [<.out_bytes, 0]
+            - set: [<.err_bytes, 0]
+            - set: [<.exit_code, -99]
+            - set: [<.got_result, 0]
+            - decl: [req, RunReq]
+            - set: [req.token, <.token]
+            - set: [req.agent_id, agent_id]
+            - set: [req.command, command]
+            - set: [req.cwd, cwd]
+            - decl: [ack, ptr<RunAck>, { new: RunAck }]
+            - decl: [got, i32, { call: [<.sess.send_and_await, 0, "run_on_agent", req, ack, 4000] }]
+            - if: { condition: { neq: [got, 1] }, then: [{ print: ["E2E: run_on_agent got no answer"] }, { return: 0 }] }
+            - if: { condition: { neq: [ack.accepted, 1] }, then: [{ print: ["E2E: run refused: ${ack.reason}"] }, { return: 0 }] }
+            - set: [<.run_ref, ack.run_ref]
+            - return: 1
+
+      # collect: Ausgabe-Pushes einsammeln bis command_result kommt (oder Timeout).
+      - def:
+          name: collect
+          access: public
+          static_off: ["str_cmp"]
+          args: [[timeout_ms, i64]]
+          return: i32
+          body:
+            - decl: [deadline, i64, { +: [{ call: [time.now] }, timeout_ms] }]
+            - while:
+                condition: { '&&': [{ eq: [<.got_result, 0] }, { lt: [{ call: [time.now] }, deadline] }] }
+                body:
+                  - call: [<.sess.update]
+                  - decl: [more, i32, 1]
+                  - while:
+                      condition: { eq: [more, 1] }
+                      body:
+                        - decl: [rpc, rpc_event, { call: [<.sess.poll_rpc] }]
+                        - if:
+                            condition: { eq: [rpc.method, ""] }
+                            then: [{ set: [more, 0] }]
+                            else:
+                              - if:
+                                  condition: { eq: [rpc.method, "command_output"] }
+                                  then:
+                                    - decl: [msg, ptr<OutChunk>, { new: OutChunk }]
+                                    - if:
+                                        condition: { eq: [{ call: [<.sess.decode_rpc, rpc, msg] }, 0] }
+                                        then:
+                                          - if:
+                                              condition: { eq: [msg.stream, OutStream.err] }
+                                              then:
+                                                - set: [<.err_bytes, { +: [<.err_bytes, msg.chunk.len] }]
+                                                - if: { condition: { eq: [<.keep_text, 1] }, then: [{ set: [<.err_text, "${<.err_text}${msg.chunk}"] }] }
+                                              else:
+                                                - set: [<.out_bytes, { +: [<.out_bytes, msg.chunk.len] }]
+                                                - if: { condition: { eq: [<.keep_text, 1] }, then: [{ set: [<.out_text, "${<.out_text}${msg.chunk}"] }] }
+                              - if:
+                                  condition: { eq: [rpc.method, "command_result"] }
+                                  then:
+                                    - decl: [res, ptr<RunResult>, { new: RunResult }]
+                                    - if:
+                                        condition: { eq: [{ call: [<.sess.decode_rpc, rpc, res] }, 0] }
+                                        then:
+                                          - set: [<.exit_code, res.exit_code]
+                                          - set: [<.got_result, 1]
+                  - call: [time.sleep_ms, 50]
+            - return: <.got_result
+
+      # read_window: Scrollback — nur das angefragte Byte-Fenster vom Server holen.
+      - def:
+          name: read_window
+          access: public
+          args: [[stream, i32], [offset, i64], [len, i32]]
+          return: RunWindow
+          body:
+            - decl: [win, RunWindow]
+            - decl: [req, RunWindowReq]
+            - set: [req.token, <.token]
+            - set: [req.run_ref, <.run_ref]
+            - set: [req.stream, stream]
+            - set: [req.offset, offset]
+            - set: [req.len, len]
+            - decl: [out, ptr<RunWindow>, { new: RunWindow }]
+            - decl: [got, i32, { call: [<.sess.send_and_await, 0, "read_run_output", req, out, 4000] }]
+            - if: { condition: { neq: [got, 1] }, then: [{ return: win }] }
+            - set: [win.run_ref, out.run_ref]
+            - set: [win.stream, out.stream]
+            - set: [win.offset, out.offset]
+            - set: [win.data, out.data]
+            - set: [win.next_offset, out.next_offset]
+            - set: [win.total, out.total]
+            - set: [win.done, out.done]
+            - return: win
+
+      - def:
+          name: read_info
+          access: public
+          return: RunInfo
+          body:
+            - decl: [nfo, RunInfo]
+            - decl: [req, RunInfoReq]
+            - set: [req.token, <.token]
+            - set: [req.run_ref, <.run_ref]
+            - decl: [out, ptr<RunInfo>, { new: RunInfo }]
+            - decl: [got, i32, { call: [<.sess.send_and_await, 0, "get_run_info", req, out, 4000] }]
+            - if: { condition: { neq: [got, 1] }, then: [{ return: nfo }] }
+            - set: [nfo.run_ref, out.run_ref]
+            - set: [nfo.agent_id, out.agent_id]
+            - set: [nfo.state, out.state]
+            - set: [nfo.exit_code, out.exit_code]
+            - set: [nfo.out_bytes, out.out_bytes]
+            - set: [nfo.err_bytes, out.err_bytes]
+            - return: nfo
+
+      # create_token / revoke_token: Enrollment-Tokens (§AP1.9) wie das Web-UI.
+      - def:
+          name: create_token
+          access: public
+          args: [[label, string]]
+          return: { type: AgentTokenNew, lifetime: producer }
+          body:
+            - decl: [res, AgentTokenNew]
+            - decl: [req, AgentTokenReq]
+            - set: [req.token, <.token]
+            - set: [req.label, label]
+            - decl: [out, ptr<AgentTokenNew>, { new: AgentTokenNew }]
+            - decl: [got, i32, { call: [<.sess.send_and_await, 0, "create_agent_token", req, out, 4000] }]
+            - if: { condition: { neq: [got, 1] }, then: [{ set: [res.reason, "keine Antwort"] }, { return: res }] }
+            - set: [res.accepted, out.accepted]
+            - set: [res.reason, out.reason]
+            - set: [res.token_id, out.token_id]
+            - set: [res.secret, out.secret]
+            - return: res
+
+      - def:
+          name: revoke_token
+          access: public
+          args: [[token_id, string]]
+          return: i32
+          body:
+            - decl: [req, AgentTokenRevoke]
+            - set: [req.token, <.token]
+            - set: [req.token_id, token_id]
+            - decl: [out, ptr<AgentAck>, { new: AgentAck }]
+            - decl: [got, i32, { call: [<.sess.send_and_await, 0, "revoke_agent_token", req, out, 4000] }]
+            - if: { condition: { neq: [got, 1] }, then: [{ return: 0 }] }
+            - return: out.accepted
+
+      # agent_connected: ist dieser Agent gerade als verbunden gelistet?
+      - def:
+          name: agent_connected
+          access: public
+          static_off: ["str_cmp"]
+          args: [[agent_id, string]]
+          return: i32
+          body:
+            - decl: [req, TokenReq]
+            - set: [req.token, <.token]
+            - decl: [lst, ptr<AgentList>, { new: AgentList }]
+            - decl: [got, i32, { call: [<.sess.send_and_await, 0, "subscribe_agents", req, lst, 3000] }]
+            - if: { condition: { neq: [got, 1] }, then: [{ return: 0 }] }
+            - decl: [adx, i32, 0]
+            - while:
+                condition: { lt: [adx, lst.agents.len] }
+                body:
+                  - decl: [row, AgentInfo, { at: [lst.agents, adx] }]
+                  - if:
+                      condition: { '&&': [{ eq: [row.agent_id, agent_id] }, { eq: [row.status, AgentStatus.connected] }] }
+                      then: [{ return: 1 }]
+                  - set: [adx, { +: [adx, 1] }]
+            - return: 0
+
+      - def:
+          name: close
+          access: public
+          body:
+            - if: { condition: { neq: [<.sess, null] }, then: [{ call: [<.sess.close] }] }

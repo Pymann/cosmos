@@ -1,0 +1,18 @@
+# UserLevel — die Freigabe (clearance) eines Kontos, doc/spec/108 §2.
+#
+# EIGENES KV (levels: email → UserLevel), nicht ein Feld an `User`: aiml-KV-Blobs tragen
+# einen Schema-Fingerprint ueber Feldzahl und Layout ([aiml] ser_runtime.cpp
+# aiml_ser_schema_fp).  Ein neues Feld an `User` haette ihn gebrochen, und ein Mismatch
+# VERWIRFT den Blob — kein bestehendes Konto koennte sich mehr anmelden (F108-2).
+# `SessionToken` liegt aus demselben Grund in einem parallelen KV.
+#
+# Nebengewinn: die fail-closed-Vorgabe entsteht aus ABWESENHEIT eines Eintrags und nicht
+# aus einer 0, die man mit "Admin" verwechseln koennte.
+#
+# Richtung nicht verwechseln (spec/65 F65-4: `clearance <= level`): die KLEINERE Zahl ist
+# das GROESSERE Recht.  1 = Admin, 255 = am stärksten eingeschränkt, 0 = ungueltig.
+
+- model:
+    name: UserLevel
+    fields:
+      - [level, i32]

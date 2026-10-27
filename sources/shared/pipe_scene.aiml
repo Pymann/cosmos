@@ -1,0 +1,725 @@
+# Die raeumliche Pipeline als DATEN (doc/spec/107 §107.1b).
+#
+# Wie MatrixView und Dashboard: die Aussage wird gerechnet, nicht gezeichnet.
+# Was wo liegt, welche Farbe es traegt und was sich bewegt, ist damit ohne
+# Fenster pruefbar — und der Renderer bleibt dumm.
+#
+# Masse sind EINHEITEN, keine Pixel: die Kamera passt sich an (fit), also
+# bestimmt hier nur das Verhaeltnis.
+
+- import: "sources/shared/cluster_view.aiml"
+- import: "sources/models/agent_list.aiml"
+- import: "sources/shared/live_view.aiml"
+- import: "sources/shared/stage_layer.aiml"
+
+- model:
+    name: SceneItem
+    fields:
+      # 0 = Kugel (Schritt), 1 = Rohr, 2 = Trommel (KV), 3 = Quader (Knoten),
+      # 4 = Boden, 5 = FLIESZENDES Rohr, 6 = Platte (Schicht einer Stufe),
+      # 8 = Mast und 9 = Fahne eines HALTEPUNKTS.  Sie stehen am ROHR, nicht an
+      # der Kugel: ein Lauf haelt am Stufen-RAND (aiml F62-53), und der Rand ist
+      # das Rohr — eine Flagge an der Kugel liesze offen, ob davor oder danach
+      # angehalten wird (Vorgabe des Nutzers, 22.10.2026).
+      # 7 = Platte, deren Inhalt BEREITS im Speicher liegt (doc/spec/107
+      # §107.1c F107-31: die Oberflaeche traegt die Herkunft, gerillt wie die
+      # Trommel — dort heiszen Rillen Speicher, hier auch).
+      #
+      # Der Fluss ist eine eigene ART und kein Flag daneben: die Art steuert
+      # ohnehin schon Mesh und Shader-Zweig, und ein zweiter Schalter fuer
+      # dieselbe Entscheidung waere einer zu viel (F107-14).
+      - [kind,     i32]
+      # Mittelpunkt
+      - [pos_x,    f32]
+      - [pos_y,    f32]
+      - [pos_z,    f32]
+      # Achse: beim Rohr der VOLLE Vektor von A nach B, sonst die Hochachse
+      # mit der Hoehe als Laenge.
+      - [axis_x,   f32]
+      - [axis_y,   f32]
+      - [axis_z,   f32]
+      - [radius,   f32]
+      - [color,    i32]
+      # Woran ein Klick haengt: die Stufen-Kennung.  Leer = nicht waehlbar.
+      - [tag,      string]
+      # Anzeigename, der ueber dem Koerper schwebt (doc/spec/107 F107-16).
+      # Er steht HIER und wird nicht spaeter nachgeschlagen: der Renderer soll
+      # den Schnappschuss nicht kennen muessen.
+      - [label,    string]
+
+- class:
+    name: PipeScene
+    methods:
+      # of_run: Kugeln je Stufe, Rohre zwischen aufeinanderfolgenden Stufen
+      # DERSELBEN Lane.  Lanes liegen hintereinander (-Z), Stufen nach +X.
+      - def:
+          name: of_run
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run, ref<PipelineRun>], [sel_stage, string]]
+          return: { type: list<SceneItem>, lifetime: producer }
+          body:
+            - decl: [out, list<SceneItem>]
+            - decl: [lanes, list<string>]
+            - decl: [order, list<string>]
+            # Erst die Achsen des Gitters bestimmen — Lanes und Stufen-Namen
+            # in der Reihenfolge ihres ersten Auftretens.
+            - decl: [six, i32, 0]
+            - while:
+                condition: { lt: [six, run.stages.len] }
+                body:
+                  - decl: [stg, PipelineStage, { at: [run.stages, six] }]
+                  - set: [six, { +: [six, 1] }]
+                  - if: { condition: { eq: [{ call: [lanes.contains, stg.bindings] }, 0] }, then: [{ call: [lanes.push, stg.bindings] }] }
+                  - decl: [short, string, { call: [<.step_label, stg.name] }]
+                  - if: { condition: { eq: [{ call: [order.contains, short] }, 0] }, then: [{ call: [order.push, short] }] }
+            - decl: [gap, f32, 2.8]
+            - decl: [lix, i32, 0]
+            - while:
+                condition: { lt: [lix, lanes.len] }
+                body:
+                  - decl: [lane_key, string, { at: [lanes, lix] }]
+                  - decl: [zpos, f32, { '*': [{ cast: [lix, f32] }, { -: [0.0, gap] }] }]
+                  - decl: [prev_x, f32, 0.0]
+                  - decl: [prev_set, i32, 0]
+                  - decl: [oix, i32, 0]
+                  - while:
+                      condition: { lt: [oix, order.len] }
+                      body:
+                        - decl: [step_name, string, { at: [order, oix] }]
+                        - decl: [xpos, f32, { '*': [{ cast: [oix, f32] }, gap] }]
+                        - set: [oix, { +: [oix, 1] }]
+                        - decl: [found, i32, 0]
+                        - decl: [stat, string, ""]
+                        - decl: [sid, string, ""]
+                        - decl: [fix, i32, 0]
+                        - while:
+                            condition: { lt: [fix, run.stages.len] }
+                            body:
+                              - decl: [cand, PipelineStage, { at: [run.stages, fix] }]
+                              - set: [fix, { +: [fix, 1] }]
+                              - if:
+                                  condition: { '&&': [{ eq: [found, 0] }, { '&&': [{ eq: [cand.bindings, lane_key] }, { eq: [{ call: [<.step_label, cand.name] }, step_name] }] }] }
+                                  then:
+                                    - set: [found, 1]
+                                    - set: [stat, cand.status]
+                                    - set: [sid, cand.stage_id]
+                        # Nicht vorhanden?  Dann entsteht hier nichts — die
+                        # folgenden Bloecke sind ohnehin an `found` gebunden
+                        # (aiml kennt kein `continue`, spec/49 §2a).
+                        # Rohr von der vorigen Kugel zu dieser.  Es FLIESZT,
+                        # wenn die Stufe dahinter gerade laeuft (F107-14).
+                        - if:
+                            condition: { '&&': [{ eq: [found, 1] }, { eq: [prev_set, 1] }] }
+                            then:
+                              - decl: [pipe, SceneItem]
+                              - set: [pipe.kind, 1]
+                              - set: [pipe.pos_x, { '*': [{ +: [prev_x, xpos] }, 0.5] }]
+                              - set: [pipe.pos_y, 0.0]
+                              - set: [pipe.pos_z, zpos]
+                              - set: [pipe.axis_x, { -: [xpos, prev_x] }]
+                              - set: [pipe.axis_y, 0.0]
+                              - set: [pipe.axis_z, 0.0]
+                              - set: [pipe.radius, 0.17]
+                              - set: [pipe.color, 0x3D5A77FF]
+                              - if: { condition: { eq: [stat, "running"] }, then: [{ set: [pipe.kind, 5] }, { set: [pipe.color, 0x7A6A3AFF] }] }
+                              - if: { condition: { eq: [stat, "done"] }, then: [{ set: [pipe.color, 0x2E5A42FF] }] }
+                              - call: [out.push, pipe]
+                        # Ein kurzes EINLAUFSTUECK vor der ersten Stufe: auch
+                        # sie hat einen Rand, und ohne ihn haette ein
+                        # Haltepunkt davor nichts, woran er haengt.
+                        - if:
+                            condition: { '&&': [{ eq: [found, 1] }, { eq: [prev_set, 0] }] }
+                            then:
+                              - decl: [inlet, SceneItem]
+                              - set: [inlet.kind, 1]
+                              - set: [inlet.pos_x, { -: [xpos, 0.62] }]
+                              - set: [inlet.pos_y, 0.0]
+                              - set: [inlet.pos_z, zpos]
+                              - set: [inlet.axis_x, 0.9]
+                              - set: [inlet.radius, 0.17]
+                              - set: [inlet.color, 0x3D5A77FF]
+                              - if: { condition: { eq: [stat, "running"] }, then: [{ set: [inlet.kind, 5] }, { set: [inlet.color, 0x7A6A3AFF] }] }
+                              - call: [out.push, inlet]
+                        # Die FLAGGE: sie steht am Rohr VOR dieser Stufe, weil
+                        # dort angehalten wird (F62-53).
+                        - if:
+                            condition: { '&&': [{ eq: [found, 1] }, { eq: [stat, "paused"] }] }
+                            then: [{ call: [<.add_flag, out, { -: [xpos, 0.95] }, zpos, sid] }]
+                        - if:
+                            condition: { eq: [found, 1] }
+                            then:
+                              - decl: [ball, SceneItem]
+                              - set: [ball.kind, 0]
+                              - set: [ball.pos_x, xpos]
+                              - set: [ball.pos_y, 0.0]
+                              - set: [ball.pos_z, zpos]
+                              - set: [ball.axis_y, 1.0]
+                              - set: [ball.radius, 0.62]
+                              # Die Auswahl ist GROESSER, nicht nur anders
+                              # gefaerbt: Groesse liest man auch schraeg von
+                              # der Seite, Farbe nicht immer.
+                              - if: { condition: { '&&': [{ gt: [sid.len, 0] }, { eq: [sid, sel_stage] }] }, then: [{ set: [ball.radius, 0.78] }] }
+                              - set: [ball.color, { call: [<.status_color, stat] }]
+                              - set: [ball.tag, sid]
+                              - set: [ball.label, step_name]
+                              - call: [out.push, ball]
+                              - set: [prev_x, xpos]
+                              - set: [prev_set, 1]
+                  - set: [lix, { +: [lix, 1] }]
+            - return: out
+
+      # dur_txt: eine Dauer, wie Menschen sie lesen.  "" wenn nichts bekannt
+      # ist — eine 0 waere eine Behauptung ueber eine Stufe, die nie lief.
+      - def:
+          name: dur_txt
+          access: public
+          static_off: ["str_cmp"]
+          args: [[started_ms, i64], [ended_ms, i64], [now_ms, i64]]
+          return: { type: string, lifetime: producer }
+          body:
+            - if: { condition: { le: [started_ms, 0] }, then: [{ return: "" }] }
+            - decl: [bis, i64, ended_ms]
+            - if: { condition: { le: [bis, 0] }, then: [{ set: [bis, now_ms] }] }
+            - decl: [secs, i64, { '/': [{ -: [bis, started_ms] }, 1000] }]
+            - if: { condition: { lt: [secs, 0] }, then: [{ return: "" }] }
+            - if: { condition: { lt: [secs, 60] }, then: [{ return: "${secs}s" }] }
+            - decl: [mins, i64, { '/': [secs, 60] }]
+            - decl: [rest, i64, { -: [secs, { '*': [mins, 60] }] }]
+            - if: { condition: { lt: [mins, 60] }, then: [{ return: "${mins}m ${rest}s" }] }
+            - decl: [hours, i64, { '/': [mins, 60] }]
+            - return: "${hours}h ${{ -: [mins, { '*': [hours, 60] }] }}m"
+
+      # stamp_times: die Dauer an die Beschriftung der Kugeln haengen.
+      #
+      # Ein eigener Durchgang ueber die fertige Liste, kein weiteres Argument
+      # an `of_run`: die Lage der Kugeln ist schon gerechnet, und zwei Stellen,
+      # die dasselbe Gitter herleiten, laufen auseinander (dieselbe Regel wie
+      # bei `layers_of`).
+      - def:
+          name: stamp_times
+          access: public
+          static_off: ["str_cmp"]
+          args: [[out, list<SceneItem>], [run, ref<PipelineRun>], [times, list<StageTime>], [now_ms, i64]]
+          body:
+            - decl: [oix, i32, 0]
+            - while:
+                condition: { lt: [oix, out.len] }
+                body:
+                  - decl: [item, SceneItem, { at: [out, oix] }]
+                  - decl: [here, i32, oix]
+                  - set: [oix, { +: [oix, 1] }]
+                  # Nur die Kugeln (kind 0) tragen einen Stufennamen; aiml
+                  # kennt kein `continue` (spec/49 §2a), also die Bedingung
+                  # herum.
+                  - if:
+                      condition: { '&&': [{ eq: [item.kind, 0] }, { gt: [item.tag.len, 0] }] }
+                      then:
+                        - decl: [bare, string, ""]
+                        - decl: [lane, string, ""]
+                        - decl: [six, i32, 0]
+                        - while:
+                            condition: { lt: [six, run.stages.len] }
+                            body:
+                              - decl: [stg, PipelineStage, { at: [run.stages, six] }]
+                              - set: [six, { +: [six, 1] }]
+                              - if:
+                                  condition: { eq: [stg.stage_id, item.tag] }
+                                  then:
+                                    - set: [bare, { call: [<.step_label, stg.name] }]
+                                    - set: [lane, stg.bindings]
+                        - decl: [tix, i32, 0]
+                        - while:
+                            condition: { lt: [tix, times.len] }
+                            body:
+                              - decl: [trow, StageTime, { at: [times, tix] }]
+                              - set: [tix, { +: [tix, 1] }]
+                              - if:
+                                  condition: { '&&': [{ eq: [trow.stage, bare] }, { eq: [trow.bindings, lane] }] }
+                                  then:
+                                    - decl: [txt, string, { call: [<.dur_txt, trow.started_ms, trow.ended_ms, now_ms] }]
+                                    - if:
+                                        condition: { gt: [txt.len, 0] }
+                                        then:
+                                          - set: [item.label, "${item.label}  ${txt}"]
+                                          - idx: [out, here, item]
+
+      # add_ground: die Flaeche unter allem.  Sie ist kein Koerper, sondern
+      # Bezug: ohne sie schweben die Kugeln, und zwei Hoehen sind nicht
+      # vergleichbar.
+      - def:
+          name: add_ground
+          access: public
+          args: [[out, list<SceneItem>]]
+          body:
+            - decl: [floor_item, SceneItem]
+            - set: [floor_item.kind, 4]
+            - set: [floor_item.pos_x, 4.0]
+            - set: [floor_item.pos_y, -3.2]
+            - set: [floor_item.pos_z, -1.0]
+            - set: [floor_item.axis_y, 0.02]
+            - set: [floor_item.radius, 22.0]
+            - set: [floor_item.color, 0x3A4A66FF]
+            - call: [out.push, floor_item]
+
+      # add_flag: Mast und Tuch an einem Rand.  Zwei Koerper, weil ein Mast
+      # ohne Tuch kein Zeichen ist und ein Tuch ohne Mast schwebt.
+      - def:
+          name: add_flag
+          access: public
+          static_off: ["str_cmp"]
+          args: [[out, list<SceneItem>], [xpos, f32], [zpos, f32], [tag, string]]
+          body:
+            # EIN Koerper: das entworfene Modell traegt Mast UND Tuch, und
+            # beide muessen sich zusammen bewegen, wenn die Kamera schwenkt.
+            - decl: [flag, SceneItem]
+            - set: [flag.kind, 8]
+            - set: [flag.pos_x, xpos]
+            - set: [flag.pos_y, 0.0]
+            - set: [flag.pos_z, zpos]
+            - set: [flag.axis_y, 1.25]
+            - set: [flag.radius, 1.25]
+            - set: [flag.color, 0xB58CE8FF]
+            - set: [flag.tag, tag]
+            - set: [flag.label, "hier anhalten"]
+            - call: [out.push, flag]
+
+      # ── layers_of: was die Stufen hinterlassen (doc/spec/107 §107.1c) ──
+      #
+      # Eine Platte je Schicht, UNTER der Kugel ihrer Stufe, gestapelt nach -Y
+      # in Laufreihenfolge.  Dieselbe Gitterregel wie `of_run` (gap, Reihenfolge
+      # des ersten Auftretens) — zwei Herleitungen derselben Lage waeren zwei
+      # Gelegenheiten, sie auseinanderlaufen zu lassen.
+      - def:
+          name: layers_of
+          access: public
+          static_off: ["str_cmp"]
+          args: [[out, list<SceneItem>], [run, ref<PipelineRun>], [layers, list<StageLayer>]]
+          body:
+            - decl: [order, list<string>]
+            - decl: [lanes, list<string>]
+            - decl: [six, i32, 0]
+            - while:
+                condition: { lt: [six, run.stages.len] }
+                body:
+                  - decl: [stg, PipelineStage, { at: [run.stages, six] }]
+                  - set: [six, { +: [six, 1] }]
+                  - if: { condition: { eq: [{ call: [lanes.contains, stg.bindings] }, 0] }, then: [{ call: [lanes.push, stg.bindings] }] }
+                  - decl: [short, string, { call: [<.step_label, stg.name] }]
+                  - if: { condition: { eq: [{ call: [order.contains, short] }, 0] }, then: [{ call: [order.push, short] }] }
+            - decl: [gap, f32, 2.8]
+            - decl: [lix, i32, 0]
+            - while:
+                condition: { lt: [lix, lanes.len] }
+                body:
+                  - decl: [lane_key, string, { at: [lanes, lix] }]
+                  - decl: [zpos, f32, { '*': [{ cast: [lix, f32] }, { -: [0.0, gap] }] }]
+                  - set: [lix, { +: [lix, 1] }]
+                  # Alle Platten auf EINER Hoehe, jede unter ihrer Kugel.  Die
+                  # Treppe (jede Platte unter der vorigen) sah zwar nach Stapel
+                  # aus, aber nach rechts verlor man die Zugehoerigkeit — und
+                  # zwei Dicken auf verschiedenen Hoehen vergleicht niemand.
+                  - decl: [deck, f32, { -: [0.0, 1.45] }]
+                  - decl: [oix, i32, 0]
+                  - while:
+                      condition: { lt: [oix, order.len] }
+                      body:
+                        - decl: [step_name, string, { at: [order, oix] }]
+                        - decl: [xpos, f32, { '*': [{ cast: [oix, f32] }, gap] }]
+                        - set: [oix, { +: [oix, 1] }]
+                        - decl: [hit, StageLayer]
+                        - decl: [found, i32, 0]
+                        - decl: [fix, i32, 0]
+                        - while:
+                            condition: { lt: [fix, layers.len] }
+                            body:
+                              - decl: [cand, StageLayer, { at: [layers, fix] }]
+                              - set: [fix, { +: [fix, 1] }]
+                              - if:
+                                  condition: { '&&': [{ eq: [found, 0] }, { '&&': [{ eq: [cand.stage, step_name] }, { eq: [cand.bindings, lane_key] }] }] }
+                                  then: [{ set: [hit, cand] }, { set: [found, 1] }]
+                        - if:
+                            condition: { eq: [found, 1] }
+                            then:
+                              - decl: [plate, SceneItem]
+                              - set: [plate.kind, 6]
+                              # F107-31: liegt der Inhalt schon im Speicher,
+                              # traegt die Platte Rillen.
+                              - if: { condition: { gt: [hit.stored, 0] }, then: [{ set: [plate.kind, 7] }] }
+                              - decl: [thick, f32, { call: [<.plate_thickness, hit.bytes] }]
+                              - set: [plate.pos_x, xpos]
+                              - set: [plate.pos_z, zpos]
+                              # F107-32: was nie wiederverwendbar ist, liegt
+                              # NEBEN dem Stapel und schlieszt ihn nicht.
+                              - if:
+                                  condition: { eq: [hit.reuse, ReuseClass.opaque] }
+                                  then: [{ set: [plate.pos_z, { +: [zpos, 0.95] }] }]
+                              - set: [plate.pos_y, deck]
+                              - set: [plate.axis_y, thick]
+                              - set: [plate.radius, 0.92]
+                              # F107-13: die Farbe traegt den ZUSTAND.  Welchen?
+                              # Den ihrer Stufe — eine Schicht ist deren
+                              # Ergebnis.  Abgedunkelt, weil sie unter dem
+                              # Thema liegt.
+                              - decl: [lstat, string, ""]
+                              - decl: [sfx, i32, 0]
+                              - while:
+                                  condition: { lt: [sfx, run.stages.len] }
+                                  body:
+                                    - decl: [scand, PipelineStage, { at: [run.stages, sfx] }]
+                                    - set: [sfx, { +: [sfx, 1] }]
+                                    - if:
+                                        condition: { '&&': [{ eq: [scand.bindings, lane_key] }, { eq: [{ call: [<.step_label, scand.name] }, step_name] }] }
+                                        then: [{ set: [lstat, scand.status] }]
+                              - set: [plate.color, { call: [<.dim, { call: [<.status_color, lstat] }] }]
+                              - set: [plate.tag, "layer:${step_name}"]
+                              - set: [plate.label, { call: [<.byte_label, hit.bytes] }]
+                              - call: [out.push, plate]
+
+      # plate_thickness: die LEITER (F107-30).  Linear waere alles auszer der
+      # Bau-Schicht unsichtbar — 0 B bis 1,5 GB in einem Bild.
+      - def:
+          name: plate_thickness
+          access: public
+          args: [[bytes, i64]]
+          return: f32
+          body:
+            - if: { condition: { lt: [bytes, 1] },          then: [{ return: 0.06 }] }
+            - if: { condition: { lt: [bytes, 1048576] },     then: [{ return: 0.14 }] }
+            - if: { condition: { lt: [bytes, 10485760] },    then: [{ return: 0.26 }] }
+            - if: { condition: { lt: [bytes, 104857600] },   then: [{ return: 0.42 }] }
+            - if: { condition: { lt: [bytes, 1073741824] },  then: [{ return: 0.62 }] }
+            - return: 0.86
+
+      # byte_label: die Groesze als Wort ueber der Platte.  Im Raum liest man
+      # keine Zahlenkolonne — eine Groeszenordnung schon.
+      - def:
+          name: byte_label
+          access: public
+          static_off: ["str_cmp"]
+          args: [[bytes, i64]]
+          return: { type: string, lifetime: producer }
+          body:
+            - if: { condition: { lt: [bytes, 1] }, then: [{ return: "leer" }] }
+            - if: { condition: { lt: [bytes, 1048576] }, then: [{ return: "${{ /: [bytes, 1024] }} KB" }] }
+            - if: { condition: { lt: [bytes, 1073741824] }, then: [{ return: "${{ /: [bytes, 1048576] }} MB" }] }
+            - return: "${{ /: [bytes, 1073741824] }} GB"
+
+      # dim: dieselbe Farbe, dunkler.  KEINE zweite Farbsprache (F107-13) —
+      # eine Schicht liegt unter ihrem Thema, also tritt sie zurueck.
+      - def:
+          name: dim
+          access: public
+          args: [[rgba, i32]]
+          return: i32
+          body:
+            - decl: [red, i32, { band: [{ ushr: [rgba, 24] }, 255] }]
+            - decl: [grn, i32, { band: [{ ushr: [rgba, 16] }, 255] }]
+            - decl: [blu, i32, { band: [{ ushr: [rgba, 8] }, 255] }]
+            - set: [red, { '/': [{ '*': [red, 44] }, 100] }]
+            - set: [grn, { '/': [{ '*': [grn, 44] }, 100] }]
+            - set: [blu, { '/': [{ '*': [blu, 44] }, 100] }]
+            - return: { bor: [{ shl: [red, 24] }, { bor: [{ shl: [grn, 16] }, { bor: [{ shl: [blu, 8] }, 255] }] }] }
+
+      # step_label: "checkout [arch=x86_64]" → "checkout".  Dieselbe Regel wie
+      # in der Liste (JobRuns.short_name), damit Gitter und Graph dieselben
+      # Spalten haben.
+      - def:
+          name: step_label
+          access: public
+          static_off: ["str_cmp"]
+          args: [[full, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [cut, i32, { call: [full.index_of, " ["] }]
+            - if: { condition: { gt: [cut, 0] }, then: [{ return: { call: [full.substr, 0, cut] } }] }
+            - return: full
+
+      - def:
+          name: status_color
+          access: public
+          static_off: ["str_cmp"]
+          args: [[status, string]]
+          return: i32
+          body:
+            - if: { condition: { eq: [status, "done"] }, then: [{ return: 0x66CC88FF }] }
+            - if: { condition: { eq: [status, "failed"] }, then: [{ return: 0xDD6655FF }] }
+            - if: { condition: { eq: [status, "running"] }, then: [{ return: 0xFFCC66FF }] }
+            - if: { condition: { eq: [status, "queued"] }, then: [{ return: 0x5588BBFF }] }
+            # `paused` ist neu und muss sich von allen vier unterscheiden:
+            # gruen/gelb/blau/rot sind vergeben, also violett.  Ein Zustand
+            # ohne eigene Farbe waere einer, den man nicht sieht.
+            - if: { condition: { eq: [status, "paused"] }, then: [{ return: 0xB58CE8FF }] }
+            - return: 0x667788FF
+
+      # ── Die Umgebung: Agenten als Quader, KV-Speicher als Trommeln ─────
+      # Sie stehen UNTER dem Gitter (y negativ): die Pipeline ist das Thema,
+      # die Maschinerie traegt sie.
+      # add_agents: ein Rack je Agent — UND ein Rohr zu dem Schritt, den er
+      # gerade ausfuehrt.  Erst diese Linie macht aus dem Bild eine Aussage:
+      # „diese Maschine arbeitet an dieser Stufe".  Ohne sie stehen Racks
+      # daneben und koennten ebenso gut Deko sein.
+      - def:
+          name: add_agents
+          access: public
+          static_off: ["str_cmp"]
+          args: [[out, list<SceneItem>], [lst, ref<AgentList>], [run, ref<PipelineRun>]]
+          body:
+            - if: { condition: { peq: [lst, null] }, then: [{ return: [] }] }
+            - decl: [aix, i32, 0]
+            - while:
+                condition: { lt: [aix, lst.agents.len] }
+                body:
+                  - decl: [row, AgentInfo, { at: [lst.agents, aix] }]
+                  - decl: [rack, SceneItem]
+                  - set: [rack.kind, 3]
+                  # Der Agent steht am ANFANG der Pipeline, auf Hoehe der
+                  # Kugeln (User 22.10.2026).  Vorher lag er tief und vorn —
+                  # genau dort, wo seit §107.1c die Schicht-Platten liegen, und
+                  # beide stapelten sich ineinander.  Links vor dem
+                  # Einlaufstueck (x = -0,62 ± 0,45) ist frei, und „wer
+                  # arbeitet" gehoert ohnehin an den Anfang und nicht unter die
+                  # Mitte.
+                  - set: [rack.pos_x, -4.2]
+                  - set: [rack.pos_y, 0.0]
+                  - set: [rack.pos_z, { '*': [{ cast: [aix, f32] }, -1.8] }]
+                  - set: [rack.axis_y, 1.0]
+                  - set: [rack.radius, 0.55]
+                  # Ein verbundener Agent leuchtet, ein abwesender ist Blech.
+                  - if:
+                      condition: { eq: [row.online, 1] }
+                      then: [{ set: [rack.color, 0x88BBEEFF] }]
+                      else: [{ set: [rack.color, 0x4A5260FF] }]
+                  - set: [rack.label, row.agent_id]
+                  - call: [out.push, rack]
+                  # Welche Stufe haelt dieser Agent gerade?
+                  - decl: [busy_with, string, ""]
+                  - decl: [six, i32, 0]
+                  - while:
+                      condition: { lt: [six, run.stages.len] }
+                      body:
+                        - decl: [stg, PipelineStage, { at: [run.stages, six] }]
+                        - set: [six, { +: [six, 1] }]
+                        - if:
+                            condition: { '&&': [{ eq: [stg.status, "running"] }, { eq: [stg.agent, row.agent_id] }] }
+                            then: [{ set: [busy_with, stg.stage_id] }]
+                  - if:
+                      condition: { gt: [busy_with.len, 0] }
+                      then:
+                        # Die Kugel dieser Stufe steht schon in der Liste —
+                        # ihre Lage wird NICHT zweimal gerechnet.
+                        - decl: [tix, i32, 0]
+                        - while:
+                            condition: { lt: [tix, out.len] }
+                            body:
+                              - decl: [cand, SceneItem, { at: [out, tix] }]
+                              - set: [tix, { +: [tix, 1] }]
+                              - if:
+                                  condition: { '&&': [{ eq: [cand.kind, 0] }, { eq: [cand.tag, busy_with] }] }
+                                  then:
+                                    - decl: [link, SceneItem]
+                                    - set: [link.kind, 5]
+                                    - set: [link.pos_x, { '*': [{ +: [rack.pos_x, cand.pos_x] }, 0.5] }]
+                                    - set: [link.pos_y, { '*': [{ +: [rack.pos_y, cand.pos_y] }, 0.5] }]
+                                    - set: [link.pos_z, { '*': [{ +: [rack.pos_z, cand.pos_z] }, 0.5] }]
+                                    - set: [link.axis_x, { -: [cand.pos_x, rack.pos_x] }]
+                                    - set: [link.axis_y, { -: [cand.pos_y, rack.pos_y] }]
+                                    - set: [link.axis_z, { -: [cand.pos_z, rack.pos_z] }]
+                                    - set: [link.radius, 0.06]
+                                    - set: [link.color, 0x7A6A3AFF]
+                                    - call: [out.push, link]
+                  - set: [aix, { +: [aix, 1] }]
+
+      # add_stores: eine Trommel je offenem Speicher.  Ihre HOEHE traegt den
+      # Fuellstand (Eintraege, logarithmisch) — ein leerer und ein voller
+      # Speicher sollen sich unterscheiden, ohne dass man Zahlen liest.
+      # Logarithmisch, weil die Groessen um Zehnerpotenzen auseinanderliegen:
+      # linear waere alles neben dem groessten ein Strich.
+      - def:
+          name: add_stores
+          access: public
+          static_off: ["str_cmp"]
+          args: [[out, list<SceneItem>], [stores, list<KvStoreInfo>]]
+          body:
+            - decl: [nix, i32, 0]
+            - while:
+                condition: { lt: [nix, stores.len] }
+                body:
+                  - decl: [info, KvStoreInfo, { at: [stores, nix] }]
+                  - decl: [drum, SceneItem]
+                  - set: [drum.kind, 2]
+                  # EIN BLOCK, keine endlose Reihe (doc/spec/107 F107-41):
+                  # bei zwanzig Speichern lief x = 3.6 + 1.25·n bis ueber den
+                  # Boden hinaus.  Sechs je Zeile, dann umbrechen.
+                  - decl: [per_row, i32, 6]
+                  - decl: [col, i32, { '%': [nix, per_row] }]
+                  - decl: [row, i32, { '/': [nix, per_row] }]
+                  - set: [drum.pos_x, { +: [3.6, { '*': [{ cast: [col, f32] }, 1.25] }] }]
+                  - set: [drum.pos_z, { +: [0.9, { '*': [{ cast: [row, f32] }, 1.35] }] }]
+                  - decl: [fill, f32, { call: [<.fill_height, info.entries] }]
+                  - set: [drum.axis_y, fill]
+                  # Die Trommel STEHT auf dem Boden, sie schwebt nicht: ihr
+                  # Mittelpunkt wandert mit der halben Hoehe nach oben.
+                  - set: [drum.pos_y, { +: [-2.8, { '*': [fill, 0.5] }] }]
+                  - set: [drum.radius, 0.45]
+                  - set: [drum.color, 0xAA88CCFF]
+                  - if: { condition: { le: [info.entries, 0] }, then: [{ set: [drum.color, 0x5A4A6AFF] }] }
+                  - set: [drum.label, info.name]
+                  - call: [out.push, drum]
+                  - set: [nix, { +: [nix, 1] }]
+
+      # fill_height: 0 Eintraege → flach, dann je Zehnerpotenz ein Stueck.
+      - def:
+          name: fill_height
+          access: public
+          args: [[entries, i64]]
+          return: f32
+          body:
+            - if: { condition: { le: [entries, 0] }, then: [{ return: 0.25 }] }
+            - decl: [steps, f32, 0.25]
+            - decl: [left, i64, entries]
+            - while:
+                condition: { '&&': [{ gt: [left, 0] }, { lt: [steps, 1.8] }] }
+                body:
+                  - set: [steps, { +: [steps, 0.3] }]
+                  - set: [left, { '/': [left, 10] }]
+            - return: steps
+
+      # ── load_color: Last als FARBE (doc/spec/109) ──────────────────────────
+      # Eine Zahl im Raum liest niemand aus dem Augenwinkel; ruhig/warm/heiss
+      # dagegen schon.  Dieselbe Staffelung wie die Kacheln im Controller-Reiter.
+      - def:
+          name: load_color
+          access: public
+          args: [[permille, i32]]
+          return: i32
+          body:
+            - if: { condition: { ge: [permille, 800] }, then: [{ return: 0xE06A5AFF }] }
+            - if: { condition: { ge: [permille, 400] }, then: [{ return: 0xE0B45AFF }] }
+            - return: 0x7FD1FFFF
+
+      # ── of_cluster: das NETZ raeumlich (doc/spec/107 §107.5a) ──────────────
+      #
+      # Auftrag (User 2026-10-18): „eine 3d darstellung wie bei der pipeline".
+      # Dieselbe Maschinerie wie `of_run` — gerechnet, nicht gezeichnet; der
+      # Renderer bleibt dumm und kennt den Schnappschuss nicht.
+      #
+      # Die Anordnung TRAEGT die Aussage: der Controller in der Mitte, seine
+      # Speicher dahinter, die Agenten davor, jede Zugehoerigkeit ein Rohr.
+      # Eine Liste kann „A haengt an B" nur behaupten; hier sieht man es.
+      #
+      # Form = Art, Farbe = Zustand (F107-13): Quader ist Rechner (Controller,
+      # Agent), Trommel ist Speicher.  Die Trommelhoehe traegt die Fuellung —
+      # genau wie in `add_stores`, ueber dieselbe `fill_height`.
+      - def:
+          name: of_cluster
+          access: public
+          static_off: ["str_cmp"]
+          args: [[view, ref<ClusterView>], [lst, ref<AgentList>]]
+          return: { type: list<SceneItem>, lifetime: producer }
+          body:
+            - decl: [out, list<SceneItem>]
+            - call: [<.add_ground, out]
+
+            # Der Controller: ein groesserer Quader im Ursprung, gefaerbt nach
+            # seiner eigenen Last — nicht nach „da/nicht da", denn er ist immer da.
+            - decl: [ctl, SceneItem]
+            - set: [ctl.kind, 3]
+            - set: [ctl.pos_x, 0.0]
+            - set: [ctl.pos_y, -2.05]
+            - set: [ctl.pos_z, 0.0]
+            - set: [ctl.axis_y, 1.0]
+            - set: [ctl.radius, 0.95]
+            - set: [ctl.color, { call: [<.load_color, view.srv_cpu_permille] }]
+            - set: [ctl.label, "cosmosd"]
+            - set: [ctl.tag, "controller"]
+            - call: [out.push, ctl]
+
+            # Speicher DAHINTER, nebeneinander um die Mitte zentriert.
+            - decl: [snum, i32, view.live.stores.len]
+            - decl: [six, i32, 0]
+            # Hoechstens acht je Zeile, dann eine zweite dahinter: eine Reihe
+            # aus zwanzig Trommeln reicht ueber den Boden hinaus und wird zum
+            # Streifen (F107-41).
+            - decl: [per_row_c, i32, 8]
+            - decl: [in_row, i32, snum]
+            - if: { condition: { gt: [in_row, per_row_c] }, then: [{ set: [in_row, per_row_c] }] }
+            - decl: [span_s, f32, { '*': [{ cast: [{ -: [in_row, 1] }, f32] }, 0.65] }]
+            - while:
+                condition: { lt: [six, snum] }
+                body:
+                  - decl: [info, KvStoreInfo, { at: [view.live.stores, six] }]
+                  - decl: [col_c, i32, { '%': [six, per_row_c] }]
+                  - decl: [row_c, i32, { '/': [six, per_row_c] }]
+                  - decl: [pos_s, f32, { -: [{ '*': [{ cast: [col_c, f32] }, 1.3] }, span_s] }]
+                  - decl: [fill, f32, { call: [<.fill_height, info.entries] }]
+                  - decl: [drum, SceneItem]
+                  - set: [drum.kind, 2]
+                  - set: [drum.pos_x, pos_s]
+                  - set: [drum.pos_z, { -: [-2.7, { '*': [{ cast: [row_c, f32] }, 1.3] }] }]
+                  - set: [drum.axis_y, fill]
+                  # Die Trommel STEHT auf dem Boden, sie schwebt nicht.
+                  - set: [drum.pos_y, { +: [-2.85, { '*': [fill, 0.5] }] }]
+                  - set: [drum.radius, 0.42]
+                  - set: [drum.color, 0xAA88CCFF]
+                  - if: { condition: { le: [info.entries, 0] }, then: [{ set: [drum.color, 0x5A4A6AFF] }] }
+                  - set: [drum.label, info.name]
+                  - set: [drum.tag, info.name]
+                  - call: [out.push, drum]
+                  # Das Rohr traegt die Zugehoerigkeit: Mitte = Mittelpunkt der
+                  # Strecke, Achse = der VOLLE Vektor vom Controller zur Trommel.
+                  # Es liegt am BODEN — ein Rohr auf Koerperhoehe spiesst die
+                  # Koerper auf, statt sie zu verbinden (gesehen in Cluster3D.png).
+                  - decl: [slink, SceneItem]
+                  - set: [slink.kind, 1]
+                  - set: [slink.pos_x, { '*': [pos_s, 0.5] }]
+                  - set: [slink.pos_y, -2.72]
+                  - set: [slink.pos_z, -1.35]
+                  - set: [slink.axis_x, pos_s]
+                  - set: [slink.axis_z, -2.7]
+                  - set: [slink.radius, 0.05]
+                  - set: [slink.color, 0x4A5A74FF]
+                  - call: [out.push, slink]
+                  - set: [six, { +: [six, 1] }]
+
+            # Agenten DAVOR.  Ein verbundener leuchtet, ein abwesender ist
+            # Blech — dieselbe Regel und dieselben Farben wie in `add_agents`.
+            - if: { condition: { peq: [lst, null] }, then: [{ return: out }] }
+            - decl: [anum, i32, lst.agents.len]
+            - decl: [aix, i32, 0]
+            - decl: [span_a, f32, { '*': [{ cast: [{ -: [anum, 1] }, f32] }, 0.8] }]
+            - while:
+                condition: { lt: [aix, anum] }
+                body:
+                  - decl: [row, AgentInfo, { at: [lst.agents, aix] }]
+                  - decl: [pos_a, f32, { -: [{ '*': [{ cast: [aix, f32] }, 1.6] }, span_a] }]
+                  - decl: [rack, SceneItem]
+                  - set: [rack.kind, 3]
+                  - set: [rack.pos_x, pos_a]
+                  - set: [rack.pos_y, -2.3]
+                  - set: [rack.pos_z, 2.7]
+                  - set: [rack.axis_y, 1.0]
+                  - set: [rack.radius, 0.6]
+                  - if:
+                      condition: { eq: [row.online, 1] }
+                      then: [{ set: [rack.color, 0x88BBEEFF] }]
+                      else: [{ set: [rack.color, 0x4A5260FF] }]
+                  - set: [rack.label, row.agent_id]
+                  - set: [rack.tag, row.agent_id]
+                  - call: [out.push, rack]
+                  - decl: [alink, SceneItem]
+                  - set: [alink.kind, 1]
+                  - set: [alink.pos_x, { '*': [pos_a, 0.5] }]
+                  - set: [alink.pos_y, -2.72]
+                  - set: [alink.pos_z, 1.35]
+                  - set: [alink.axis_x, pos_a]
+                  - set: [alink.axis_z, 2.7]
+                  - set: [alink.radius, 0.05]
+                  # Ein abwesender Agent haengt nur noch nominell dran.
+                  - if:
+                      condition: { eq: [row.online, 1] }
+                      then: [{ set: [alink.color, 0x4A6A8AFF] }]
+                      else: [{ set: [alink.color, 0x2E3642FF] }]
+                  - call: [out.push, alink]
+                  - set: [aix, { +: [aix, 1] }]
+            - return: out

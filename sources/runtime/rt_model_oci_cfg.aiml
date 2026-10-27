@@ -1,0 +1,30 @@
+# Die Image-KONFIGURATION: was beim Start gilt, wenn niemand etwas anderes
+# sagt.  Die Grossbuchstaben sind der fremde Vertrag (Docker/OCI schreiben
+# `Env`, `Cmd`); drei Zeichen haben sie alle, also braucht hier keiner einen
+# Alias — `os` eine Ebene hoeher schon.
+
+- model:
+    name: OciExec
+    fields:
+      - [Env,        list<string>]
+      - [Cmd,        list<string>]
+      - [Entrypoint, list<string>]
+      - [WorkingDir, string, "/"]
+      - [User,       string, ""]
+
+# `diff_ids` sind die Digests der UNKOMPRIMIERTEN Schicht-Tars — nicht die der
+# Blobs.  Wer das verwechselt, baut ein Image, das kein Leser annimmt.
+- model:
+    name: OciRootfs
+    fields:
+      - [type,     string, "layers"]
+      - [diff_ids, list<string>]
+
+- model:
+    name: OciImgCfg
+    fields:
+      - [architecture, string, "amd64"]
+      - [osname,       string, "linux", { alias: "os" }]
+      - [created,      string, ""]
+      - [config,       OciExec]
+      - [rootfs,       OciRootfs]

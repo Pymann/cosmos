@@ -1,0 +1,1175 @@
+# StepWorker — die Agenten-Seite der Ausfuehrungskette (doc/spec/103).
+#
+# Der Agent ZIEHT (F103-2): er fragt `claim_step`, fuehrt im SANDKASTEN aus
+# (doc/spec/91, bwrap) und meldet mit `report_step`.
+#
+# Der Schritt laeuft DETACHED und wird je Runde nachgesehen — ein blockierender
+# Aufruf haette den Herzschlag mitgenommen, und ein Agent ohne Herzschlag gilt
+# als tot, waehrend er arbeitet.
+
+- import: "sources/models/step_dispatch.aiml"
+- import: "sources/models/step_report.aiml"
+- import: "sources/models/agent_step_note.aiml"
+- import: "sources/models/agent_proto.aiml"   # OutStream
+- import: "sources/shared/out_pump.aiml"
+- import: "sources/shared/dir_stat.aiml"
+
+- class:
+    name: StepWorker
+    members:
+      - [agent_id,    string]
+      - [labels,      string]
+      - [bwrap_path,  string]
+      - [work_root,   string]
+      # In Arbeit (leer = frei).  Ein Agent nimmt EINEN Schritt (§103.8).
+      - [run_id,      string]
+      - [stage_id,    string]
+      - [step_dir,    string]
+      - [run_ws,      string]   # gemeinsamer Arbeitsplatz des LAUFS (/ws)
+      - [boxed,       i32]      # 1 = laeuft IM Container (F110-62)
+      - [image,       string]   # WORIN er laeuft (doc/spec/110 F110-73)
+      - [started_ms,  i64]
+      - [last_renew,  i64]
+      - [last_claim,  i64]
+      - [attempt,     i32]
+      # Wie viele claim_step-Anfragen hintereinander ohne brauchbare Antwort
+      # blieben.  Ein veralteter Agent kann die Zuteilung nicht ENTSCHLUESSELN
+      # (neue Felder im Modell) — er sah dann „verbunden" aus, fragte alle 2 s
+      # erneut und arbeitete nie.  Das ist genau der widerspruechliche Zustand,
+      # ueber den der Nutzer am 15.10.2026 gestolpert ist.
+      - [dumb_runs,   i32]
+      # Ausgabe-Strecke (doc/spec/103 §103.4e).  Die Offsets stehen zusaetzlich
+      # in der Ablage, damit ein Neustart dort weitermacht; hier sind sie der
+      # heisse Pfad, der nicht jede Runde ins KV greifen soll.
+      - [pump_io,     OutPump]
+      - [out_off,     i64]
+      - [err_off,     i64]
+      - [said_cut,    i32]
+      # Je Schritt ein Datensatz (KV statt flacher Merkzettel) — atomar und
+      # mehrzahlfaehig.  Schluessel ist die Stufen-Kennung.
+      - [notes,       Kv<string:AgentStepNote>]
+      # Schritte, die der Rechner-/Agenten-Neustart verschluckt hat: sie werden
+      # dem Server AKTIV gemeldet, sobald wieder eine Sitzung steht.  Auf das
+      # Ablaufen des Lehens zu warten hiesse, 30 s lang nichts zu sagen,
+      # obwohl man es genau weiss (User 2026-10-15).
+      # Welche Freigaben der Wirt in diesen Container gehaengt hat
+      # (doc/spec/110 §110.35): "name:/ziel:modus,…".
+      - [shares,      string]
+      - [lost,        list<AgentStepNote>]
+      # Fertige Schritte, deren Meldung der Server noch nicht bestaetigt hat
+      # (F103-16).  Sie ueberleben den Neustart und werden nachgemeldet.
+      - [pending,     list<AgentStepNote>]
+    methods:
+      - def:
+          name: set_shares
+          access: public
+          args: [[shares, string]]
+          body:
+            - set: [<.shares, "${shares}"]
+
+      - def:
+          name: init
+          access: public
+          args: [[agent_id, string], [labels, string], [bwrap_path, string], [work_root, string], [in_container, i32]]
+          body:
+            - set: [<.agent_id, agent_id]
+            - set: [<.labels, labels]
+            - set: [<.bwrap_path, bwrap_path]
+            - set: [<.boxed, in_container]
+            - set: [<.work_root, "steps"]
+            - if: { condition: { gt: [work_root.len, 0] }, then: [{ set: [<.work_root, work_root] }] }
+            - decl: [root_path, path, <.work_root]
+            - call: [io.mkdir_all, root_path]
+            - if:
+                condition: { eq: [{ call: [io.is_dir, root_path] }, false] }
+                then: [{ call: [log.error, "[step] Arbeitswurzel ${<.work_root} nicht anlegbar — dieser Agent kann keinen Schritt nehmen"] }]
+            - set: [<.notes, { call: [db.open_kv, "agent_steps", {persist: true}] }]
+            # Lagen beim letzten Mal Schritte offen?
+            - call: [<.resume]
+
+      # Pruefhaken fuer die Ablage (doc/spec/103 §103.4a): wie viele Ergebnisse
+      # und Verluste warten gerade auf eine Meldung?  Ohne sie liesse sich die
+      # Zustandsmaschine nur mit Server, Netz und Zufall pruefen.
+      - def:
+          name: pending_count
+          access: public
+          return: i32
+          body:
+            - return: <.pending.len
+
+      - def:
+          name: lost_count
+          access: public
+          return: i32
+          body:
+            - return: <.lost.len
+
+      - def:
+          name: busy
+          access: public
+          return: i32
+          body:
+            - if: { condition: { gt: [<.stage_id.len, 0] }, then: [{ return: 1 }] }
+            - return: 0
+
+      # ── Die Umgebung des Schritts (doc/spec/103 §103.4b) ───────────────
+      # ERLAUBNISLISTE.  Der Agent traegt COSMOS_AGENT_TOKEN in seiner
+      # Umgebung; `sys.exe` erbt sie ohne `env:` (aiml process_runtime:
+      # `envp = environ`), und bwrap gibt sie ohne --clearenv weiter.  Ein
+      # Schritt mit `env | grep COSMOS` haette sich als der Agent ausgeben
+      # koennen — dass sein Token-VERZEICHNIS ungebunden bleibt (F103-7),
+      # half dagegen nicht.
+      #
+      # EINE Liste [name, wert, name, wert, …] als Quelle fuer beide Wege:
+      # die Map fuer `sys.exe` und die --setenv-Paare fuer bwrap.  Zwei
+      # getrennte Aufbauten waeren zwei Orte, an denen ein Geheimnis
+      # durchrutschen kann.
+      #
+      # `outer == 1` = fuer bwrap selbst (braucht seine Bibliotheken),
+      # `outer == 0` = fuer den Schritt drinnen.
+      - def:
+          name: step_vars
+          access: public
+          static_off: ["str_cmp"]
+          args: [[workdir, string], [bindings, string], [outer, i32]]
+          return: { type: list<string>, lifetime: producer }
+          body:
+            - decl: [out, list<string>]
+            - call: [out.push, "PATH"]
+            - call: [out.push, "/usr/bin:/bin:/usr/sbin:/sbin"]
+            - call: [out.push, "HOME"]
+            - call: [out.push, workdir]
+            - call: [out.push, "TMPDIR"]
+            - call: [out.push, "/tmp"]
+            - decl: [src, map<string:string>, { call: [sys.env] }]
+            - if:
+                condition: { gt: [{ call: [src.contains, "LANG"] }, 0] }
+                then: [{ call: [out.push, "LANG"] }, { call: [out.push, { call: [src.get, "LANG"] }] }]
+            - if:
+                condition: { gt: [{ call: [src.contains, "TZ"] }, 0] }
+                then: [{ call: [out.push, "TZ"] }, { call: [out.push, { call: [src.get, "TZ"] }] }]
+            # Nur AUSSEN: bwrap laedt seine Bibliotheken, der Schritt nicht.
+            - if:
+                condition: { '&&': [{ eq: [outer, 1] }, { gt: [{ call: [src.contains, "LD_LIBRARY_PATH"] }, 0] }] }
+                then: [{ call: [out.push, "LD_LIBRARY_PATH"] }, { call: [out.push, { call: [src.get, "LD_LIBRARY_PATH"] }] }]
+            # Die Lane-Bindungen ("arch=x86_64,mode=debug") — §103.3 Punkt 2.
+            # Die Zeile stand seit je in der Spec; `run: "echo $arch"` lief
+            # trotzdem mit leerem $arch, bis es hier gesetzt wurde.
+            - if: { condition: { eq: [bindings.len, 0] }, then: [{ return: out }] }
+            - decl: [pairs, list<string>, { call: [bindings.split, ","] }]
+            - decl: [pix, i32, 0]
+            - while:
+                condition: { lt: [pix, pairs.len] }
+                body:
+                  - decl: [one, string, { at: [pairs, pix] }]
+                  - set: [pix, { +: [pix, 1] }]
+                  - decl: [cut, i32, { call: [one.index_of, "="] }]
+                  - if:
+                      condition: { gt: [cut, 0] }
+                      then:
+                        - call: [out.push, { call: [one.substr, 0, cut] }]
+                        - call: [out.push, { call: [one.substr, { +: [cut, 1] }, { -: [one.len, { +: [cut, 1] }] }] }]
+            - return: out
+
+      - def:
+          name: step_env
+          access: public
+          static_off: ["str_cmp"]
+          args: [[workdir, string], [bindings, string], [outer, i32]]
+          return: { type: map<string:string>, lifetime: producer }
+          body:
+            - decl: [out, map<string:string>]
+            - decl: [flat, list<string>, { call: [<.step_vars, workdir, bindings, outer] }]
+            - decl: [fix, i32, 0]
+            - while:
+                condition: { lt: [{ +: [fix, 1] }, flat.len] }
+                body:
+                  - call: [out.put, { at: [flat, fix] }, { at: [flat, { +: [fix, 1] }] }]
+                  - set: [fix, { +: [fix, 2] }]
+            - return: out
+
+      # ── Schichten je Stufe (doc/spec/110 F110-93) ───────────────────────
+      #
+      # Jeder Schritt laeuft in einem eigenen MOUNT-Namespace auf einem
+      # overlay: `lower` ist das Abbild plus die Schichten aller vorherigen
+      # Stufen, `upper` ist die eigene.  Was er schreibt, landet damit genau in
+      # seiner Schicht — mit Whiteouts fuer Geloeschtes, die der OCI-Export
+      # schon versteht.
+      #
+      # KEIN zweiter User-Namespace (F110-61): nur der Mount-Namespace ist neu,
+      # die Capabilities bleiben, `apt`/`dpkg` koennen weiter fremde
+      # Eigentuemer setzen.  Bewiesen mit `pipelines/overlay_probe.yaml`.
+      - def:
+          name: stage_index
+          access: public
+          static_off: ["str_cmp"]
+          args: [[stage_id, string]]
+          return: i32
+          body:
+            # "<lauf>-<lane>-<nr>" → nr.  Unbekannte Form → -1, dann gibt es
+            # keine Schicht und der Schritt laeuft wie bisher.
+            - decl: [parts, list<string>, { call: [stage_id.split, "-"] }]
+            - if: { condition: { lt: [parts.len, 2] }, then: [{ return: { -: [0, 1] } }] }
+            - decl: [last, string, { at: [parts, { -: [parts.len, 1] }] }]
+            - if: { condition: { eq: [last.len, 0] }, then: [{ return: { -: [0, 1] } }] }
+            - return: { call: [last.parse_i32] }
+
+      # layer_root: wo die Schichten EINES Laufs liegen.  Im Arbeitsbereich des
+      # LAUFS, nicht im Container-Buendel (F110-94) — so ueberlebt eine Schicht
+      # den Container, der sie erzeugt hat, und ein Wiedereinstieg kann sie
+      # wieder auflegen.
+      - def:
+          name: layer_root
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run_id, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - return: "${<.work_root}/${run_id}/layers"
+
+      # lower_chain: die Schichten VOR dieser Stufe, neueste zuerst, dann "/".
+      # Overlayfs liest von links nach rechts mit fallender Vorrangigkeit —
+      # also muss die juengste Schicht links stehen.
+      - def:
+          name: lower_chain
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run_id, string], [upto, i32], [base, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [chain, string, ""]
+            - decl: [idx, i32, { -: [upto, 1] }]
+            - while:
+                condition: { ge: [idx, 0] }
+                body:
+                  - decl: [cand, string, "${{ call: [<.layer_root, run_id] }}/${idx}/upper"]
+                  - decl: [cand_p, path, cand]
+                  - if:
+                      condition: { eq: [{ call: [io.is_dir, cand_p] }, true] }
+                      then:
+                        - if: { condition: { gt: [chain.len, 0] }, then: [{ set: [chain, "${chain}:"] }] }
+                        - set: [chain, "${chain}${cand}"]
+                  - set: [idx, { -: [idx, 1] }]
+            # Dann der UNTERBAU (aiml spec/62 §18.4): die Schichten eines
+            # frueheren Laufs, weiter rechts — also mit geringerem Vorrang als
+            # alles, was DIESER Lauf schon geschrieben hat.  Sie werden nur
+            # GELESEN; geschrieben wird immer in die eigene Schicht.
+            - decl: [under, string, { call: [<.base_chain, base] }]
+            - if:
+                condition: { gt: [under.len, 0] }
+                then:
+                  - if: { condition: { gt: [chain.len, 0] }, then: [{ set: [chain, "${chain}:"] }] }
+                  - set: [chain, "${chain}${under}"]
+            - if: { condition: { gt: [chain.len, 0] }, then: [{ return: "${chain}:/" }] }
+            - return: "/"
+
+      # base_chain: die Schichten des UNTERBAUS, neueste zuerst.
+      #
+      # Form heute: "run:<lauf>" — der Stapel eines frueheren Laufs auf
+      # DIESEM Wirt (doc/spec/110 F110-114).  Er liegt im selben
+      # Arbeitsbereich, also braucht es keine Zuordnung durch den Betreiber;
+      # ein Name waere eine zweite Buchfuehrung ueber dasselbe.
+      - def:
+          name: base_chain
+          access: public
+          static_off: ["str_cmp"]
+          args: [[base, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [out, string, ""]
+            - if: { condition: { eq: [base.len, 0] }, then: [{ return: out }] }
+            - if: { condition: { neq: [{ call: [base.starts_with, "run:"] }, 1] }, then: [{ return: out }] }
+            - decl: [other, string, { call: [base.substr, 4] }]
+            - decl: [root, string, "${<.work_root}/${other}/layers"]
+            # Rueckwaerts: die juengste Schicht des anderen Laufs zuerst.  Die
+            # Obergrenze ist dieselbe wie beim Schnitt (256) — eine Pipeline
+            # mit mehr Stufen gibt es nicht, eine Endlosschleife soll es auch
+            # nicht geben.
+            - decl: [idx2, i32, 255]
+            - while:
+                condition: { ge: [idx2, 0] }
+                body:
+                  - decl: [cand, string, "${root}/${idx2}/upper"]
+                  - decl: [cand_p, path, cand]
+                  - set: [idx2, { -: [idx2, 1] }]
+                  - if:
+                      condition: { eq: [{ call: [io.is_dir, cand_p] }, true] }
+                      then:
+                        - if: { condition: { gt: [out.len, 0] }, then: [{ set: [out, "${out}:"] }] }
+                        - set: [out, "${out}${cand}"]
+            - return: out
+
+      # drop_from: die Schichten DIESER Stufe und aller spaeteren wegwerfen.
+      # Laeuft eine Stufe erneut, ist alles, was nach ihr kam, ueberholt — ein
+      # „ab hier nochmal" mit stehengebliebenen spaeteren Schichten waere ein
+      # Abbild aus zwei verschiedenen Laeufen (doc/spec/110 F110-96).  Die
+      # Obergrenze ist willkuerlich hoch, aber endlich: eine Pipeline mit 512
+      # Stufen gibt es nicht, eine Endlosschleife soll es auch nicht geben.
+      - def:
+          name: drop_from
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run_id, string], [from_ix, i32]]
+          return: i32
+          body:
+            - decl: [gone, i32, 0]
+            - decl: [idx, i32, from_ix]
+            - while:
+                condition: { lt: [idx, 512] }
+                body:
+                  - decl: [cand, string, "${{ call: [<.layer_root, run_id] }}/${idx}"]
+                  - decl: [cand_p, path, cand]
+                  - if:
+                      condition: { eq: [{ call: [io.is_dir, cand_p] }, true] }
+                      then:
+                        - call: [io.remove_all, cand_p]
+                        - set: [gone, { +: [gone, 1] }]
+                  - set: [idx, { +: [idx, 1] }]
+            - return: gone
+
+      # share_dirs: die ZIELE der Freigaben, ohne fuehrenden Schraegstrich —
+      # so, wie die rbind-Schleife im Schicht-Skript sie braucht.  Leer, wenn
+      # es keine gibt; dann laeuft die Schleife ueber nichts.
+      - def:
+          name: share_dirs
+          access: public
+          static_off: ["str_cmp"]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [out, string, ""]
+            - if: { condition: { eq: [<.shares.len, 0] }, then: [{ return: out }] }
+            - decl: [rows, list<string>, { call: [<.shares.split, ","] }]
+            - decl: [rix, i32, 0]
+            - while:
+                condition: { lt: [rix, rows.len] }
+                body:
+                  - decl: [row, string, { at: [rows, rix] }]
+                  - set: [rix, { +: [rix, 1] }]
+                  - decl: [cols, list<string>, { call: [row.split, ":"] }]
+                  - if:
+                      condition: { ge: [cols.len, 2] }
+                      then:
+                        - decl: [dest, string, { at: [cols, 1] }]
+                        - if:
+                            condition: { eq: [{ call: [dest.starts_with, "/"] }, 1] }
+                            then: [{ set: [dest, { call: [dest.substr, 1] }] }]
+                        - if: { condition: { gt: [out.len, 0] }, then: [{ set: [out, "${out} "] }] }
+                        - set: [out, "${out}${dest}"]
+            - return: out
+
+      # layer_script: das Skript, das den overlay legt und den Befehl darin
+      # ausfuehrt.  Scheitert das Auflegen, laeuft der Befehl TROTZDEM — ohne
+      # Schicht, mit einer Zeile Begruendung.  Ein Schritt, der nur deshalb
+      # ausfaellt, weil die Buchfuehrung nicht klappt, waere der schlechtere
+      # Tausch (doc/spec/110 F110-93).
+      #
+      # `pivot_root`, NICHT `chroot`: das Seccomp-Profil des Containers verbietet
+      # chroot ausdruecklich (rt_exec.aiml) — es ist der ausbruchsanfaellige Weg.
+      # pivot_root ist erlaubt und ohnehin das richtige Werkzeug: es ersetzt die
+      # Wurzel des Mount-Namespace, statt nur den Pfad zu verbiegen.
+      - def:
+          name: layer_script
+          access: public
+          static_off: ["str_cmp"]
+          args: [[ldir, string], [lower, string], [cwd, string], [needs, string], [run_ws, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [txt, string, "#!/bin/sh\n"]
+            - set: [txt, "${txt}UP='${ldir}/upper'; WK='${ldir}/work'; MG='${ldir}/merged'\n"]
+            # Die Schicht gehoert dem AKTUELLEN Versuch (doc/spec/103 F103-20,
+            # jetzt auch fuer Schichten): ein Wiederlauf, der die alte Schicht
+            # weiterbenutzt, haette das Ergebnis des vorigen schon drin — und
+            # „ab hier nochmal" waere keine Wiederholung, sondern eine
+            # Fortsetzung.
+            - set: [txt, "${txt}rm -rf \"$UP\" \"$WK\" 2>/dev/null\n"]
+            - set: [txt, "${txt}mkdir -p \"$UP\" \"$WK\" \"$MG\"\n"]
+            # Ohne `--make-rprivate` weigert sich pivot_root: eine geteilte
+            # Wurzel wuerde die Aenderung nach aussen tragen.
+            - set: [txt, "${txt}mount --make-rprivate / 2>/dev/null\n"]
+            - set: [txt, "${txt}if mount -t overlay overlay -o lowerdir='${lower}',upperdir=\"$UP\",workdir=\"$WK\" \"$MG\" 2>/tmp/ovl.err; then\n"]
+            # Die FREIGABEN mit durchreichen (F110-107).  Der overlay legt
+            # sich ueber die ganze Wurzel; ohne diesen rbind schriebe ein
+            # `mode: rw` in die Schicht der Stufe statt auf die Freigabe —
+            # gemessen 22.10.2026: die Datei lag in `0/upper/mnt/ablage`, und
+            # auf dem Wirt stand nichts.
+            - set: [txt, "${txt}for d in ${{ call: [<.share_dirs] }}; do\n"]
+            - set: [txt, "${txt}  [ -e \"/$d\" ] || continue; mkdir -p \"$MG/$d\" 2>/dev/null\n"]
+            - set: [txt, "${txt}  mount --rbind \"/$d\" \"$MG/$d\" 2>/dev/null || true\n"]
+            - set: [txt, "${txt}done\n"]
+            - set: [txt, "${txt}  for d in proc sys dev work src gitcred; do\n"]
+            - set: [txt, "${txt}    [ -e \"/$d\" ] || continue; mkdir -p \"$MG/$d\" 2>/dev/null\n"]
+            - set: [txt, "${txt}    mount --rbind \"/$d\" \"$MG/$d\" 2>/dev/null || true\n"]
+            - set: [txt, "${txt}  done\n"]
+            # /tmp als EIGENES tmpfs, mode 1777 (doc/spec/110 F110-108).
+            # Der Container bringt ein tmpfs auf /tmp mit — aber das haengt in
+            # der ALTEN Wurzel, und nach `pivot_root` ist /tmp das Verzeichnis
+            # aus dem Abbild, mit dessen Rechten.  `apt` laesst seine Downloads
+            # als Nutzer `_apt` laufen; der kann dort nicht schreiben, und apt
+            # meldet nicht „kein Platz", sondern „Repository ist nicht
+            # signiert" — der Fehler zeigt woandershin als seine Ursache.
+            # /ws ist der Arbeitsplatz des LAUFS, nicht des Containers
+            # (doc/spec/110 F110-111).  Er liegt unter /work und ueberlebt
+            # damit den Container; die Wurzel des Containers tut das nicht —
+            # sie wird beim Abraeumen geloescht, und mit ihr war alles weg,
+            # was eine fruehere Stufe nach /ws gelegt hatte.
+            - set: [txt, "${txt}  mkdir -p \"$MG/ws\" '${run_ws}'\n"]
+            - set: [txt, "${txt}  mount --rbind '${run_ws}' \"$MG/ws\" 2>/dev/null || true\n"]
+            - set: [txt, "${txt}  mkdir -p \"$MG/tmp\"\n"]
+            - set: [txt, "${txt}  mount -t tmpfs -o mode=1777,nosuid,nodev tmpfs \"$MG/tmp\" 2>/dev/null \\\n"]
+            - set: [txt, "${txt}    || mount --rbind /tmp \"$MG/tmp\" 2>/dev/null \\\n"]
+            - set: [txt, "${txt}    || chmod 1777 \"$MG/tmp\" 2>/dev/null || true\n"]
+            - set: [txt, "${txt}  mkdir -p \"$MG/.alt\"\n"]
+            - set: [txt, "${txt}  if cd \"$MG\" && pivot_root . .alt 2>/tmp/piv.err; then\n"]
+            - set: [txt, "${txt}    cd /; umount -l /.alt 2>/dev/null || true\n"]
+            - set: [txt, "${txt}    cd '${cwd}' 2>/dev/null || true\n"]
+            # Die Vorbedingung gilt IN dieser Wurzel (doc/spec/110 F110-109).
+            # Geprueft wird mit DEMSELBEN Agenten, nur im Pruefmodus — eine
+            # zweite Fassung als Shell-Schleife waere die Kopie, die
+            # auseinanderlaeuft, und die schweigende Haelfte waere die
+            # gefaehrliche.
+            - if:
+                condition: { gt: [needs.len, 0] }
+                then:
+                  - set: [txt, "${txt}    LD_LIBRARY_PATH=/opt/cosmos/lib /opt/cosmos/agent --require-check '${needs}' || exit 127\n"]
+            - set: [txt, "${txt}    exec /bin/sh -lc \"$COSMOS_STEP_CMD\"\n"]
+            - set: [txt, "${txt}  fi\n"]
+            - set: [txt, "${txt}  echo \"[schicht] pivot_root scheiterte ($(head -1 /tmp/piv.err 2>/dev/null)) — Schritt laeuft OHNE eigene Schicht\" >&2\n"]
+            - set: [txt, "${txt}else\n"]
+            - set: [txt, "${txt}  echo \"[schicht] overlay nicht moeglich ($(head -1 /tmp/ovl.err 2>/dev/null)) — Schritt laeuft OHNE eigene Schicht\" >&2\n"]
+            - set: [txt, "${txt}fi\n"]
+            - set: [txt, "${txt}cd '${cwd}' 2>/dev/null || true\n"]
+            - set: [txt, "${txt}exec /bin/sh -lc \"$COSMOS_STEP_CMD\"\n"]
+            - return: txt
+
+      # ── Der Sandkasten (doc/spec/103 §103.4) ────────────────────────────
+      # /opt/cosmos wird NICHT gebunden (F103-7): dort liegt agent.token, und
+      # ein Schritt, der ihn liest, kann sich als der Agent ausgeben.  /home,
+      # /root, /var und /media bleiben ebenso draussen — der Schritt sieht das
+      # Betriebssystem, nicht den Menschen, dem der Rechner gehoert.
+      # ── requires: pruefen, bevor gearbeitet wird (aiml F62-126) ─────────
+      #
+      # Die Pruefung selbst ist aiml-Laufzeit (`sys.require_tools`, spec/23
+      # §5.6): EIN Ort fuer diese Frage (F23-43).  Eine zweite Fassung hier —
+      # als Shell-Schleife, wie zuerst geschrieben — waere genau die Kopie, die
+      # mit der Zeit auseinanderlaeuft, und die schweigende Haelfte waere die
+      # gefaehrliche.
+      - def:
+          name: missing_requires
+          access: public
+          static_off: ["str_cmp"]
+          args: [[spec_txt, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - if: { condition: { eq: [spec_txt.len, 0] }, then: [{ return: "" }] }
+            - return: { call: [sys.require_tools, spec_txt] }
+
+      # note_err: eine Begruendung des AGENTEN in das Fehlerprotokoll der Stufe
+      # schreiben (doc/spec/107 F107-53).
+      #
+      # Ein Schritt, der gar nicht erst anlaeuft, hinterlaesst sonst NICHTS:
+      # keine Ausgabe, kein Fehler, nur eine rote Kugel.  Gemeldet am
+      # 22.10.2026 („also ohne output").  Der Weg zur Oberflaeche ist derselbe
+      # wie fuer alles andere — die Datei, die der Lauf-Speicher nachzieht.
+      - def:
+          name: note_err
+          access: public
+          static_off: ["str_cmp"]
+          args: [[text, string]]
+          body:
+            - if: { condition: { eq: [<.step_dir.len, 0] }, then: [{ return: null }] }
+            - decl: [err_at, string, "${<.step_dir}/err"]
+            - decl: [had, string, ""]
+            - if: { condition: { eq: [{ call: [io.is_file, err_at] }, true] }, then: [{ set: [had, { call: [io.read_file, err_at] }] }] }
+            - call: [io.write_file, err_at, "${had}${text}\n"]
+
+      # in_userns: stecken wir schon in einem User-Namespace?
+      #
+      # `/proc/self/uid_map` beantwortet es ohne Rateschleife: auf dem Wirt
+      # steht dort die Vollabbildung (…4294967295), im Namespace ein Ausschnitt.
+      - def:
+          name: in_userns
+          access: public
+          static_off: ["str_cmp"]
+          return: i32
+          body:
+            - decl: [raw, string, { call: [io.read_file, "/proc/self/uid_map"] }]
+            - if: { condition: { eq: [raw.len, 0] }, then: [{ return: 0 }] }
+            - if: { condition: { ge: [{ call: [raw.index_of, "4294967295"] }, 0] }, then: [{ return: 0 }] }
+            - return: 1
+
+      - def:
+          name: sandbox_argv
+          access: public
+          static_off: ["str_cmp"]
+          args: [[workdir, string], [command, string], [bindings, string]]
+          return: { type: list<string>, lifetime: producer }
+          body:
+            - decl: [argv, list<string>]
+            - call: [argv.push, <.bwrap_path]
+            # §103.4b: innen gilt NUR die gebaute Umgebung.  --clearenv ist das
+            # zweite Netz unter dem `env:` von sys.exe.
+            - call: [argv.push, "--clearenv"]
+            - decl: [flat, list<string>, { call: [<.step_vars, workdir, bindings, 0] }]
+            - decl: [eix, i32, 0]
+            - while:
+                condition: { lt: [{ +: [eix, 1] }, flat.len] }
+                body:
+                  - call: [argv.push, "--setenv"]
+                  - call: [argv.push, { at: [flat, eix] }]
+                  - call: [argv.push, { at: [flat, { +: [eix, 1] }] }]
+                  - set: [eix, { +: [eix, 2] }]
+            # IM Container darf ein Schritt bauen: `tar` muss Eigentuemer setzen,
+            # `apt`/`dpkg` legen Dateien fuer fremde Kennungen an.  Ohne
+            # Capabilities scheitert schon das Auspacken eines Base-Images
+            # („Cannot change ownership", gemessen 21.10.2026).  Die Grenze ist
+            # dort der CONTAINER — User-Namespace, cgroup, read-only Wurzel —,
+            # nicht der leere Capability-Satz des Schritts.  DRAUSSEN, auf einem
+            # nackten Knoten, bleibt es beim leeren Satz: da waere der Sandkasten
+            # die einzige Grenze.
+            - if:
+                condition: { eq: [<.boxed, 1] }
+                then:
+                  - call: [argv.push, "--cap-add"]
+                  - call: [argv.push, "ALL"]
+            # Ein zweiter User-Namespace nur DRAUSSEN.  Sitzt der Agent schon
+            # in einem (Container), gehoeren die Mounts dem AEUSSEREN Namespace:
+            # aus einem neuen heraus sind sie nicht mehr umhaengbar, und bwrap
+            # scheitert an `uid map` bzw. `make / slave` (gemessen 21.10.2026,
+            # doc/spec/110 F110-57).  Drinnen ist der Container die Grenze —
+            # ein zweiter waere keine zusaetzliche, sondern gar keine.
+            - if:
+                condition: { eq: [<.boxed, 0] }
+                then: [{ call: [argv.push, "--unshare-user"] }]
+            - call: [argv.push, "--unshare-pid"]
+            - call: [argv.push, "--unshare-ipc"]
+            - call: [argv.push, "--unshare-uts"]
+            - call: [argv.push, "--unshare-cgroup"]
+            - call: [argv.push, "--die-with-parent"]
+            - call: [argv.push, "--uid"]
+            - call: [argv.push, "0"]
+            - call: [argv.push, "--gid"]
+            - call: [argv.push, "0"]
+            - call: [argv.push, "--ro-bind"]
+            - call: [argv.push, "/usr"]
+            - call: [argv.push, "/usr"]
+            - call: [argv.push, "--ro-bind"]
+            - call: [argv.push, "/etc"]
+            - call: [argv.push, "/etc"]
+            # /etc/resolv.conf ist auf systemd-Rechnern ein Symlink nach
+            # /run/systemd/resolve — ohne dieses Verzeichnis zeigt er im
+            # Sandkasten ins Leere, und der Schritt hat kein DNS (gemessen
+            # 21.10.2026: „Could not resolve host: github.com").  `-try`, weil
+            # es den Ort nicht ueberall gibt.
+            - call: [argv.push, "--ro-bind-try"]
+            - call: [argv.push, "/run/systemd/resolve"]
+            - call: [argv.push, "/run/systemd/resolve"]
+            - call: [argv.push, "--symlink"]
+            - call: [argv.push, "usr/bin"]
+            - call: [argv.push, "/bin"]
+            - call: [argv.push, "--symlink"]
+            - call: [argv.push, "usr/lib"]
+            - call: [argv.push, "/lib"]
+            - call: [argv.push, "--symlink"]
+            - call: [argv.push, "usr/lib64"]
+            - call: [argv.push, "/lib64"]
+            - call: [argv.push, "--proc"]
+            - call: [argv.push, "/proc"]
+            - call: [argv.push, "--dev"]
+            - call: [argv.push, "/dev"]
+            - call: [argv.push, "--tmpfs"]
+            - call: [argv.push, "/tmp"]
+            # Nur DIESES Verzeichnis ist beschreibbar (Abnahme A3): zwei
+            # Schritte sehen die Arbeit des anderen nicht.
+            - call: [argv.push, "--bind"]
+            - call: [argv.push, workdir]
+            - call: [argv.push, workdir]
+            # Lokale Spiegel, falls der Container welche hat (COSMOS_RT_SRC).
+            - call: [argv.push, "--ro-bind-try"]
+            - call: [argv.push, "/src"]
+            - call: [argv.push, "/src"]
+            # Zugangsdatei, falls der Container eine hat: der Schritt sieht sie
+            # unter /ws/git-credentials, read-only.  `-try`, denn der Normalfall
+            # ist ein Container OHNE Zugang.
+            - call: [argv.push, "--ro-bind-try"]
+            - call: [argv.push, "/gitcred"]
+            - call: [argv.push, "/ws/git-credentials"]
+            # Dazu der Arbeitsplatz des LAUFS unter /ws — der Ort, an dem eine
+            # mehrstufige Pipeline ihr Zwischenergebnis stehen laesst.
+            - if:
+                condition: { gt: [<.run_ws.len, 0] }
+                then:
+                  - call: [argv.push, "--bind"]
+                  - call: [argv.push, <.run_ws]
+                  - call: [argv.push, "/ws"]
+            - call: [argv.push, "--chdir"]
+            - call: [argv.push, workdir]
+            - call: [argv.push, "sh"]
+            - call: [argv.push, "-c"]
+            - call: [argv.push, command]
+            - return: argv
+
+      # ── claim: nach Arbeit fragen ───────────────────────────────────────
+      - def:
+          name: claim
+          access: public
+          static_off: ["str_cmp"]
+          args: [[sess, mirror_session], [now_ms, i64]]
+          return: i32
+          body:
+            - if: { condition: { eq: [{ call: [<.busy] }, 1] }, then: [{ return: 0 }] }
+            # F103-10: ein leerer claim kostet eine Nachricht, kein Protokoll.
+            - if: { condition: { lt: [now_ms, { +: [<.last_claim, 2000] }] }, then: [{ return: 0 }] }
+            - set: [<.last_claim, now_ms]
+            - decl: [req, StepClaimReq]
+            - set: [req.agent_id, <.agent_id]
+            - set: [req.labels, <.labels]
+            - set: [req.image, <.image]
+            - decl: [got, StepAssignment]
+            - decl: [okay, i32, { call: [sess.send_and_await, 0, "claim_step", req, got, 4000] }]
+            - if:
+                condition: { neq: [okay, 1] }
+                then:
+                  - set: [<.dumb_runs, { +: [<.dumb_runs, 1] }]
+                  # EINMAL deutlich werden, nicht alle 2 s dieselbe Zeile: nach
+                  # fuenf vergeblichen Anfragen ist es kein Zufall mehr.
+                  - if:
+                      condition: { eq: [<.dumb_runs, 5] }
+                      then: [{ call: [log.error, "[step] claim_step bleibt ohne brauchbare Antwort — dieser Agent ist vermutlich AELTER als der Server (Modell geaendert). Er bleibt verbunden, kann aber nichts annehmen: bitte im Agenten-Menue „Aktualisieren\" druecken."] }]
+                  # Und danach nicht mehr im Zweisekundentakt fragen: ein
+                  # veralteter Agent soll das Protokoll nicht zumuellen.
+                  - if: { condition: { ge: [<.dumb_runs, 5] }, then: [{ set: [<.last_claim, { +: [now_ms, 28000] }] }] }
+                  - return: 0
+            - set: [<.dumb_runs, 0]
+            - if: { condition: { neq: [got.found, 1] }, then: [{ return: 0 }] }
+            # F103-1: ein Schritt ohne Befehl ist nicht ausfuehrbar — das wird
+            # SOFORT gemeldet, statt das Lehen auslaufen zu lassen.
+            - if:
+                condition: { eq: [got.command.len, 0] }
+                then:
+                  - call: [log.error, "[step] ${got.stage_name}: kein Befehl (run: fehlt) — abgelehnt"]
+                  - call: [<.send_report, sess, got.run_id, got.stage_id, 125, "kein Befehl am Schritt"]
+                  - return: 0
+            - set: [<.run_id, got.run_id]
+            - set: [<.stage_id, got.stage_id]
+            - set: [<.attempt, got.attempt]
+            - set: [<.out_off, 0]
+            - set: [<.err_off, 0]
+            - set: [<.said_cut, 0]
+            - set: [<.started_ms, now_ms]
+            - set: [<.last_renew, now_ms]
+            - set: [<.step_dir, "${<.work_root}/${got.run_id}/${got.stage_id}"]
+            - decl: [dir_path, path, <.step_dir]
+            - call: [io.mkdir_all, dir_path]
+            # Ein LAUF hat einen Arbeitsplatz, ein SCHRITT sein Verzeichnis.
+            # Ohne den gemeinsamen Platz kann keine mehrstufige Pipeline bauen:
+            # was `apt` auspackt, saehe der naechste Schritt nicht (Abnahme A3
+            # bleibt — getrennt ist, was ein Schritt SELBST anlegt, geteilt ist
+            # nur, was er ausdruecklich nach /ws legt).
+            - set: [<.run_ws, "${<.work_root}/${got.run_id}/ws"]
+            - decl: [ws_path, path, <.run_ws]
+            - call: [io.mkdir_all, ws_path]
+            # Ohne Arbeitsverzeichnis gibt es weder Ausgabe noch Status-Datei —
+            # der Agent wartete dann EWIG auf ein Ende, das niemand melden kann,
+            # und erneuerte alle 10 s sein Lehen (gemessen 2026-10-15: der Dienst
+            # lief ohne WorkingDirectory in „/", wo er nichts anlegen darf).
+            # Lieber sofort mit Begruendung scheitern als schweigend haengen.
+            - if:
+                condition: { eq: [{ call: [io.is_dir, dir_path] }, false] }
+                then:
+                  - call: [log.error, "[step] ${got.stage_name}: Arbeitsverzeichnis ${<.step_dir} nicht anlegbar"]
+                  - call: [<.send_report, sess, got.run_id, got.stage_id, 127, "Arbeitsverzeichnis ${<.step_dir} nicht anlegbar — laeuft der Dienst in einem beschreibbaren WorkingDirectory?"]
+                  - set: [<.run_id, ""]
+                  - set: [<.stage_id, ""]
+                  - return: 0
+            # Die Spuren des VORIGEN Versuchs weg, bevor dieser anfaengt
+            # (doc/spec/103 F103-20).  Der Agent erkennt „fertig" daran, dass
+            # eine `status`-Datei im Stufen-Verzeichnis liegt — und das
+            # Verzeichnis traegt Lauf und Stufe, also findet ein ZWEITER
+            # Versuch die Datei des ersten vor.  Gemessen am 22.10.2026
+            # (run-1792672340772, „ab hier nochmal"): der Agent startete den
+            # Befehl, las im selben Takt die alte Status-Datei, meldete den
+            # ALTEN Rueckgabewert und vergass den Schritt — in derselben
+            # Sekunde, waehrend der echte Befehl erst anlief.  Dasselbe trifft
+            # jeden zweiten Anlauf nach abgelaufenem Lehen (F101-5).
+            - decl: [old_status, path, "${<.step_dir}/status"]
+            - decl: [old_out, path, "${<.step_dir}/out"]
+            - decl: [old_err, path, "${<.step_dir}/err"]
+            - if: { condition: { eq: [{ call: [io.is_file, old_status] }, true] }, then: [{ call: [io.remove, old_status] }] }
+            - if: { condition: { eq: [{ call: [io.is_file, old_out] }, true] }, then: [{ call: [io.remove, old_out] }] }
+            - if: { condition: { eq: [{ call: [io.is_file, old_err] }, true] }, then: [{ call: [io.remove, old_err] }] }
+            # F103-15: VORMERKEN, bevor etwas laeuft.  Vorher stand die Notiz
+            # erst nach `sys.exe` — stirbt der Agent in diesem Fenster, arbeitet
+            # ein Schritt, den niemand beobachtet, und der Server teilt die
+            # Stufe nach Fristablauf ein zweites Mal zu.
+            - call: [<.remember, got.run_id, got.stage_id, <.step_dir, 0]
+            # Vorbedingungen zuerst (aiml F62-126): fehlt etwas, faellt es JETZT
+            # auf — nicht in der fuenften Minute mit einer Meldung ueber eine
+            # fehlende Header-Datei, die niemanden auf das fehlende Paket bringt.
+            # NUR ausserhalb des Containers (doc/spec/110 F110-109): mit
+            # Schichten sieht der Agent die Basis, nicht den Stand, auf dem die
+            # Stufe laeuft — alles, was eine fruehere Stufe installiert hat,
+            # liegt in DEREN Schicht.  Im Container prueft der Schritt selbst,
+            # in seiner Wurzel (`--require-check` im Schicht-Skript).
+            - decl: [miss, string, ""]
+            - if: { condition: { eq: [<.boxed, 0] }, then: [{ set: [miss, { call: [<.missing_requires, got.requires] }] }] }
+            - if:
+                condition: { gt: [miss.len, 0] }
+                then:
+                  - call: [log.error, "[step] ${got.stage_name}: Umgebung unvollstaendig —${miss}"]
+                  - call: [<.note_err, "Umgebung unvollstaendig —${miss}  (requires:, aiml spec/62 §18.2)"]
+                  - call: [<.send_report, sess, got.run_id, got.stage_id, 127, "Umgebung unvollstaendig: ${miss} (requires:, aiml spec/62 §18.2)"]
+                  - call: [<.forget, got.stage_id]
+                  - set: [<.run_id, ""]
+                  - set: [<.stage_id, ""]
+                  - return: 0
+
+            # IM Container laeuft der Befehl DIREKT: der Container IST der
+            # Sandkasten (eigener User-Namespace, eigene cgroup, eigene Wurzel).
+            # Ein bwrap darin macht IMMER einen weiteren User-Namespace, und der
+            # bildet nur EINE Kennung ab — `tar`/`dpkg` koennen dann keine
+            # fremden Eigentuemer setzen („Cannot change ownership … Invalid
+            # argument", gemessen 21.10.2026, doc/spec/110 F110-61).  Draussen,
+            # auf einem nackten Knoten, bleibt bwrap die Grenze.
+            - decl: [direct, i32, <.boxed]
+            - decl: [argv, list<string>]
+            - if:
+                condition: { eq: [direct, 1] }
+                then:
+                  # Im Container: der Schritt arbeitet auf SEINER Schicht
+                  # (doc/spec/110 F110-93).  Das Skript steht in einer Datei,
+                  # nicht in der Befehlszeile — ein Befehl mit Anfuehrungs-
+                  # zeichen (und das sind fast alle) waere sonst nicht sicher
+                  # zu verschachteln.  Der eigentliche Befehl reist als
+                  # UMGEBUNGSVARIABLE, aus demselben Grund.
+                  - decl: [sidx, i32, { call: [<.stage_index, got.stage_id] }]
+                  - decl: [lroot, string, { call: [<.layer_root, got.run_id] }]
+                  - decl: [ldir, string, "${lroot}/${sidx}"]
+                  - decl: [script, string, "${<.step_dir}/stage.sh"]
+                  - if:
+                      condition: { ge: [sidx, 0] }
+                      then:
+                        # Erst raeumen, dann legen: diese Stufe laeuft, also
+                        # ist alles ab hier ungueltig (F110-96).
+                        - decl: [tossed, i32, { call: [<.drop_from, got.run_id, sidx] }]
+                        - if:
+                            condition: { gt: [tossed, 0] }
+                            then: [{ call: [log.info, "[schicht] ${got.stage_id}: ${tossed} Schicht(en) ab ${sidx} verworfen"] }]
+                        - call: [io.write_file, script, { call: [<.layer_script, ldir, { call: [<.lower_chain, got.run_id, sidx, got.base] }, <.step_dir, got.requires, <.run_ws] }]
+                        - call: [argv.push, "unshare"]
+                        - call: [argv.push, "-m"]
+                        - call: [argv.push, "/bin/sh"]
+                        - call: [argv.push, script]
+                      else:
+                        - call: [argv.push, "/bin/sh"]
+                        - call: [argv.push, "-lc"]
+                        - call: [argv.push, got.command]
+                else:
+                  - set: [argv, { call: [<.sandbox_argv, <.step_dir, got.command, got.bindings] }]
+            - decl: [oenv, map<string:string>, { call: [<.step_env, <.step_dir, got.bindings, { -: [1, direct] }] }]
+            # Der Befehl als VARIABLE: so muss das Schichten-Skript ihn nicht
+            # in Anfuehrungszeichen fassen — und ein Befehl, der selbst welche
+            # enthaelt (fast jeder), bleibt heil.
+            - call: [oenv.put, "COSMOS_STEP_CMD", got.command]
+            # F103-17: die Ausfuehrungsgrenze.  Der ABGEKOPPELTE Beobachter
+            # erzwingt sie selbst (spec/23 §5.3) — auch wenn der Agent
+            # zwischendurch stirbt.  Der Rueckgabewert ist dann 124, wie bei
+            # GNU `timeout`.  Ohne Grenze hielt ein haengender Befehl seinen
+            # Schritt fuer immer: das Lehen wurde ja brav erneuert (F103-5).
+            - decl: [tmo_ms, i32, 3600000]
+            - if: { condition: { gt: [got.timeout_ms, 0] }, then: [{ set: [tmo_ms, got.timeout_ms] }] }
+            - decl: [proc, process, { call: [sys.exe, argv, {detach: true, env: oenv, cwd: "${<.step_dir}", timeout: tmo_ms, stdout: "${<.step_dir}/out", stderr: "${<.step_dir}/err", status_file: "${<.step_dir}/status"}] }]
+            - if:
+                condition: { le: [proc.pid, 0] }
+                then:
+                  - call: [log.error, "[step] ${got.stage_name}: Sandkasten liess sich nicht starten"]
+                  - call: [<.note_err, "Der Schritt konnte nicht gestartet werden (Sandkasten/Prozess).  Protokoll des Agenten: ${<.step_dir}"]
+                  - call: [<.send_report, sess, got.run_id, got.stage_id, 126, "Sandkasten startete nicht"]
+                  - call: [<.forget, got.stage_id]
+                  - set: [<.run_id, ""]
+                  - set: [<.stage_id, ""]
+                  - return: 0
+            - call: [log.info, "[step] ${got.stage_name} gestartet (pid ${proc.pid})"]
+            # Merkzettel: ueberlebt den eigenen Neustart.  Ohne ihn vergisst der
+            # Agent seinen laufenden Schritt, und das Ergebnis — das der
+            # abgekoppelte Beobachter sehr wohl noch schreibt — geht verloren;
+            # der Schritt liefe spaeter ein zweites Mal (Analyse 2026-10-15).
+            - call: [<.remember, got.run_id, got.stage_id, <.step_dir, proc.pid]
+            - return: 1
+
+      # ── Die Schritt-Ablage: ein Datensatz je Schritt ────────────────────
+      # Vorher: EINE Datei `steps/current` mit vier Zeilen.  Zwei Gruende, das
+      # in ein KV zu heben (User 2026-10-15):
+      #
+      #   1. `io.write_file` ist nicht atomar.  Stirbt der Agent mitten im
+      #      Schreiben, liegt eine halbe Notiz da; sie galt als unlesbar, und
+      #      der Schritt lief ein zweites Mal — genau das, was der Merkzettel
+      #      verhindern sollte.  Das KV schreibt ueber ein WAL.
+      #   2. Eine Datei namens `current` kann nur EINEN Schritt fassen.  Mit
+      #      mehreren Schritten je Agent (doc/spec/103 §103.8 — eigene Scheibe)
+      #      muesste man sie sofort wieder umbauen.  Der Schluessel ist darum
+      #      jetzt die Stufen-Kennung, nicht „current".
+      - def:
+          name: remember
+          access: public
+          args: [[run_id, string], [stage_id, string], [step_dir, string], [pid, i64]]
+          body:
+            - decl: [note, AgentStepNote]
+            - set: [note.run_id, run_id]
+            - set: [note.stage_id, stage_id]
+            - set: [note.step_dir, step_dir]
+            - set: [note.pid, pid]
+            - set: [note.started_ms, { call: [time.now] }]
+            - set: [note.done, 0]
+            - set: [note.exit_code, -1]
+            - set: [note.attempt, <.attempt]
+            - call: [<.notes.set, stage_id, note]
+
+      # F103-16: fertig, Meldung offen.  Der Eintrag ueberlebt, bis der Server
+      # geantwortet hat — sonst wirft ein Netzfehler ein fertiges Ergebnis weg
+      # und der Schritt laeuft ein zweites Mal.
+      - def:
+          name: mark_done
+          access: public
+          args: [[stage_id, string], [code, i32]]
+          body:
+            - if: { condition: { eq: [{ call: [<.notes.has, stage_id] }, 0] }, then: [{ return: [] }] }
+            - decl: [note, AgentStepNote, { call: [<.notes.get_copy, stage_id] }]
+            - set: [note.done, 1]
+            - set: [note.exit_code, code]
+            - call: [<.notes.set, stage_id, note]
+
+      - def:
+          name: forget
+          access: public
+          args: [[stage_id, string]]
+          body:
+            - if: { condition: { eq: [{ call: [<.notes.has, stage_id] }, 1] }, then: [{ call: [<.notes.delete, stage_id] }] }
+
+      # resume: beim Start ALLE offenen Schritte durchgehen.
+      #   laeuft noch      → wieder aufnehmen und weiter beobachten
+      #   war fertig       → das Ergebnis liegt in der Status-Datei; `tick`
+      #                      meldet es, nichts ist verloren
+      #   spurlos weg      → auf `lost` legen und dem Server MELDEN, sobald
+      #                      eine Sitzung steht (nicht auf das Lehen warten)
+      #
+      # Der Rechner-Neustart ist der harte Fall: dann ist jeder dieser Prozesse
+      # weg, und der Agent liest hier genau ab, welche — und sagt es.
+      - def:
+          name: resume
+          access: public
+          static_off: ["str_cmp"]
+          body:
+            - decl: [keys, list<string>]
+            - decl: [nit, iterator<string>, { call: [<.notes.iter] }]
+            - while:
+                condition: { gt: [{ call: [nit.has_next] }, 0] }
+                body: [{ call: [keys.push, { call: [nit.next] }] }]
+            - if: { condition: { eq: [keys.len, 0] }, then: [{ return: [] }] }
+            - decl: [kix, i32, 0]
+            - decl: [alive, i32, 0]
+            - while:
+                condition: { lt: [kix, keys.len] }
+                body:
+                  - decl: [key, string, { at: [keys, kix] }]
+                  - set: [kix, { +: [kix, 1] }]
+                  - decl: [note, AgentStepNote, { call: [<.notes.get_copy, key] }]
+                  - decl: [found, i32, 0]
+                  - if: { condition: { eq: [note.stage_id.len, 0] }, then: [{ call: [<.notes.delete, key] }, { set: [found, 9] }] }
+                  # F103-16: fertig, nur die Bestaetigung fehlt.  Nicht neu
+                  # ausfuehren — nachmelden.
+                  - if:
+                      condition: { '&&': [{ eq: [found, 0] }, { eq: [note.done, 1] }] }
+                      then:
+                        - call: [log.warn, "[step] ${note.stage_id} war fertig (${note.exit_code}), Meldung offen — wird nachgeholt"]
+                        - call: [<.pending.push, note]
+                        - set: [found, 5]
+                  # F103-15: vorgemerkt, aber nie gestartet — oder gestartet und
+                  # der Agent starb, bevor er die PID festhielt.  UNKLAR heisst
+                  # zurueckgeben: „vielleicht gelaufen" darf nicht zum
+                  # Stillstand fuehren (F101-5, mindestens einmal).
+                  - if:
+                      condition: { '&&': [{ eq: [found, 0] }, { le: [note.pid, 0] }] }
+                      then:
+                        - call: [log.warn, "[step] ${note.stage_id} war nur vorgemerkt — unklar, ob er lief; wird zurueckgegeben"]
+                        - call: [<.lost.push, note]
+                        - call: [<.notes.delete, key]
+                        - set: [found, 6]
+                  - if:
+                      condition: { eq: [found, 0] }
+                      then:
+                        - call: [log.warn, "[step] nach Neustart offen: ${note.stage_id} (pid ${note.pid})"]
+                        # spec/23 §5.4 — der dauerhafte Prozess.  Der Beobachter
+                        # laeuft in EIGENER Sitzung und Prozessgruppe und
+                        # ueberlebt den Agenten; mit `process_attach` nehmen wir
+                        # ihn wieder auf.  Nur die Status-Datei anzusehen (wie
+                        # bis 2026-10-15) verwechselte „laeuft noch" mit „weg".
+                        #
+                        #   1 = laeuft noch, 2 = war fertig, 0 = spurlos weg
+                        - decl: [back, process, { call: [sys.process_attach, note.pid, "${note.step_dir}/status"] }]
+                        - if: { condition: { eq: [{ call: [back.running] }, true] }, then: [{ set: [found, 1] }] }
+                        - if: { condition: { '&&': [{ eq: [found, 0] }, { ge: [back.returncode, 0] }] }, then: [{ set: [found, 2] }] }
+                        # Wieder aufnehmen — aber nur EINEN (§103.8).  Weitere
+                        # bleiben in der Ablage und werden beim naechsten Start
+                        # erneut geprueft.
+                        - if:
+                            condition: { '&&': [{ gt: [found, 0] }, { '&&': [{ lt: [found, 3] }, { eq: [alive, 0] }] }] }
+                            then:
+                              - set: [alive, 1]
+                              - set: [<.run_id, note.run_id]
+                              - set: [<.stage_id, note.stage_id]
+                              - set: [<.step_dir, note.step_dir]
+                              - set: [<.attempt, note.attempt]
+                              - set: [<.out_off, note.sent_out]
+                              - set: [<.err_off, note.sent_err]
+                              - set: [<.started_ms, note.started_ms]
+                              - set: [<.last_renew, { call: [time.now] }]
+                              - if:
+                                  condition: { eq: [found, 1] }
+                                  then: [{ call: [log.info, "[step] laeuft noch (pid ${note.pid}) — wird weiter beobachtet"] }]
+                                  else: [{ call: [log.info, "[step] war fertig, Rueckgabewert ${back.returncode} — wird gemeldet"] }]
+                        # Weder laufend noch mit Ergebnis: der Rechner hat ihn
+                        # mitgenommen.  Der Server erfaehrt es, nicht die Frist.
+                        - if:
+                            condition: { eq: [found, 0] }
+                            then:
+                              - call: [log.warn, "[step] ${note.stage_id} spurlos verschwunden — wird zurueckgegeben"]
+                              - call: [<.lost.push, note]
+                              - call: [<.notes.delete, key]
+
+      # ── report_pending: die nachgeholte Ergebnismeldung ─────────────────
+      # F103-16.  Getrennt von `report_lost`, weil es das Gegenteil sagt: hier
+      # IST die Arbeit getan, es fehlt nur die Bestaetigung.
+      - def:
+          name: report_pending
+          access: public
+          static_off: ["str_cmp"]
+          args: [[sess, mirror_session]]
+          body:
+            - if: { condition: { eq: [<.pending.len, 0] }, then: [{ return: [] }] }
+            - decl: [pix, i32, 0]
+            - while:
+                condition: { lt: [pix, <.pending.len] }
+                body:
+                  - decl: [ready, AgentStepNote, { at: [<.pending, pix] }]
+                  - set: [pix, { +: [pix, 1] }]
+                  - set: [<.attempt, ready.attempt]
+                  - decl: [acked, i32, { call: [<.send_report, sess, ready.run_id, ready.stage_id, ready.exit_code, "nach Neustart nachgemeldet"] }]
+                  # Nicht durchgekommen?  Dann bleibt ALLES liegen und wir
+                  # versuchen es beim naechsten Mal wieder — die Ablage haelt
+                  # das Ergebnis, nicht dieser Durchlauf.
+                  - if: { condition: { neq: [acked, 1] }, then: [{ return: [] }] }
+                  - call: [log.info, "[step] ${ready.stage_id} nachgemeldet (${ready.exit_code})"]
+                  - call: [<.forget, ready.stage_id]
+            - call: [<.pending.clear]
+
+      # ── report_lost: die Verlustmeldung ─────────────────────────────────
+      # Getrennt von `resume`, weil `resume` im Konstruktor laeuft — da gibt es
+      # noch keine Sitzung.  Hier, mit Verbindung, wird daraus eine Nachricht.
+      - def:
+          name: report_lost
+          access: public
+          static_off: ["str_cmp"]
+          args: [[sess, mirror_session]]
+          body:
+            - if: { condition: { eq: [<.lost.len, 0] }, then: [{ return: [] }] }
+            - decl: [lix, i32, 0]
+            - while:
+                condition: { lt: [lix, <.lost.len] }
+                body:
+                  - decl: [gone, AgentStepNote, { at: [<.lost, lix] }]
+                  - set: [lix, { +: [lix, 1] }]
+                  - decl: [req, StepReportReq]
+                  - set: [req.agent_id, <.agent_id]
+                  - set: [req.run_id, gone.run_id]
+                  - set: [req.stage_id, gone.stage_id]
+                  - set: [req.attempt, gone.attempt]
+                  - set: [req.output, "Prozess ${gone.pid} nach Neustart des Agenten/Rechners nicht mehr vorhanden"]
+                  - decl: [ack, StepAck]
+                  - decl: [sent, i32, { call: [sess.send_and_await, 0, "release_step", req, ack, 4000] }]
+                  # Kam die Meldung nicht an, bleibt die Frist als Netz: der
+                  # Schritt wird dann wie bisher neu zugeteilt, nur spaeter.
+                  - if:
+                      condition: { neq: [sent, 1] }
+                      then:
+                        - call: [log.warn, "[step] Verlustmeldung fuer ${gone.stage_id} kam nicht durch — das Lehen uebernimmt"]
+                        - return: []
+                  - if:
+                      condition: { eq: [ack.accepted, 1] }
+                      then: [{ call: [log.info, "[step] ${gone.stage_id} zurueckgegeben — wird neu zugeteilt"] }]
+                      else: [{ call: [log.info, "[step] ${gone.stage_id} war schon abgeschlossen: ${ack.reason}"] }]
+            - call: [<.lost.clear]
+
+      # ── Die Ausgabe zum Server bringen (doc/spec/103 §103.4e) ──────────
+      # F103-19: die Ausgabe gehoert dem LAUF, nicht dem Agenten.  Vorher lag
+      # sie nur hier im Schrittverzeichnis — ein Fehlschlag war eine Zahl ohne
+      # Text, und wer wissen wollte warum, musste sich auf den Rechner einloggen.
+      #
+      # Obergrenze je Strom: 2 MiB.  Ein `yes`-Lauf darf weder den Server
+      # fuellen noch den Takt des Agenten kosten; vollstaendig bleibt die
+      # Ausgabe auf dem Agenten liegen.
+      - def:
+          name: ship_output
+          access: public
+          static_off: ["str_cmp"]
+          args: [[sess, mirror_session], [limit, i32]]
+          return: i32
+          body:
+            - if: { condition: { eq: [{ call: [<.busy] }, 0] }, then: [{ return: 0 }] }
+            - decl: [cap, i64, 2097152]
+            - decl: [out_path, string, "${<.step_dir}/out"]
+            - decl: [err_path, string, "${<.step_dir}/err"]
+            - decl: [rounds, i32, 0]
+            - decl: [moved, i32, 0]
+            - decl: [spin, i32, 1]
+            - while:
+                condition: { eq: [spin, 1] }
+                body:
+                  - decl: [prev_out, i64, <.out_off]
+                  - decl: [prev_err, i64, <.err_off]
+                  - if:
+                      condition: { lt: [<.out_off, cap] }
+                      then: [{ set: [<.out_off, { call: [<.pump_io.tail, sess, <.stage_id, OutStream.out, out_path, <.out_off] }] }]
+                  - if:
+                      condition: { lt: [<.err_off, cap] }
+                      then: [{ set: [<.err_off, { call: [<.pump_io.tail, sess, <.stage_id, OutStream.err, err_path, <.err_off] }] }]
+                  - set: [rounds, { +: [rounds, 1] }]
+                  - if:
+                      condition: { '&&': [{ eq: [<.out_off, prev_out] }, { eq: [<.err_off, prev_err] }] }
+                      then: [{ set: [spin, 0] }]
+                      else: [{ set: [moved, 1] }]
+                  - if:
+                      condition: { '&&': [{ gt: [limit, 0] }, { ge: [rounds, limit] }] }
+                      then: [{ set: [spin, 0] }]
+            # Einmal sagen, dass abgeschnitten wurde — sonst sieht ein
+            # abgeschnittenes Protokoll wie ein vollstaendiges aus.  Der Merker
+            # lebt nur in diesem Prozess: nach einem Neustart steht die Zeile
+            # im schlimmsten Fall zweimal da, und das ist harmlos.
+            - if:
+                condition: { '&&': [{ eq: [<.said_cut, 0] }, { '||': [{ ge: [<.out_off, cap] }, { ge: [<.err_off, cap] }] }] }
+                then:
+                  - set: [<.said_cut, 1]
+                  - call: [<.pump_io.send_text, sess, <.stage_id, OutStream.out, "\n… Ausgabe abgeschnitten (Grenze 2 MiB) — vollstaendig auf dem Agenten in ${<.step_dir} …\n", <.out_off]
+            - if: { condition: { eq: [moved, 1] }, then: [{ call: [<.note_offsets] }] }
+            - return: moved
+
+      # Die gesendeten Offsets in die Ablage schreiben (§103.4a): nach einem
+      # Neustart geht es dort weiter — keine doppelten Zeilen, kein Loch.
+      - def:
+          name: note_offsets
+          access: public
+          body:
+            - if: { condition: { eq: [{ call: [<.notes.has, <.stage_id] }, 0] }, then: [{ return: [] }] }
+            - decl: [note, AgentStepNote, { call: [<.notes.get_copy, <.stage_id] }]
+            - set: [note.sent_out, <.out_off]
+            - set: [note.sent_err, <.err_off]
+            - call: [<.notes.set, <.stage_id, note]
+
+      # ── tick: Lehen erneuern, Ende erkennen, melden ─────────────────────
+      - def:
+          name: tick
+          access: public
+          static_off: ["str_cmp"]
+          args: [[sess, mirror_session], [now_ms, i64]]
+          body:
+            # Zuerst die Nachtraege: der Agent ist gerade erst zurueckgekehrt
+            # und hat die Antworten schon in der Hand.  Ergebnisse vor
+            # Verlusten — ein fertiger Schritt soll nicht neu zugeteilt werden,
+            # waehrend sein Ergebnis noch in der Ablage liegt.
+            - call: [<.report_pending, sess]
+            - call: [<.report_lost, sess]
+            - if: { condition: { eq: [{ call: [<.busy] }, 0] }, then: [{ return: [] }] }
+            # F103-5: das Lehen bestaetigt, dass der Agent lebt — nicht, dass
+            # der Schritt vorankommt.
+            - if:
+                condition: { gt: [now_ms, { +: [<.last_renew, 10000] }] }
+                then:
+                  - set: [<.last_renew, now_ms]
+                  - decl: [ren, StepReportReq]
+                  - set: [ren.agent_id, <.agent_id]
+                  - set: [ren.run_id, <.run_id]
+                  - set: [ren.stage_id, <.stage_id]
+                  - set: [ren.attempt, <.attempt]
+                  - decl: [ack, StepAck]
+                  - call: [sess.send_and_await, 0, "renew_lease", ren, ack, 4000]
+            # Ausgabe gedrosselt nachziehen (§103.4e), waehrend der Schritt laeuft.
+            - decl: [moved, i32, { call: [<.ship_output, sess, 16] }]
+            - decl: [stat_path, path, "${<.step_dir}/status"]
+            - if: { condition: { eq: [{ call: [io.is_file, stat_path] }, false] }, then: [{ return: [] }] }
+            # Fertig, aber die Ausgabe laeuft noch nach: erst wenn ein Takt
+            # KEINEN Fortschritt mehr bringt, wird gemeldet.  Sonst fehlte das
+            # Ende der Ausgabe genau bei Schritten, die schnell scheitern.
+            - if: { condition: { eq: [moved, 1] }, then: [{ return: [] }] }
+            - decl: [src, file_handle, { call: [io.open, stat_path, "r"] }]
+            - if: { condition: { eq: [src, null] }, then: [{ return: [] }] }
+            - decl: [raw, string, { call: [io.read_all, src] }]
+            - call: [io.close, src]
+            - decl: [clean, string, { call: [raw.trim] }]
+            - decl: [code, i32, { call: [clean.parse_i32] }]
+            # Erst festhalten, dann melden, erst nach Antwort vergessen
+            # (F103-16).  Die Reihenfolge ist der ganze Punkt.
+            - call: [<.mark_done, <.stage_id, code]
+            # 124 ist die Zeitgrenze (spec/23 §5.3).  Ohne Begruendung sieht ein
+            # abgebrochener Schritt wie ein beliebiger Fehlschlag aus.
+            - decl: [why, string, ""]
+            - if: { condition: { eq: [code, 124] }, then: [{ set: [why, "Zeitgrenze ueberschritten — der Schritt wurde abgebrochen"] }] }
+            - decl: [acked, i32, { call: [<.send_report, sess, <.run_id, <.stage_id, code, why] }]
+            - if:
+                condition: { neq: [acked, 1] }
+                then:
+                  # Der Schritt bleibt „in Arbeit": der naechste `tick` liest
+                  # dieselbe Status-Datei und meldet erneut.  Das Lehen wird
+                  # weiter erneuert, damit niemand sonst ihn nimmt, solange wir
+                  # ein Ergebnis in der Hand haben.
+                  - return: []
+            - call: [log.info, "[step] fertig, Rueckgabewert ${code}"]
+            - call: [<.forget, <.stage_id]
+            - set: [<.run_id, ""]
+            - set: [<.stage_id, ""]
+
+      # Rueckgabe: 1 = der Server hat GEANTWORTET (angenommen oder abgelehnt —
+      # beides ist eine Entscheidung), 0 = die Nachricht kam nicht durch.
+      # Vorher wurde der Wert verworfen; `tick` loeschte den Merkposten
+      # trotzdem, und ein Netzfehler kostete ein fertiges Ergebnis (F103-16).
+      - def:
+          name: send_report
+          access: public
+          static_off: ["str_cmp"]
+          # Die Versuchsnummer kommt aus dem Member bzw. — beim Nachholen — aus
+          # der Ablage; sie steht darum nicht in der Argumentliste (5 ist das
+          # Maximum, und sie gehoert ohnehin zum Zustand, nicht zum Aufruf).
+          args: [[sess, mirror_session], [run_id, string], [stage_id, string], [code, i32], [note, string]]
+          return: i32
+          body:
+            - decl: [rep, StepReportReq]
+            - set: [rep.agent_id, <.agent_id]
+            - set: [rep.run_id, run_id]
+            - set: [rep.stage_id, stage_id]
+            - set: [rep.attempt, <.attempt]
+            - set: [rep.exit_code, code]
+            - set: [rep.output, note]
+            # Die eigene Schicht messen (doc/spec/107 §107.1c): nur hier ist sie
+            # sichtbar, und nur jetzt ist sie fertig.  Die Zahlen reisen mit dem
+            # Bericht, damit es keinen zweiten Kanal fuer denselben Umstand gibt.
+            - decl: [lay_ix, i32, { call: [<.stage_index, stage_id] }]
+            - if:
+                condition: { ge: [lay_ix, 0] }
+                then:
+                  - decl: [scan, ptr<DirScan>, { new: DirScan }]
+                  - call: [scan.init, 64]
+                  - decl: [lay_at, string, "${{ call: [<.layer_root, run_id] }}/${lay_ix}/upper"]
+                  - decl: [lay, DirStat, { call: [scan.of_dir, lay_at, 0] }]
+                  - set: [rep.layer_bytes, lay.bytes]
+                  - set: [rep.layer_files, lay.files]
+                  - call: [free, scan]
+            - decl: [ack, StepAck]
+            - decl: [sent, i32, { call: [sess.send_and_await, 0, "report_step", rep, ack, 4000] }]
+            - if:
+                condition: { neq: [sent, 1] }
+                then:
+                  - call: [log.warn, "[step] Bericht kam nicht durch — bleibt vorgemerkt und wird wiederholt"]
+                  - return: 0
+            # F103-4: abgelehnt heisst, das Lehen war weg — wir verwerfen.
+            - if:
+                condition: { eq: [ack.accepted, 0] }
+                then: [{ call: [log.warn, "[step] Bericht abgelehnt: ${ack.reason} — verworfen"] }]
+            - return: 1

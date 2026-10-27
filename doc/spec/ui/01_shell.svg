@@ -1,0 +1,118 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 760" width="1200" height="760" font-family="DejaVu Sans Mono, monospace">
+<style>
+  .bg{fill:#10141a}.panel{fill:#1a2029;stroke:#2d3642}.panel2{fill:#151a22;stroke:#2d3642}
+  .t{fill:#c6cfdb;font-size:13px}.tdim{fill:#6f7d8e;font-size:12px}.th{fill:#e8eef6;font-size:14px;font-weight:bold}
+  .note{fill:#5b8db8;font-size:11px;font-style:italic}
+  .accent{fill:#2a6f97}.sel{fill:#233246;stroke:#3d6b96}
+  .lead{stroke:#5b8db8;stroke-width:1;stroke-dasharray:3 3;fill:none}
+</style>
+<rect class="bg" width="1200" height="760"/>
+
+<!-- top bar -->
+<rect class="panel" x="0" y="0" width="1200" height="44"/>
+<text class="th" x="20" y="28">cosmos</text>
+<text class="tdim" x="110" y="28">acme / service-pipeline</text>
+<rect class="sel" x="340" y="10" width="92" height="24" rx="3"/>
+<text class="t" x="356" y="27">Editor</text>
+<text class="t" x="452" y="27">Läufe</text>
+<text class="t" x="528" y="27">Cluster</text>
+<text class="t" x="612" y="27">Agenten</text>
+<circle cx="1120" cy="22" r="7" fill="#2f8f4e"/>
+<text class="tdim" x="1136" y="27">live</text>
+<text class="tdim" x="1020" y="27">nikolai</text>
+
+<!-- left: navigation -->
+<rect class="panel2" x="0" y="44" width="220" height="716"/>
+<text class="th" x="16" y="72">Pipelines</text>
+<rect class="sel" x="8" y="84" width="204" height="24" rx="3"/>
+<text class="t" x="20" y="101">build_matrix</text>
+<text class="t" x="20" y="129">nightly_full</text>
+<text class="t" x="20" y="153">release_tag</text>
+<line x1="12" y1="172" x2="208" y2="172" stroke="#2d3642"/>
+<text class="th" x="16" y="196">Letzte Läufe</text>
+<g font-size="12">
+  <rect x="16" y="208" width="10" height="10" fill="#19b2c9"/><text class="tdim" x="34" y="218">#412  2 min   6/6 cache</text>
+  <rect x="16" y="230" width="10" height="10" fill="#2f8f4e"/><text class="tdim" x="34" y="240">#411  14 min  4 gebaut</text>
+  <rect x="16" y="252" width="10" height="10" fill="#c4452f"/><text class="tdim" x="34" y="262">#410  1 h     clang/arm64</text>
+  <rect x="16" y="274" width="10" height="10" fill="#c9a227"/><text class="tdim" x="34" y="284">#409  2 h     Warnungen</text>
+</g>
+<line x1="12" y1="306" x2="208" y2="306" stroke="#2d3642"/>
+<text class="th" x="16" y="330">Knoten</text>
+<g font-size="12">
+  <circle cx="22" cy="346" r="5" fill="#2f8f4e"/><text class="tdim" x="36" y="350">builder-x86 (2 Lanes)</text>
+  <circle cx="22" cy="370" r="5" fill="#2f8f4e"/><text class="tdim" x="36" y="374">builder-arm (1 Lane)</text>
+  <circle cx="22" cy="394" r="5" fill="#6f7d8e"/><text class="tdim" x="36" y="398">target-arm (frei)</text>
+</g>
+
+<!-- main area placeholder -->
+<rect class="panel2" x="220" y="44" width="980" height="716"/>
+<text class="th" x="248" y="76">Hauptbereich — je Reiter eine der folgenden Ansichten</text>
+
+<g>
+  <rect class="panel" x="248" y="96" width="440" height="200" rx="4"/>
+  <text class="th" x="268" y="124">Editor  (02_pipeline_editor.svg)</text>
+  <text class="tdim" x="268" y="148">Codefeld mit Gutter + Hervorhebung,</text>
+  <text class="tdim" x="268" y="168">Befundliste darunter — EINE Ansicht (F98-12)</text>
+  <rect x="268" y="184" width="400" height="12" fill="#232b36"/>
+  <rect x="268" y="202" width="340" height="12" fill="#232b36"/>
+  <rect x="268" y="220" width="376" height="12" fill="#232b36"/>
+  <rect x="268" y="246" width="400" height="34" fill="#2a1d1d" stroke="#5a2f2f"/>
+  <text class="tdim" x="278" y="268" fill="#d98b7a">● 14:9  unbekanntes Attribut 'on_failure'</text>
+</g>
+
+<g>
+  <rect class="panel" x="716" y="96" width="456" height="200" rx="4"/>
+  <text class="th" x="736" y="124">Lauf-Szene  (03_run_scene.svg)</text>
+  <text class="tdim" x="736" y="148">Parameterraum = Szenenraum (F97-1)</text>
+  <g transform="translate(900,210)">
+    <g stroke="#3d4a5a" fill="none">
+      <path d="M0,0 l40,-22 l40,22 l-40,22 Z" fill="#19b2c9"/>
+      <path d="M-56,32 l40,-22 l40,22 l-40,22 Z" fill="#2f8f4e"/>
+      <path d="M56,32 l40,-22 l40,22 l-40,22 Z" fill="#19b2c9"/>
+      <path d="M0,64 l40,-22 l40,22 l-40,22 Z" fill="#c4452f"/>
+    </g>
+  </g>
+  <text class="tdim" x="736" y="272">Farbe = Status, sonst nichts (F97-4)</text>
+</g>
+
+<g>
+  <rect class="panel" x="248" y="320" width="440" height="180" rx="4"/>
+  <text class="th" x="268" y="348">Cluster / Agenten  (04_cluster_agents.svg)</text>
+  <text class="tdim" x="268" y="372">Knoten, Labels, Agent-Einrichtung über SSH</text>
+  <g>
+    <rect x="268" y="392" width="118" height="58" rx="3" fill="#1d2630" stroke="#3d4a5a"/>
+    <text class="tdim" x="280" y="412">builder-x86</text><circle cx="372" cy="406" r="5" fill="#2f8f4e"/>
+    <text class="tdim" x="280" y="432" font-size="11">x86_64 · 8 Slots</text>
+    <rect x="402" y="392" width="118" height="58" rx="3" fill="#1d2630" stroke="#3d4a5a"/>
+    <text class="tdim" x="414" y="412">builder-arm</text><circle cx="506" cy="406" r="5" fill="#2f8f4e"/>
+    <text class="tdim" x="414" y="432" font-size="11">arm64 · 4 Slots</text>
+    <rect x="536" y="392" width="132" height="58" rx="3" fill="#1d2630" stroke="#3d4a5a" stroke-dasharray="4 3"/>
+    <text class="tdim" x="548" y="412">+ Agent einrichten</text>
+    <text class="tdim" x="548" y="432" font-size="11">SSH + sudo (spec/94)</text>
+  </g>
+</g>
+
+<g>
+  <rect class="panel" x="716" y="320" width="456" height="180" rx="4"/>
+  <text class="th" x="736" y="348">Lauf-Detail</text>
+  <text class="tdim" x="736" y="372">Auswahl einer Zelle → Log + stderr (F97-10)</text>
+  <rect x="736" y="388" width="416" height="96" fill="#0d1116" stroke="#2d3642"/>
+  <g font-size="11" fill="#8f9bab">
+    <text x="748" y="406">[compile/build] arch=arm64 compiler=clang mode=release</text>
+    <text x="748" y="424">cyan — Treffer, step_key a91f… (nicht ausgeführt)</text>
+    <text x="748" y="442">green — gelaufen in 42 s, 3 Warnungen</text>
+    <text x="748" y="460" fill="#d98b7a">red — cc: error: no member named 'foo'</text>
+  </g>
+</g>
+
+<text class="note" x="248" y="540">Grundsatz aus 2026-05-29: GL-Szene ist die Hauptoberfläche, HTML nur Hülle.</text>
+<text class="note" x="248" y="562">Diese Skizze ist Layout, nicht Pixelvorgabe — Abnahme steht in 98_webapp_ui.md §98.6.</text>
+
+<!-- status bar -->
+<rect class="panel" x="220" y="716" width="980" height="44"/>
+<text class="tdim" x="240" y="743">build_matrix · 6 Lanes · parallel auto · letzte Prüfung: 1 Befund</text>
+<rect class="accent" x="1020" y="726" width="72" height="24" rx="3"/>
+<text class="t" x="1034" y="743" fill="#eaf2fa">Prüfen</text>
+<rect x="1104" y="726" width="72" height="24" rx="3" fill="#2f6f4e"/>
+<text class="t" x="1120" y="743" fill="#eaf2fa">Start</text>
+</svg>

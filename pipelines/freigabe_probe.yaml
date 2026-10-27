@@ -1,0 +1,18 @@
+# Probe fuer `shares:` (aiml spec/62 §18.1b, doc/spec/110 §110.35): die
+# Pipeline nennt eine Freigabe beim NAMEN, der Wirt weiss, wo sie liegt.
+# Die erste Stufe schreibt hinein, die zweite liest — und was sie schreibt,
+# liegt danach auf dem WIRT, nicht in der Schicht (F110-104).
+- pipeline:
+    name: freigabe_probe
+    image: ubuntu-base
+    shares:
+      - { name: ablage, to: /mnt/ablage, mode: rw }
+    steps:
+      - stage:
+          name: schreiben
+          timeout: 120000
+          run: "set -e; echo 'aus dem Lauf' > /mnt/ablage/spur.txt; ls -la /mnt/ablage"
+      - stage:
+          name: lesen
+          timeout: 120000
+          run: "set -e; cat /mnt/ablage/spur.txt; touch /etc/nur-in-der-schicht"

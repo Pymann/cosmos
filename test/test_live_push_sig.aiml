@@ -1,0 +1,197 @@
+# Die Push-Signatur ist der EINZIGE Grund, einen Schnappschuss zu schicken
+# (doc/spec/93).  Aendert sie sich nicht, erfaehrt der Client nichts — darum
+# gehoert sie geprueft und nicht nur geschrieben.
+#
+# Anlass (User 2026-10-15): „wenn ich einen neuen Job anlege ... er wird nicht
+# unter Jobs gelistet".  Die Signatur sah `jobs` (Lauf-Datensaetze), aber NICHT
+# `job_defs` (die angelegten Jobs).  Ein neuer Job aenderte sie also nicht, es
+# ging kein Push raus, und die Liste blieb leer.
+#
+# Expected exit code: 0
+
+- import: "sources/server/live_push.aiml"
+
+- def:
+    name: expect
+    args: [[what, string], [cond, i32]]
+    return: i32
+    body:
+      - if: { condition: { eq: [cond, 1] }, then: [{ print: ["  ok   ${what}"] }, { return: 0 }] }
+      - print: ["  FAIL ${what}"]
+      - return: 1
+
+- def:
+    name: demo_job
+    args: [[job_id, string], [name, string], [enabled, i32], [interval_s, i32]]
+    return: { type: JobDef, lifetime: producer }
+    body:
+      - decl: [job, JobDef]
+      - set: [job.job_id, job_id]
+      - set: [job.name, name]
+      - set: [job.enabled, enabled]
+      - set: [job.interval_s, interval_s]
+      - set: [job.next_build, 1]
+      - return: job
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      - decl: [push, ptr<LivePush>, { new: LivePush }]
+
+      - decl: [leer, ClusterView]
+      - decl: [sig_leer, string, { call: [push.cluster_signature, leer] }]
+
+      # 1) Ein NEUER Job muss die Signatur aendern — sonst kein Push, sonst
+      #    keine Zeile in der Liste.
+      - decl: [eins, ClusterView]
+      - call: [eins.job_defs.push, { call: [demo_job, "job-a", "Job A", 1, 0] }]
+      - decl: [sig_eins, string, { call: [push.cluster_signature, eins] }]
+      - set: [fails, { +: [fails, { call: [expect, "ein neuer Job aendert die Signatur", { neq: [sig_eins, sig_leer] }] }] }]
+
+      # 2) Umbenennen aendert KEINE Laenge — und muss trotzdem wirken.
+      - decl: [zwei, ClusterView]
+      - call: [zwei.job_defs.push, { call: [demo_job, "job-a", "Job A (umbenannt)", 1, 0] }]
+      - decl: [sig_zwei, string, { call: [push.cluster_signature, zwei] }]
+      - set: [fails, { +: [fails, { call: [expect, "Umbenennen aendert die Signatur", { neq: [sig_zwei, sig_eins] }] }] }]
+
+      # 3) Abschalten und Auslöser ebenso.
+      - decl: [drei, ClusterView]
+      - call: [drei.job_defs.push, { call: [demo_job, "job-a", "Job A", 0, 0] }]
+      - set: [fails, { +: [fails, { call: [expect, "Abschalten aendert die Signatur", { neq: [{ call: [push.cluster_signature, drei] }, sig_eins] }] }] }]
+      - decl: [vier, ClusterView]
+      - call: [vier.job_defs.push, { call: [demo_job, "job-a", "Job A", 1, 60] }]
+      - set: [fails, { +: [fails, { call: [expect, "ein Auslöser aendert die Signatur", { neq: [{ call: [push.cluster_signature, vier] }, sig_eins] }] }] }]
+
+      # 4) Ein Lauf, der seinen Zustand wechselt, ohne dass die ANZAHL sich
+      #    aendert — sonst stuende er im Client ewig auf „running".
+      - decl: [lauf_a, ClusterView]
+      - decl: [run_a, PipelineRun]
+      - set: [run_a.run_id, "job-a-1"]
+      - set: [run_a.status, "running"]
+      - call: [lauf_a.pipelines.push, run_a]
+      - decl: [lauf_b, ClusterView]
+      - decl: [run_b, PipelineRun]
+      - set: [run_b.run_id, "job-a-1"]
+      - set: [run_b.status, "done"]
+      - call: [lauf_b.pipelines.push, run_b]
+      - set: [fails, { +: [fails, { call: [expect, "ein fertiger Lauf aendert die Signatur", { neq: [{ call: [push.cluster_signature, lauf_a] }, { call: [push.cluster_signature, lauf_b] }] }] }] }]
+
+      # 6) Anlass (User 2026-10-18): „die Jobs Ansicht wird nicht akurat
+      #    aktualisiert".  Endet ein Lauf mit DEMSELBEN Zustand wie der vorige,
+      #    aendern sich nur Dauer und Bilanz — und genau die standen nicht in der
+      #    Signatur.  Kein Push, und die Liste zeigte weiter die alten Zahlen.
+      #
+      #    Die Regel dahinter: die Signatur muss ALLES abdecken, was die Ansicht
+      #    ZEIGT.  Was sie zeigt und die Signatur nicht sieht, ist per Bauart
+      #    veraltet — und sieht aus wie ein Fehler im Server.
+      - decl: [bilanz_a, ClusterView]
+      - decl: [job_v1, JobDef, { call: [demo_job, "job-a", "Job A", 1, 0] }]
+      - set: [job_v1.last_status, "ok"]
+      - set: [job_v1.runs_total, 3]
+      - set: [job_v1.runs_failed, 1]
+      - set: [job_v1.last_ms, 4200]
+      - set: [job_v1.last_run_id, "job-a-3"]
+      - call: [bilanz_a.job_defs.push, job_v1]
+
+      - decl: [bilanz_b, ClusterView]
+      - decl: [job_v2, JobDef, { call: [demo_job, "job-a", "Job A", 1, 0] }]
+      - set: [job_v2.last_status, "ok"]
+      - set: [job_v2.runs_total, 4]
+      - set: [job_v2.runs_failed, 1]
+      - set: [job_v2.last_ms, 3900]
+      - set: [job_v2.last_run_id, "job-a-4"]
+      - call: [bilanz_b.job_defs.push, job_v2]
+
+      - set: [fails, { +: [fails, { call: [expect, "ein weiterer Lauf mit GLEICHEM Zustand aendert die Signatur",
+          { neq: [{ call: [push.cluster_signature, bilanz_a] }, { call: [push.cluster_signature, bilanz_b] }] }] }] }]
+
+      # 7) Auch die Dauer allein zaehlt: sie steht in der Zeile („ok in 4 s").
+      - decl: [dauer_b, ClusterView]
+      - decl: [job_v3, JobDef, { call: [demo_job, "job-a", "Job A", 1, 0] }]
+      - set: [job_v3.last_status, "ok"]
+      - set: [job_v3.runs_total, 3]
+      - set: [job_v3.runs_failed, 1]
+      - set: [job_v3.last_ms, 9999]
+      - set: [job_v3.last_run_id, "job-a-3"]
+      - call: [dauer_b.job_defs.push, job_v3]
+      - set: [fails, { +: [fails, { call: [expect, "eine andere Dauer aendert die Signatur",
+          { neq: [{ call: [push.cluster_signature, bilanz_a] }, { call: [push.cluster_signature, dauer_b] }] }] }] }]
+
+      # 8) Der QUELLTEXT eines Jobs steht im Editor — aendert ihn jemand, muss der
+      #    naechste Schnappschuss das zeigen.  Gleiche Laenge, anderer Inhalt ist
+      #    der Fall, der eine Laengenpruefung durchrutschen liesse.
+      - decl: [quell_a, ClusterView]
+      - decl: [job_s1, JobDef, { call: [demo_job, "job-a", "Job A", 1, 0] }]
+      - set: [job_s1.source, "- pipeline:\n    name: eins\n"]
+      - call: [quell_a.job_defs.push, job_s1]
+      - decl: [quell_b, ClusterView]
+      - decl: [job_s2, JobDef, { call: [demo_job, "job-a", "Job A", 1, 0] }]
+      - set: [job_s2.source, "- pipeline:\n    name: zwei\n"]
+      - call: [quell_b.job_defs.push, job_s2]
+      - set: [fails, { +: [fails, { call: [expect, "geaenderter Quelltext aendert die Signatur",
+          { neq: [{ call: [push.cluster_signature, quell_a] }, { call: [push.cluster_signature, quell_b] }] }] }] }]
+
+      # 9) Anlass (User 2026-10-22): „nur die erste Kugel ist ne Weile gelb und
+      #    dann ist der Job sofort komplett fertig".  Waehrend ein Lauf laeuft,
+      #    wechseln die STUFEN — der Lauf selbst bleibt `running`.  Sah die
+      #    Signatur die Stufen nicht, gab es keinen Push, und die Ansicht stand
+      #    still, bis der Lauf endete.  Das ist dieselbe Regel wie bei (6): was
+      #    die Ansicht ZEIGT, muss die Signatur sehen.
+      - decl: [stufe_a, ClusterView]
+      - decl: [lauf_s1, PipelineRun]
+      - set: [lauf_s1.run_id, "job-a-7"]
+      - set: [lauf_s1.status, "running"]
+      - decl: [st_a1, PipelineStage]
+      - set: [st_a1.stage_id, "s-1"]
+      - set: [st_a1.status, "running"]
+      - call: [lauf_s1.stages.push, st_a1]
+      - decl: [st_a2, PipelineStage]
+      - set: [st_a2.stage_id, "s-2"]
+      - set: [st_a2.status, "pending"]
+      - call: [lauf_s1.stages.push, st_a2]
+      - call: [stufe_a.pipelines.push, lauf_s1]
+      # Eine Stufe weiter — der LAUF heisst immer noch „running".
+      - decl: [stufe_b, ClusterView]
+      - decl: [lauf_s2, PipelineRun]
+      - set: [lauf_s2.run_id, "job-a-7"]
+      - set: [lauf_s2.status, "running"]
+      - decl: [st_b1, PipelineStage]
+      - set: [st_b1.stage_id, "s-1"]
+      - set: [st_b1.status, "done"]
+      - call: [lauf_s2.stages.push, st_b1]
+      - decl: [st_b2, PipelineStage]
+      - set: [st_b2.stage_id, "s-2"]
+      - set: [st_b2.status, "running"]
+      - call: [lauf_s2.stages.push, st_b2]
+      - call: [stufe_b.pipelines.push, lauf_s2]
+      - set: [fails, { +: [fails, { call: [expect, "eine Stufe weiter aendert die Signatur",
+          { neq: [{ call: [push.cluster_signature, stufe_a] }, { call: [push.cluster_signature, stufe_b] }] }] }] }]
+      # Und ein ZWEITER Anlauf derselben Stufe: gleicher Zustand, andere Lage.
+      - decl: [stufe_c, ClusterView]
+      - decl: [lauf_s3, PipelineRun]
+      - set: [lauf_s3.run_id, "job-a-7"]
+      - set: [lauf_s3.status, "running"]
+      - decl: [st_c1, PipelineStage]
+      - set: [st_c1.stage_id, "s-1"]
+      - set: [st_c1.status, "done"]
+      - call: [lauf_s3.stages.push, st_c1]
+      - decl: [st_c2, PipelineStage]
+      - set: [st_c2.stage_id, "s-2"]
+      - set: [st_c2.status, "running"]
+      - set: [st_c2.attempt, 2]
+      - call: [lauf_s3.stages.push, st_c2]
+      - call: [stufe_c.pipelines.push, lauf_s3]
+      - set: [fails, { +: [fails, { call: [expect, "ein zweiter Anlauf aendert die Signatur",
+          { neq: [{ call: [push.cluster_signature, stufe_b] }, { call: [push.cluster_signature, stufe_c] }] }] }] }]
+
+      # 5) Gleiche Daten → gleiche Signatur (sonst pusht der Server endlos).
+      - decl: [kopie, ClusterView]
+      - call: [kopie.job_defs.push, { call: [demo_job, "job-a", "Job A", 1, 0] }]
+      - set: [fails, { +: [fails, { call: [expect, "unveraenderte Daten ergeben dieselbe Signatur", { eq: [{ call: [push.cluster_signature, kopie] }, sig_eins] }] }] }]
+
+      - if: { condition: { eq: [fails, 0] }, then: [{ print: ["PASS live_push_sig"] }, { return: 0 }] }
+      - print: ["FAIL live_push_sig (${fails})"]
+      - return: 1

@@ -1,0 +1,295 @@
+# Die drei Fragen des Hauptbildschirms (doc/spec/106 §106.2), ohne Fenster.
+#
+# Der Kern ist nicht die Darstellung, sondern die Aussage: laeuft etwas, auf
+# WELCHEM Agenten, und was gibt es ueberhaupt.  Besonders geprueft wird F106-3
+# (kein Agent ohne Namen) und F106-4 (leerer Zustand wird ausgeschrieben).
+# Expected exit code: 0
+
+- import: "sources/shared/dashboard.aiml"
+- import: "sources/shared/job_runs.aiml"
+
+- def:
+    name: expect
+    args: [[what, string], [cond, i32]]
+    return: i32
+    body:
+      - if:
+          condition: { eq: [cond, 1] }
+          then: [{ call: [log.info, "  ok   ${what}"] }, { return: 0 }]
+      - call: [log.info, "  FAIL ${what}"]
+      - return: 1
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      - decl: [dash, ptr<Dashboard>, { new: Dashboard }]
+      - decl: [now, i64, 1760000000000]
+      - decl: [view, ptr<ClusterView>, { new: ClusterView }]
+
+      # ── Leerer Zustand wird AUSGESCHRIEBEN (F106-4) ──────────────────────
+      - decl: [empty_run, string, { call: [dash.running, view, now] }]
+      - decl: [empty_job, string, { call: [dash.jobs, view] }]
+      # Die Ausfuehrenden kommen aus der AGENTENLISTE (frischer Strom), nicht
+      # aus dem Cluster-Schnappschuss — der altert im Leerlauf und widersprach
+      # sichtbar der Agenten-Ansicht (2026-10-15).
+      - decl: [empty_lst, AgentList]
+      - decl: [empty_exe, string, { call: [dash.executors, empty_lst, now] }]
+      - set: [fails, { +: [fails, { call: [expect, "nichts laeuft wird gesagt", { gt: [{ call: [empty_run.index_of, "Nichts laeuft"] }, -1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "kein Job wird gesagt", { gt: [{ call: [empty_job.index_of, "Kein Job"] }, -1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "kein Agent wird gesagt", { gt: [{ call: [empty_exe.index_of, "Kein Agent"] }, -1] }] }] }]
+
+      # ── Ein Job mit Geschichte ───────────────────────────────────────────
+      - decl: [job, JobDef]
+      - set: [job.job_id, "api-main"]
+      - set: [job.name, "api-main"]
+      - set: [job.enabled, 1]
+      - set: [job.last_status, "failed"]
+      - set: [job.last_ms, 4000]
+      - set: [job.runs_total, 7]
+      - set: [job.runs_failed, 2]
+      - call: [view.job_defs.push, job]
+      - decl: [job_txt, string, { call: [dash.jobs, view] }]
+      - set: [fails, { +: [fails, { call: [expect, "Job wird genannt", { gt: [{ call: [job_txt.index_of, "api-main"] }, -1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "letztes Ergebnis steht da", { gt: [{ call: [job_txt.index_of, "failed in 4 s"] }, -1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Fehlschlag-Verhaeltnis steht da", { gt: [{ call: [job_txt.index_of, "2/7 gescheitert"] }, -1] }] }] }]
+
+      # ── Ein laufender Schritt nennt Job, Nummer UND Agent ────────────────
+      - decl: [run, PipelineRun]
+      - set: [run.run_id, "api-main-8"]
+      - set: [run.job_id, "api-main"]
+      - set: [run.pipeline_name, "api-main"]
+      - set: [run.build_number, 8]
+      - set: [run.started_ms, { -: [now, 65000] }]
+      - decl: [stg, PipelineStage]
+      - set: [stg.stage_id, "s-1"]
+      - set: [stg.name, "compile"]
+      - set: [stg.status, "running"]
+      - set: [stg.agent, "builder-arm"]
+      - call: [run.stages.push, stg]
+      - call: [view.pipelines.push, run]
+      - decl: [run_txt, string, { call: [dash.running, view, now] }]
+      - set: [fails, { +: [fails, { call: [expect, "Nummer steht da", { gt: [{ call: [run_txt.index_of, "api-main #8"] }, -1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Stufe steht da", { gt: [{ call: [run_txt.index_of, "compile"] }, -1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "der AGENT steht da (F106-3)", { gt: [{ call: [run_txt.index_of, "auf builder-arm"] }, -1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "seit wann steht da", { gt: [{ call: [run_txt.index_of, "seit 1 min"] }, -1] }] }] }]
+
+      # ── Ein nicht zugeteilter Schritt sagt das, statt zu schweigen ───────
+      - decl: [run2, PipelineRun]
+      - set: [run2.run_id, "api-main-9"]
+      - set: [run2.pipeline_name, "api-main"]
+      - decl: [stg2, PipelineStage]
+      - set: [stg2.name, "test"]
+      - set: [stg2.status, "running"]
+      - call: [run2.stages.push, stg2]
+      - call: [view.pipelines.push, run2]
+      - decl: [run_txt2, string, { call: [dash.running, view, now] }]
+      - set: [fails, { +: [fails, { call: [expect, "ohne Agent wird es gesagt", { gt: [{ call: [run_txt2.index_of, "noch nicht zugeteilt"] }, -1] }] }] }]
+
+      # ── Ausfuehrende: Name, Anwesenheit, Taetigkeit ──────────────────────
+      - decl: [node, Node]
+      - set: [node.node_id, "builder-arm"]
+      - set: [node.name, "builder-arm"]
+      - set: [node.agent_id, "builder-arm"]
+      - set: [node.last_seen_ms, { -: [now, 2000] }]
+      - set: [node.current_run, "api-main-8"]
+      - call: [view.nodes.push, node]
+      - decl: [exe_lst, AgentList]
+      - decl: [exe_row, AgentInfo]
+      - set: [exe_row.agent_id, "builder-arm"]
+      - set: [exe_row.status, AgentStatus.connected]
+      - set: [exe_row.last_seen_ms, { -: [now, 2000] }]
+      - set: [exe_row.current_run, "api-main-8"]
+      - set: [exe_row.caps, "steps"]
+      - set: [exe_row.online, 1]
+      - call: [exe_lst.agents.push, exe_row]
+      - decl: [exe_txt, string, { call: [dash.executors, exe_lst, now] }]
+      - set: [fails, { +: [fails, { call: [expect, "Agent mit NAMEN (F106-3)", { gt: [{ call: [exe_txt.index_of, "builder-arm"] }, -1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Anwesenheit steht da", { gt: [{ call: [exe_txt.index_of, "verbunden"] }, -1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Taetigkeit steht da", { gt: [{ call: [exe_txt.index_of, "api-main-8"] }, -1] }] }] }]
+
+      # Ein Agent, der laenger nichts hat hoeren lassen, steht als WEG da —
+      # nicht als „verbunden", nur weil ein Feld das behauptet.
+      - decl: [old_row, AgentInfo]
+      - set: [old_row.agent_id, "stiller-agent"]
+      - set: [old_row.status, AgentStatus.connected]
+      - set: [old_row.last_seen_ms, { -: [now, 60000] }]
+      - set: [old_row.caps, "steps"]
+      - set: [old_row.online, 0]   # der Server hat ihn als weg eingestuft
+      - call: [exe_lst.agents.push, old_row]
+      - decl: [exe_txt2, string, { call: [dash.executors, exe_lst, now] }]
+      - set: [fails, { +: [fails, { call: [expect, "ein stiller Agent gilt als weg", { gt: [{ call: [exe_txt2.index_of, "weg seit"] }, -1] }] }] }]
+      # Ein veralteter Agent wird benannt — „bereit" waere eine Luege.
+      - decl: [old_agent, AgentInfo]
+      - set: [old_agent.agent_id, "alter-agent"]
+      - set: [old_agent.status, AgentStatus.connected]
+      - set: [old_agent.last_seen_ms, { -: [now, 2000] }]
+      - set: [old_agent.online, 1]
+      - call: [exe_lst.agents.push, old_agent]
+      - decl: [exe_txt3, string, { call: [dash.executors, exe_lst, now] }]
+      - set: [fails, { +: [fails, { call: [expect, "ein Agent ohne steps heisst veraltet", { gt: [{ call: [exe_txt3.index_of, "veraltet"] }, -1] }] }] }]
+
+      # ── G3: Historie eines Jobs, aus DEMSELBEN Schnappschuss ────────────
+      - set: [run.status, "done"]
+      - set: [run.ended_ms, { +: [run.started_ms, 12000] }]
+      - call: [view.pipelines.push, run]
+      - decl: [hist, string, { call: [dash.history, view, "api-main"] }]
+      - set: [fails, { +: [fails, { call: [expect, "Lauf-Nummer in der Historie", { gt: [{ call: [hist.index_of, "#8"] }, -1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Dauer in der Historie", { gt: [{ call: [hist.index_of, "12 s"] }, -1] }] }] }]
+      - decl: [hist_other, string, { call: [dash.history, view, "gibtsnicht"] }]
+      - set: [fails, { +: [fails, { call: [expect, "fremder Job hat keine Laeufe", { gt: [{ call: [hist_other.index_of, "Noch kein Lauf"] }, -1] }] }] }]
+      - decl: [hist_none, string, { call: [dash.history, view, ""] }]
+      - set: [fails, { +: [fails, { call: [expect, "ohne Auswahl wird es gesagt", { gt: [{ call: [hist_none.index_of, "Kein Job gewaehlt"] }, -1] }] }] }]
+
+      # ── Fusszeile: was laeuft GERADE? ─────────────────────────────────
+      # Sie behauptete bis 2026-10-15 fest „kein Lauf aktiv" (der Wert war im
+      # Wirt hart verdrahtet).  Eine Anzeige, die immer dasselbe sagt, ist
+      # schlimmer als keine — man verlaesst sich darauf.
+      - decl: [fview, ClusterView]
+      - set: [fails, { +: [fails, { call: [expect, "ohne Laeufe: kein Lauf aktiv", { eq: [{ call: [dash.footer_runs, fview] }, "kein Lauf aktiv"] }] }] }]
+      - decl: [frun, PipelineRun]
+      - set: [frun.run_id, "job-a-1"]
+      - set: [frun.status, "running"]
+      - call: [fview.pipelines.push, frun]
+      - set: [fails, { +: [fails, { call: [expect, "ein Lauf wird benannt", { eq: [{ call: [dash.footer_runs, fview] }, "job-a-1 läuft"] }] }] }]
+      - decl: [frun2, PipelineRun]
+      - set: [frun2.run_id, "job-b-7"]
+      - set: [frun2.status, "running"]
+      - call: [fview.pipelines.push, frun2]
+      - set: [fails, { +: [fails, { call: [expect, "zwei Laeufe werden gezaehlt", { eq: [{ call: [dash.footer_runs, fview] }, "2 Läufe aktiv"] }] }] }]
+      # Wartend ist nicht laufend — und das muss man unten LESEN koennen.
+      - decl: [fwait, PipelineRun]
+      - set: [fwait.run_id, "job-w-1"]
+      - set: [fwait.status, "queued"]
+      - call: [fview.pipelines.push, fwait]
+      - set: [fails, { +: [fails, { call: [expect, "wartende Laeufe werden getrennt genannt", { eq: [{ call: [dash.footer_runs, fview] }, "2 Läufe aktiv, 1 wartend"] }] }] }]
+      - decl: [fonly, ClusterView]
+      - decl: [fqueued, PipelineRun]
+      - set: [fqueued.run_id, "job-q-1"]
+      - set: [fqueued.status, "queued"]
+      - call: [fonly.pipelines.push, fqueued]
+      - set: [fails, { +: [fails, { call: [expect, "nur wartend heisst NICHT aktiv", { eq: [{ call: [dash.footer_runs, fonly] }, "1 wartend"] }] }] }]
+      # Und die rechte Spalte sagt, WORAUF gewartet wird.
+      - set: [fqueued.pipeline_name, "nightly"]
+      - set: [fqueued.build_number, 4]
+      - decl: [qstg, PipelineStage]
+      - set: [qstg.status, "pending"]
+      - set: [qstg.required_label, "arm64"]
+      - call: [fqueued.stages.push, qstg]
+      - decl: [fonly2, ClusterView]
+      - call: [fonly2.pipelines.push, fqueued]
+      - decl: [wtxt, string, { call: [dash.running, fonly2, now] }]
+      - set: [fails, { +: [fails, { call: [expect, "das fehlende Etikett wird genannt", { gt: [{ call: [wtxt.index_of, "arm64"] }, -1] }] }] }]
+
+      - decl: [fdone, PipelineRun]
+      - set: [fdone.run_id, "job-c-3"]
+      - set: [fdone.status, "done"]
+      - call: [fview.pipelines.push, fdone]
+      - set: [fails, { +: [fails, { call: [expect, "ein fertiger Lauf zaehlt NICHT als aktiv", { eq: [{ call: [dash.footer_runs, fview] }, "2 Läufe aktiv, 1 wartend"] }] }] }]
+
+      # ── doc/spec/107 F107-10: die Laeufe EINES Jobs, neueste zuerst ─────
+      # Die Reihenfolge kommt aus der Build-Nummer, NICHT aus der Reihenfolge
+      # im Schnappschuss: der kommt aus einem KV und hat keine verlaessliche
+      # Ordnung — „die letzten drei Laeufe" waeren sonst drei beliebige.
+      - decl: [jrv, ptr<JobRuns>, { new: JobRuns }]
+      - decl: [jview, ptr<ClusterView>, { new: ClusterView }]
+      - decl: [r_old, PipelineRun]
+      - set: [r_old.run_id, "api-1"]
+      - set: [r_old.job_id, "api"]
+      - set: [r_old.build_number, 1]
+      - set: [r_old.started_ms, 1760000000000]
+      - decl: [r_new, PipelineRun]
+      - set: [r_new.run_id, "api-9"]
+      - set: [r_new.job_id, "api"]
+      - set: [r_new.build_number, 9]
+      - decl: [r_other, PipelineRun]
+      - set: [r_other.run_id, "web-5"]
+      - set: [r_other.job_id, "web"]
+      - set: [r_other.build_number, 5]
+      # Absichtlich in „falscher" Reihenfolge eingefuegt.
+      - call: [jview.pipelines.push, r_old]
+      - call: [jview.pipelines.push, r_other]
+      - call: [jview.pipelines.push, r_new]
+      - decl: [mine, list<string>, { call: [jrv.of_job, jview, "api"] }]
+      - set: [fails, { +: [fails, { call: [expect, "nur die Laeufe DIESES Jobs", { eq: [mine.len, 2] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "neueste Nummer zuerst", { eq: [{ at: [mine, 0] }, "api-9"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "danach die aeltere", { eq: [{ at: [mine, 1] }, "api-1"] }] }] }]
+      - decl: [nojob, list<string>, { call: [jrv.of_job, jview, ""] }]
+      - set: [fails, { +: [fails, { call: [expect, "ohne Job keine Laeufe", { eq: [nojob.len, 0] }] }] }]
+      # Datum: Server-Uhr, UTC — die Ansicht sagt das in der Ueberschrift.
+      - set: [fails, { +: [fails, { call: [expect, "Datum wird lesbar (${{ call: [jrv.when_of, 1760000000000] }})", { eq: [{ call: [jrv.when_of, 1760000000000] }, "09.10. 08:53"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "ohne Startzeit ein Strich", { eq: [{ call: [jrv.when_of, 0] }, "—"] }] }] }]
+      # Knotenbeschriftung: die Lane steht an der Zeile, nicht im Knoten.
+      - set: [fails, { +: [fails, { call: [expect, "Lane faellt aus dem Knotennamen", { eq: [{ call: [jrv.short_name, "checkout [arch=x86_64]"] }, "checkout"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "lange Namen werden gekuerzt", { eq: [{ call: [jrv.short_name, "integrationstest"] }, "integrat"] }] }] }]
+
+      # ── F107-11: ohne Klick zeigt die Mitte den ersten AUFFAELLIGEN ─────
+      - decl: [prun, PipelineRun]
+      - decl: [s_ok, PipelineStage]
+      - set: [s_ok.stage_id, "s1"]
+      - set: [s_ok.status, "done"]
+      - decl: [s_bad, PipelineStage]
+      - set: [s_bad.stage_id, "s2"]
+      - set: [s_bad.status, "failed"]
+      - decl: [s_wait, PipelineStage]
+      - set: [s_wait.stage_id, "s3"]
+      - set: [s_wait.status, "pending"]
+      - call: [prun.stages.push, s_ok]
+      - call: [prun.stages.push, s_bad]
+      - call: [prun.stages.push, s_wait]
+      - set: [fails, { +: [fails, { call: [expect, "der gescheiterte Schritt wird vorgeschlagen", { eq: [{ call: [jrv.first_interesting, prun] }, "s2"] }] }] }]
+      - decl: [allok, PipelineRun]
+      - call: [allok.stages.push, s_ok]
+      - set: [fails, { +: [fails, { call: [expect, "sonst der erste", { eq: [{ call: [jrv.first_interesting, allok] }, "s1"] }] }] }]
+      - decl: [leer, PipelineRun]
+      - set: [fails, { +: [fails, { call: [expect, "ohne Stufen nichts", { eq: [{ call: [jrv.first_interesting, leer] }, ""] }] }] }]
+
+      # ── F107-47: die Mitte LAEUFT MIT, solange niemand gewaehlt hat ─────
+      # `first_interesting` waehlt einmal; `current_stage` sagt, wo es JETZT
+      # interessant ist.  Der Unterschied ist genau der Fall, der gemeldet
+      # wurde: die Ausgabe blieb bei Stufe eins, waehrend Stufe drei lief.
+      - decl: [mit, PipelineRun]
+      - decl: [mit1, PipelineStage]
+      - set: [mit1.stage_id, "mit1"]
+      - set: [mit1.status, "done"]
+      - decl: [mit2, PipelineStage]
+      - set: [mit2.stage_id, "mit2"]
+      - set: [mit2.status, "running"]
+      - decl: [mit3, PipelineStage]
+      - set: [mit3.stage_id, "mit3"]
+      - set: [mit3.status, "pending"]
+      - call: [mit.stages.push, mit1]
+      - call: [mit.stages.push, mit2]
+      - call: [mit.stages.push, mit3]
+      - set: [fails, { +: [fails, { call: [expect, "mitlaufend: die LAUFENDE Stufe", { eq: [{ call: [jrv.current_stage, mit] }, "mit2"] }] }] }]
+      # Alles fertig: der ZULETZT fertige traegt das Ergebnis — nicht wieder
+      # der erste.  Genau daran blieb die Ausgabe haengen.
+      - decl: [fertig, PipelineRun]
+      - decl: [fer1, PipelineStage]
+      - set: [fer1.stage_id, "fer1"]
+      - set: [fer1.status, "done"]
+      - decl: [fer2, PipelineStage]
+      - set: [fer2.stage_id, "fer2"]
+      - set: [fer2.status, "done"]
+      - call: [fertig.stages.push, fer1]
+      - call: [fertig.stages.push, fer2]
+      - set: [fails, { +: [fails, { call: [expect, "fertig: die ZULETZT fertige Stufe", { eq: [{ call: [jrv.current_stage, fertig] }, "fer2"] }] }] }]
+      # Ein Fehlschlag schlaegt alles: dort will man hin.
+      - decl: [kaputt2, PipelineRun]
+      - decl: [kap1, PipelineStage]
+      - set: [kap1.stage_id, "kap1"]
+      - set: [kap1.status, "failed"]
+      - decl: [kap2, PipelineStage]
+      - set: [kap2.stage_id, "kap2"]
+      - set: [kap2.status, "running"]
+      - call: [kaputt2.stages.push, kap1]
+      - call: [kaputt2.stages.push, kap2]
+      - set: [fails, { +: [fails, { call: [expect, "ein Fehlschlag schlaegt den laufenden", { eq: [{ call: [jrv.current_stage, kaputt2] }, "kap1"] }] }] }]
+
+      - if:
+          condition: { eq: [fails, 0] }
+          then: [{ call: [log.info, "test_dashboard PASS"] }, { return: 0 }]
+      - call: [log.info, "test_dashboard FAIL (${fails})"]
+      - return: 1

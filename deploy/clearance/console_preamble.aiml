@@ -1,0 +1,21 @@
+# Praeambel der Skript-Konsole (doc/spec/108 F108-9).
+#
+# Die Konsole stellt diese Zeilen dem Quelltext des Nutzers VORAN.  Sie deklariert, was
+# der Wirt anbietet — die Adressen kommen aus der vorgeladenen Bibliothek, die LEVEL aus
+# `console_exports.txt`.  Hier steht ausdruecklich KEIN `level:`: das waere
+# Selbstbeglaubigung (spec/65 F65-6) und wuerde den ganzen Lauf ablehnen.
+#
+# Wer eine Zeile zur Tabelle hinzufuegt, muss die Deklaration hier ergaenzen — und
+# vorher spec/23 und spec/61 lesen (F108-9d: ein Wert aus `sys.env` lebt nur so lange
+# wie die Map; ein direkt zurueckgegebener Borrow ist ein dangling String im Skript
+# eines Nutzers).
+- extern: "C"
+  defs:
+    - def:
+        name: cosmos_whoami
+        args: []
+        return: string
+    - def:
+        name: cosmos_cluster_summary
+        args: []
+        return: string

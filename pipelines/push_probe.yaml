@@ -1,0 +1,12 @@
+# Kleine Probe fuer `push:` (aiml spec/62 §18): eine Stufe hinterlaesst eine
+# Spur in ihrer Wurzel, und der Lauf legt diese Wurzel als OCI-Abbild ab.
+- pipeline:
+    name: push_probe
+    image: ubuntu-base
+    push:
+      - { from: marke, to: "oci:deploy/oci/push-probe", tag: "probe" }
+    steps:
+      - stage:
+          name: marke
+          timeout: 120000
+          run: "set -e; echo 'hier war die pipeline' > /marke.txt; cat /marke.txt; date -u +%FT%TZ >> /marke.txt"

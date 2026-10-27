@@ -1,0 +1,120 @@
+# cosmos-rt — die Runtime als Werkzeug (doc/spec/110 §110.1).
+#
+# Eine eigene, EINFAEDIGE Binaerdatei: `unshare(CLONE_NEWUSER)` verlangt das
+# (F110-2), und der Agent hat Faeden.  Sie wird gestartet, tut eine Sache und
+# beendet sich — kein Daemon (§110.5).
+#
+# Aufruf (sys.arg_dump: jedes Feld von RtArgs ist ein Flag):
+#   cosmos-rt --bundle <verzeichnis> [--limit-mb 64] [--pids 64] [--cpu 4] [--group name]
+#
+# Rueckgabe ist der Exit-Code der Nutzlast; negative Werte sind
+# Einrichtungsfehler der Unterkante (siehe rt_shim.c).
+
+- import: "sources/runtime/rt_bundle.aiml"
+- import: "sources/runtime/rt_exec.aiml"
+- import: "sources/runtime/rt_mounts.aiml"
+- import: "sources/runtime/rt_cgroup.aiml"
+- import: "sources/runtime/rt_state.aiml"
+
+- model:
+    name: RtArgs
+    fields:
+      - [bundle,   string, ""]
+      - [group,    string, "cosmos-rt"]
+      - [limit_mb, i32, 0]        # 0 = keine Speichergrenze
+      - [pids,     i32, 0]        # 0 = keine Prozessgrenze
+      - [cpu,      i32, 0]        # 0 = keine Kerngrenze (doc/spec/110 F110-92)
+      - [quiet,    i32, 0]
+      # 1 = Bau-Container: Capabilities im Namespace behalten (apt/dpkg).
+      - [build,    i32, 0]
+      # 1 = die Nutzlast sperrt selbst ein (Agent + bwrap): das seccomp-Profil
+      # laesst mount/unshare/pivot_root zu (doc/spec/110 F110-58).
+      - [nested,   i32, 0]
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [args, RtArgs]
+      - call: [sys.arg_dump, args]
+      - if:
+          condition: { eq: [args.bundle.len, 0] }
+          then:
+            - call: [log.error, "cosmos-rt: --bundle <verzeichnis> fehlt"]
+            - return: 2
+
+      # ── Bundle lesen und pruefen ────────────────────────────────────────
+      - decl: [bund, ptr<RtBundle>, { new: RtBundle }]
+      - decl: [read_ok, RtVerdict, { call: [bund.load, args.bundle] }]
+      - if:
+          condition: { eq: [read_ok.holds, 0] }
+          then:
+            - call: [log.error, "cosmos-rt: ${read_ok.field} — ${read_ok.detail}"]
+            - return: 3
+      - decl: [ready, RtVerdict, { call: [bund.check] }]
+      - if:
+          condition: { eq: [ready.holds, 0] }
+          then:
+            - call: [log.error, "cosmos-rt: ${ready.field} — ${ready.detail}"]
+            - return: 4
+
+      # ── Lebenszyklus mitfuehren (doc/spec/110 §110.11) ──────────────────
+      # Auch ein Lauf, der sofort startet, durchlaeuft die Zustaende: sonst
+      # waere `state.json` eine Erfindung statt eines Abbilds.
+      - decl: [life, ptr<RtLifecycle>, { new: RtLifecycle }]
+      - decl: [run_id, string, "${args.group}-${{ call: [time.now] }}"]
+      - call: [life.begin, run_id, args.bundle]
+
+      # ── Grenzen (M4) ────────────────────────────────────────────────────
+      - decl: [cgrp, ptr<RtCgroup>, { new: RtCgroup }]
+      - if:
+          condition: { '||': [{ gt: [args.limit_mb, 0] }, { '||': [{ gt: [args.pids, 0] }, { gt: [args.cpu, 0] }] }] }
+          then:
+            - decl: [bytes, i64, { '*': [{ cast: [args.limit_mb, i64] }, 1048576] }]
+            - decl: [placed, i32, { call: [cgrp.open_group, run_id, bytes, args.pids, args.cpu] }]
+            - if:
+                condition: { eq: [placed, 0] }
+                then: [{ call: [log.warn, "cosmos-rt: keine cgroup — Grenzen gelten NICHT"] }]
+
+      # ── Einrichtung und Lauf ────────────────────────────────────────────
+      - decl: [plan, ptr<RtMounts>, { new: RtMounts }]
+      - decl: [steps, i32, { call: [plan.build, bund.conf, { call: [bund.rootfs_path] }] }]
+      - decl: [runner, ptr<RtRunner>, { new: RtRunner }]
+      # Den untergeordneten ID-Bereich uebernehmen, wenn es einen gibt: ohne ihn
+      # hat der Container eine einzige Kennung und `dpkg` kann nicht arbeiten
+      # (doc/spec/110 §110.23).
+      - decl: [envm, map<string:string>, { call: [sys.env] }]
+      - decl: [who, string, ""]
+      - if: { condition: { gt: [{ call: [envm.contains, "USER"] }, 0] }, then: [{ set: [who, { call: [envm.get, "USER"] }] }] }
+      - if:
+          condition: { gt: [who.len, 0] }
+          then:
+            - decl: [span, i32, { call: [runner.use_subids, who] }]
+            - if:
+                condition: { eq: [args.quiet, 0] }
+                then:
+                  - if:
+                      condition: { gt: [span, 0] }
+                      then: [{ call: [log.info, "cosmos-rt: ${span} Kennungen abgebildet"] }]
+                      else: [{ call: [log.warn, "cosmos-rt: kein /etc/subuid-Eintrag fuer ${who} — nur EINE Kennung, kein apt/dpkg"] }]
+      - call: [runner.keep_caps, args.build]
+      - if:
+          condition: { eq: [args.nested, 1] }
+          then: [{ call: [runner.deny_nested] }]
+          else: [{ call: [runner.deny_default] }]
+      - call: [life.ready, 0]
+      - call: [life.start]
+      - if:
+          condition: { eq: [args.quiet, 0] }
+          then: [{ call: [log.info, "cosmos-rt: ${run_id} — ${steps} Einrichtungsschritte, ${bund.conf.process.args.len} Argumente"] }]
+
+      - decl: [code, i32, { call: [runner.start, bund.conf] }]
+      - call: [life.exited]
+
+      # ── Abraeumen: ein Lauf hinterlaesst nichts ─────────────────────────
+      - call: [cgrp.close_group]
+      - if:
+          condition: { eq: [args.quiet, 0] }
+          then: [{ call: [log.info, "cosmos-rt: ${run_id} endete mit ${code} (${{ call: [life.status] }})"] }]
+      - return: code

@@ -1,0 +1,10 @@
+# Probe: `base: "job:<kennung>"` — der juengste ERFOLGREICHE Lauf dieses Jobs
+# (aiml spec/62 §18.4, F62-144).
+- pipeline:
+    name: base_job_test
+    base: "job:aiml-vom-Base-Image"
+    steps:
+      - stage:
+          name: welcher_unterbau
+          timeout: 120000
+          run: "set -e; gcc --version | head -1; ls -d /opt/venv; echo 'Unterbau steht'"

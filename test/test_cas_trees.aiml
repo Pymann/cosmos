@@ -1,0 +1,134 @@
+# CAS-Trees (doc/spec/92 §92.7): C1 Determinismus, C4 Grenzfälle,
+# plus die Materialisierung samt Ausführbar-Bit und Symlinks.
+#
+# Expected exit code: 0
+
+- import: "sources/server/cas_trees.aiml"
+
+- def:
+    name: expect
+    args: [[label, string], [cond, i32]]
+    return: i32
+    body:
+      - if: { condition: { eq: [cond, 1] }, then: [{ return: 0 }] }
+      - print: ["FAIL ${label}"]
+      - return: 1
+
+- def:
+    name: write_file
+    args: [[path, string], [body, string]]
+    body:
+      - decl: [fhw, file_handle, { call: [io.open, path, "wb"] }]
+      - if: { condition: { neq: [fhw, null] }, then: [{ call: [io.write, fhw, body] }, { call: [io.close, fhw] }] }
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      - decl: [base, string, "/tmp/aiml_cas_tree_test"]
+      - call: [io.remove_all, base]
+
+      - decl: [cas, ptr<CasStore>, { new: CasStore }]
+      - call: [cas.init, "${base}/cas"]
+      - decl: [trees, ptr<CasTrees>, { new: CasTrees }]
+      - call: [trees.init, cas]
+
+      # ── Quellbaum: Dateien, Unterverzeichnis, Name mit Leerzeichen,
+      #    ausführbare Datei, Symlink, leeres Verzeichnis ─────────────────
+      - decl: [src, string, "${base}/src"]
+      - call: [io.mkdir_all, "${src}/unter"]
+      - call: [io.mkdir_all, "${src}/leer"]
+      - call: [write_file, "${src}/b.txt", "bee"]
+      - call: [write_file, "${src}/a.txt", "aaa"]
+      - call: [write_file, "${src}/mit leerzeichen.txt", "space"]
+      - call: [write_file, "${src}/unter/tief.txt", "tief"]
+      - call: [write_file, "${src}/skript.sh", "#!/bin/sh\necho hi\n"]
+      - decl: [rc_x, i32, { call: [io.set_exec, "${src}/skript.sh", 1] }]
+      - decl: [rc_l, i32, { call: [io.symlink, "a.txt", "${src}/zeiger"] }]
+      - set: [fails, { +: [fails, { call: [expect, "Symlink angelegt", { eq: [rc_l, 0] }] }] }]
+
+      - decl: [tree_id, string, { call: [trees.put_tree, src] }]
+      - set: [fails, { +: [fails, { call: [expect, "C1 tree_id ist 64 Hex", { eq: [tree_id.len, 64] }] }] }]
+
+      # ── C1: Einträge sortiert, Arten korrekt erkannt ─────────────────────
+      - decl: [tree, Tree, { call: [trees.get_tree, tree_id] }]
+      - set: [fails, { +: [fails, { call: [expect, "C4 sieben Einträge", { eq: [tree.entries.len, 7] }] }] }]
+      - decl: [first, TreeEntry, { at: [tree.entries, 0] }]
+      - set: [fails, { +: [fails, { call: [expect, "C1 erster Eintrag ist a.txt", { eq: [first.name, "a.txt"] }] }] }]
+      # Sortierung byte-weise: "mit leerzeichen.txt" < "skript.sh" < "unter" < "zeiger"
+      - decl: [idx, i32, 0]
+      - decl: [prev, string, ""]
+      - decl: [ordered, i32, 1]
+      - while:
+          condition: { lt: [idx, tree.entries.len] }
+          body:
+            - decl: [row, TreeEntry, { at: [tree.entries, idx] }]
+            - if: { condition: { gt: [idx, 0] }, then: [{ decl: [cmp_names, list<string>] }, { call: [cmp_names.push, prev] }, { call: [cmp_names.push, row.name] }, { call: [cmp_names.sort] }, { if: { condition: { neq: [{ at: [cmp_names, 0] }, prev] }, then: [{ set: [ordered, 0] }] } }] }
+            - set: [prev, row.name]
+            - set: [idx, { +: [idx, 1] }]
+      - set: [fails, { +: [fails, { call: [expect, "C1 Einträge byte-weise sortiert", { eq: [ordered, 1] }] }] }]
+
+      # ── C1: gleiche Struktur an anderem Ort → gleiche Adresse ────────────
+      # Anderer Pfad, andere Zeitstempel, andere Einlese-Reihenfolge.
+      - decl: [src2, string, "${base}/src_kopie"]
+      - call: [io.mkdir_all, "${src2}/unter"]
+      - call: [io.mkdir_all, "${src2}/leer"]
+      - call: [write_file, "${src2}/skript.sh", "#!/bin/sh\necho hi\n"]
+      - decl: [rc_x2, i32, { call: [io.set_exec, "${src2}/skript.sh", 1] }]
+      - call: [write_file, "${src2}/mit leerzeichen.txt", "space"]
+      - call: [write_file, "${src2}/unter/tief.txt", "tief"]
+      - call: [write_file, "${src2}/a.txt", "aaa"]
+      - call: [write_file, "${src2}/b.txt", "bee"]
+      - decl: [rc_l2, i32, { call: [io.symlink, "a.txt", "${src2}/zeiger"] }]
+      - decl: [tree_id2, string, { call: [trees.put_tree, src2] }]
+      - set: [fails, { +: [fails, { call: [expect, "C1 gleiche Struktur → gleiche Adresse", { eq: [tree_id2, tree_id] }] }] }]
+
+      # ── C1: eine geänderte Datei → andere Adresse ────────────────────────
+      - call: [write_file, "${src2}/b.txt", "geaendert"]
+      - decl: [tree_id3, string, { call: [trees.put_tree, src2] }]
+      - set: [fails, { +: [fails, { call: [expect, "C1 Änderung → andere Adresse", { neq: [tree_id3, tree_id] }] }] }]
+
+      # ── C4: leeres Verzeichnis hat eine definierte, konstante Adresse ────
+      - decl: [empty_dir, string, "${base}/nur_leer"]
+      - call: [io.mkdir_all, empty_dir]
+      - decl: [empty_id, string, { call: [trees.put_tree, empty_dir] }]
+      - set: [fails, { +: [fails, { call: [expect, "C4 leeres Verzeichnis hat Adresse", { eq: [empty_id.len, 64] }] }] }]
+      - decl: [empty_canon, string, { call: [hash.sha256, ""] }]
+      - set: [fails, { +: [fails, { call: [expect, "C4 leer = sha256(\"\")", { eq: [empty_id, empty_canon] }] }] }]
+
+      # ── Materialisierung: Inhalt, Struktur, Bit, Link ───────────────────
+      - decl: [out, string, "${base}/out"]
+      - set: [fails, { +: [fails, { call: [expect, "materialize ok", { eq: [{ call: [trees.materialize, tree_id, out] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Datei da", { eq: [{ call: [io.read_file, "${out}/a.txt"] }, "aaa"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Name mit Leerzeichen", { eq: [{ call: [io.read_file, "${out}/mit leerzeichen.txt"] }, "space"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Unterverzeichnis", { eq: [{ call: [io.read_file, "${out}/unter/tief.txt"] }, "tief"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "leeres Verzeichnis angelegt", { eq: [{ call: [io.is_dir, "${out}/leer"] }, true] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "C4 Ausführbar-Bit erhalten", { eq: [{ call: [io.can_exec, "${out}/skript.sh"] }, true] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "C4 Symlink wiederhergestellt", { gt: [{ call: [io.is_symlink, "${out}/zeiger"] }, 0] }] }] }]
+      - decl: [link_target, string, { call: [io.read_link, "${out}/zeiger"] }]
+      - set: [fails, { +: [fails, { call: [expect, "C4 Linkziel stimmt", { eq: [link_target, "a.txt"] }] }] }]
+
+      # ── Das Objekt im Store darf durch die Materialisierung NICHT
+      #    ausführbar geworden sein (Inode-Kopplung, §92.5) ───────────────
+      - decl: [plain_id, string, { call: [cas.put_file, "${src}/a.txt"] }]
+      - decl: [plain_obj, string, { call: [cas.blob_path, plain_id] }]
+      - set: [fails, { +: [fails, { call: [expect, "Store-Objekt bleibt nicht-ausführbar", { eq: [{ call: [io.can_exec, plain_obj] }, false] }] }] }]
+
+      # ── erneutes Materialisieren ergibt denselben Baum (Rundlauf) ───────
+      - decl: [out2, string, "${base}/out2"]
+      - set: [fails, { +: [fails, { call: [expect, "zweite Materialisierung", { eq: [{ call: [trees.materialize, tree_id, out2] }, 0] }] }] }]
+      - decl: [round_id, string, { call: [trees.put_tree, out2] }]
+      - set: [fails, { +: [fails, { call: [expect, "C1 Rundlauf: gleiche Adresse", { eq: [round_id, tree_id] }] }] }]
+
+      # ── Robustheit ──────────────────────────────────────────────────────
+      - decl: [no_dir, string, { call: [trees.put_tree, "${base}/gibts_nicht"] }]
+      - set: [fails, { +: [fails, { call: [expect, "fehlendes Verzeichnis → leer", { eq: [no_dir.len, 0] }] }] }]
+      - decl: [ghost, string, "0000000000000000000000000000000000000000000000000000000000000000"]
+      - set: [fails, { +: [fails, { call: [expect, "unbekannter Baum → -1", { eq: [{ call: [trees.materialize, ghost, "${base}/nichts"] }, -1] }] }] }]
+
+      - call: [io.remove_all, base]
+      - if: { condition: { gt: [fails, 0] }, then: [{ print: ["test_cas_trees: ${fails} failed"] }, { return: 1 }] }
+      - print: ["test_cas_trees PASS"]
+      - return: 0

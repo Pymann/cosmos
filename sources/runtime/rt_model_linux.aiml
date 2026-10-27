@@ -1,0 +1,22 @@
+# Mounts und Namespaces der OCI-Konfiguration (doc/spec/110 §110.1).
+
+- model:
+    name: RtMount
+    fields:
+      - [destination, string]
+      - [type,        string]
+      - [source,      string]
+      - [options,     list<string>]
+
+- model:
+    name: RtNamespace
+    fields:
+      - [type, string]
+      - [path, string]
+
+- model:
+    name: RtLinux
+    fields:
+      - [namespaces,    list<RtNamespace>]
+      - [maskedPaths,   list<string>]
+      - [readonlyPaths, list<string>]

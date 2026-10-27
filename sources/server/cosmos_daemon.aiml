@@ -1,0 +1,367 @@
+# CosmosDaemon — Transport und Kompositionswurzel: ws/wss-Listener, Dispatcher
+# aufsetzen, Ereignisschleife.  TLS via env (COSMOS_*): cert+key gesetzt und
+# bind wss:// → gesamter Verkehr über TLS.
+#
+# Dienst-Logik steht NICHT mehr hier (doc/spec/93, Stufe 3): Live-Push ist
+# `g_runtime.push`, das Aufräumen bei Verbindungsverlust `g_runtime.reaper`.
+# Was bleibt, ist Transport-Zustand (bind_url, TLS, Takte) und das Verdrahten
+# der Handler in den Dispatcher — beides Aufgabe der Wurzel.
+
+- import: "sources/server/server_state.aiml"
+- import: "sources/server/rpc_dispatcher.aiml"
+- import: "sources/server/rt_launcher.aiml"
+# Die Handler-Dateien kommen über server_state herein (dort werden ihre
+# `groupmethods:` in die Gruppe gefaltet) — hier nicht noch einmal.
+
+- class:
+    name: CosmosDaemon
+    members:
+      - [last_sched_ms, i64]   # doc/spec/106 G2: Takt des Zeitplans
+      - [bind_url,   string]
+      - [tls_cert,   string, ""]
+      - [tls_key,    string, ""]
+      - [is_running, i32, 0]
+      - [last_sweep_ms, i64, 0]
+      - [last_push_ms,  i64, 0]
+      # Wann zuletzt nach offenen Pushes gesehen wurde (aiml spec/62 §18).
+      - [last_push_scan_ms, i64, 0]
+      - [last_snap_ms,  i64, 0]   # doc/spec/108: Takt des Konsolen-Schnappschusses
+      # doc/spec/110 M7: der Controller startet sich Agenten im Container.
+      # Er muss das SELBST tun — ein zweiter Prozess kann einem laufenden
+      # Server keine Zugangsdaten unterschieben, weil AionDB zwei Prozesse auf
+      # demselben Speicher nicht koordiniert (F110-35).
+      # Als ZEIGER, nicht als Wert-Member: beim Wert-Member kamen die
+      # String-Felder der gemerkten Laeufe leer zurueck (Abraeum-Meldung ohne
+      # Namen, Bundle blieb liegen), obwohl dieselbe Form in einer Probe traegt.
+      - [spawner,       ptr<RtLauncher>]
+      - [autoscale,     i32, 0]
+      - [max_containers, i32, 2]
+      # Speichergrenze je Container (COSMOS_RT_LIMIT_MB).  512 MB reichen fuer
+      # einen Agenten, der Schritte ausfuehrt — NICHT fuer einen Bau-Container:
+      # ein LLVM-Link braucht Gigabyte (doc/spec/110 §110.26).
+      - [limit_mb,       i32, 512]
+      - [spawn_seq,     i32, 0]
+      # Eine Marke JE CONTROLLER-START (doc/spec/110 F110-87).  Ohne sie begann
+      # die Zaehlung nach jedem Neustart wieder bei 1 — und das Buendel
+      # `logs/rt_runs/rt-auto-1` gehoerte noch einem Container des VORIGEN
+      # Starts, der nicht mitgestorben war.  Zwei Container auf einem Buendel:
+      # der neue bekam seinen ersten Schritt und starb mit dem alten (gemessen
+      # 21.10.2026, Stufe 0 von run-1792614467716).
+      - [boot_tag,      string]
+      - [last_scale_ms, i64, 0]
+    methods:
+      - def:
+          name: init
+          args: [[db_dir, path], [bind, string]]
+          body:
+            - set:  [<.bind_url, bind]
+            # Kurz und eindeutig: die letzten sechs Stellen der Startzeit.  Ein
+            # Container-Name muss nur innerhalb EINES Wirts eindeutig sein.
+            - decl: [boot_ms, i64, { call: [time.now] }]
+            - decl: [boot_rest, i64, { '%': [boot_ms, 1000000] }]
+            - set:  [<.boot_tag, "${boot_rest}"]
+            - call: [init_server_state, db_dir]
+            - call: [log.info, "[cosmos_daemon] initialized bind=${<.bind_url}"]
+      - def:
+          name: set_tls
+          args: [[cert, string], [key, string]]
+          body:
+            - set: [<.tls_cert, cert]
+            - set: [<.tls_key,  key]
+      - def:
+          name: install_handlers
+          args: [[disp, ref<RpcDispatcher>]]
+          body:
+            # Stufe 2 (spec/58): kein `new` mehr — die Handler sind Instanzen
+            # der CosmosRuntime, die Gruppe besitzt sie, der Dispatcher borgt
+            # sie als ref<mirror.RpcHandler>.  Instanzname == RPC-Name.
+            - call: [disp.register, "submit_login",      g_runtime.submit_login]
+            - call: [disp.register, "submit_register",   g_runtime.submit_register]
+            - call: [disp.register, "validate_token",    g_runtime.validate_token]
+            - call: [disp.register, "logout",            g_runtime.logout]
+            - call: [disp.register, "set_nickname",      g_runtime.set_nickname]
+            - call: [disp.register, "change_password",   g_runtime.change_password]
+            - call: [disp.register, "change_email",      g_runtime.change_email]
+            # doc/spec/108 §2: Rechtevergabe
+            - call: [disp.register, "my_clearance",      g_runtime.my_clearance]
+            - call: [disp.register, "list_users",        g_runtime.list_users]
+            - call: [disp.register, "set_user_level",    g_runtime.set_user_level]
+            # doc/spec/108: die Skript-Konsole
+            - call: [disp.register, "console_exec",      g_runtime.console_exec]
+            - call: [disp.register, "get_cluster",       g_runtime.get_cluster]
+            - call: [disp.register, "subscribe_cluster", g_runtime.subscribe_cluster]
+            # doc/spec/96 §96.13
+            - call: [disp.register, "pause_run",         g_runtime.pause_run]
+            - call: [disp.register, "resume_run",        g_runtime.resume_run]
+            - call: [disp.register, "step_run",          g_runtime.step_run]
+            - call: [disp.register, "set_break",         g_runtime.set_break]
+            - call: [disp.register, "clear_break",       g_runtime.clear_break]
+            - call: [disp.register, "rewind_run",        g_runtime.rewind_run]
+            - call: [disp.register, "run_pipeline",      g_runtime.run_pipeline]
+            - call: [<.install_agent_handlers, disp]
+            - call: [log.info, "[cosmos_daemon] registered auth + logout + cluster + agent handlers"]
+      # AP1 (doc/spec/90 §AP1.4): Agenten-Registrierung, Kommando-Dispatch, Ausgabe-Relay
+      # und die fensterweisen Leser.  Eigene Methode, damit install_handlers knapp bleibt.
+      - def:
+          name: install_agent_handlers
+          args: [[disp, ref<RpcDispatcher>]]
+          body:
+            - call: [disp.register, "agent_register",   g_runtime.agent_register]
+            - call: [disp.register, "agent_heartbeat",  g_runtime.agent_heartbeat]
+            - call: [disp.register, "subscribe_agents", g_runtime.subscribe_agents]
+            - call: [disp.register, "run_on_agent",     g_runtime.run_on_agent]
+            - call: [disp.register, "command_output",   g_runtime.command_output]
+            - call: [disp.register, "command_result",   g_runtime.command_result]
+            - call: [disp.register, "read_run_output",  g_runtime.read_run_output]
+            - call: [disp.register, "get_run_info",     g_runtime.get_run_info]
+            - call: [<.install_token_handlers, disp]
+      # AP1.9: Enrollment-Tokens erzeugen/auflisten/widerrufen (doc/spec/90 §AP1.9).
+      - def:
+          name: install_token_handlers
+          args: [[disp, ref<RpcDispatcher>]]
+          body:
+            - call: [disp.register, "create_agent_token", g_runtime.create_agent_token]
+            - call: [disp.register, "list_agent_tokens",  g_runtime.list_agent_tokens]
+            - call: [disp.register, "revoke_agent_token", g_runtime.revoke_agent_token]
+            - call: [disp.register, "provision_agent",    g_runtime.provision_agent]
+            - call: [disp.register, "provision_status",   g_runtime.provision_status]
+            - call: [disp.register, "save_job",     g_runtime.save_job]
+            - call: [disp.register, "set_job_params", g_runtime.set_job_params]
+            - call: [disp.register, "run_job",      g_runtime.run_job]
+            - call: [disp.register, "claim_step",   g_runtime.claim_step]
+            - call: [disp.register, "report_step",  g_runtime.report_step]
+            - call: [disp.register, "renew_lease",  g_runtime.renew_lease]
+            - call: [disp.register, "release_step", g_runtime.release_step]
+            - call: [disp.register, "deprovision_agent",  g_runtime.deprovision_agent]
+      - def:
+          name: run
+          body:
+            - decl: [sess, mirror_session]
+            - decl: [with_tls, i32, 0]
+            - if:
+                condition: { '&&': [{ eq: [{ call: [<.bind_url.starts_with, "wss://"] }, 1] }, { gt: [<.tls_cert.len, 0] }] }
+                then:
+                  - set: [with_tls, 1]
+                  - set: [sess, { call: [mirror.listen_tls, <.bind_url, <.tls_cert, <.tls_key] }]
+                else:
+                  - set: [sess, { call: [mirror.listen, <.bind_url] }]
+            # Erst prüfen, dann melden — sonst behauptet das Log "listening", obwohl
+            # der Port belegt ist, und jeder Starter wartet auf ein falsches Signal.
+            - if:
+                condition: { eq: [sess, null] }
+                then:
+                  - call: [log.error, "[cosmos_daemon] listen auf ${<.bind_url} fehlgeschlagen — Port belegt? (läuft schon ein cosmosd?)"]
+                  - return: []
+            - if:
+                condition: { eq: [with_tls, 1] }
+                then: [{ call: [log.info, "[cosmos_daemon] listening (TLS) on ${<.bind_url}"] }]
+                else: [{ call: [log.info, "[cosmos_daemon] listening on ${<.bind_url}"] }]
+            # doc/spec/102 F102-8: einmal beim Start nachsehen, ob gespeicherte
+            # Laeufe nach einer Modellaenderung noch lesbar sind.  Ohne das
+            # kommt der Befund nur als FATAL-Zeile je Zugriff, und niemand sagt,
+            # was zu tun ist.
+            - call: [g_runtime.cluster.check_schema]
+            # Kapazitaetsschleife einschalten, wenn die Umgebung es sagt.
+            # Standard ist AUS: ein Server, der ungefragt Container startet,
+            # waere eine Ueberraschung.
+            - decl: [scale_env, map<string:string>, { call: [sys.env] }]
+            - if:
+                condition: { gt: [{ call: [scale_env.contains, "COSMOS_RT_AUTOSCALE"] }, 0] }
+                then:
+                  - decl: [on_txt, string, { call: [scale_env.get, "COSMOS_RT_AUTOSCALE"] }]
+                  - set: [<.autoscale, { call: [on_txt.parse_i32] }]
+            - if:
+                condition: { gt: [{ call: [scale_env.contains, "COSMOS_RT_MAX"] }, 0] }
+                then:
+                  - decl: [max_txt, string, { call: [scale_env.get, "COSMOS_RT_MAX"] }]
+                  - set: [<.max_containers, { call: [max_txt.parse_i32] }]
+            - if:
+                condition: { gt: [{ call: [scale_env.contains, "COSMOS_RT_LIMIT_MB"] }, 0] }
+                then:
+                  - decl: [lim_txt, string, { call: [scale_env.get, "COSMOS_RT_LIMIT_MB"] }]
+                  - set: [<.limit_mb, { call: [lim_txt.parse_i32] }]
+            - if:
+                condition: { eq: [<.autoscale, 1] }
+                then:
+                  - decl: [tmpl, string, "deploy/rt_template"]
+                  - if: { condition: { gt: [{ call: [scale_env.contains, "COSMOS_RT_TEMPLATE"] }, 0] }, then: [{ set: [tmpl, { call: [scale_env.get, "COSMOS_RT_TEMPLATE"] }] }] }
+                  - decl: [rtbin, string, "./cosmos-rt"]
+                  - if: { condition: { gt: [{ call: [scale_env.contains, "COSMOS_RT_BINARY"] }, 0] }, then: [{ set: [rtbin, { call: [scale_env.get, "COSMOS_RT_BINARY"] }] }] }
+                  # Die Lausch-Adresse ist KEINE Verbindungsadresse: `0.0.0.0`
+                  # heisst „auf allen Schnittstellen lauschen", nicht „dorthin
+                  # verbinden".  Dass es trotzdem ging, war Glueck (Linux leitet
+                  # 0.0.0.0 auf localhost um) — auf anderen Systemen nicht.
+                  - decl: [dial_url, string, { call: [<.bind_url.replace, "0.0.0.0", "127.0.0.1"] }]
+                  - set: [<.spawner, { new: RtLauncher }]
+                  - call: [<.spawner.init, tmpl, rtbin, "logs/rt_runs", dial_url]
+                  - if:
+                      condition: { gt: [{ call: [scale_env.contains, "COSMOS_RT_LABELS"] }, 0] }
+                      then: [{ call: [<.spawner.set_labels, { call: [scale_env.get, "COSMOS_RT_LABELS"] }] }]
+                  - if:
+                      condition: { eq: [{ call: [<.spawner.ready] }, 0] }
+                      then:
+                        - call: [log.warn, "[autoscale] Vorlage (${tmpl}) oder ${rtbin} fehlt — bleibt AUS"]
+                        - set: [<.autoscale, 0]
+                      else: [{ call: [log.info, "[autoscale] an, hoechstens ${<.max_containers} Container"] }]
+
+            - decl: [disp, ptr<RpcDispatcher>, { new: RpcDispatcher }]
+            - call: [<.install_handlers, disp]
+            - set: [<.is_running, 1]
+            - while:
+                condition: { eq: [<.is_running, 1] }
+                body:
+                  - call: [sess.update]
+                  - decl: [evt, mirror_event, { call: [sess.poll_event] }]
+                  - decl: [evt_kind, MirrorEventType, { call: [evt.type_enum] }]
+                  - if:
+                      condition: { eq: [evt_kind, MirrorEventType.peer_disconnected] }
+                      then:
+                        - call: [g_runtime.reaper.peer_gone, evt.peer_id, { call: [time.now] }]
+                  - decl: [loop_busy, i32, 0]
+                  - if:
+                      condition: { gt: [{ call: [sess.has_rpc] }, 0] }
+                      then:
+                        - set: [loop_busy, 1]
+                        - decl: [rpc_ev, rpc_event, { call: [sess.next_rpc] }]
+                        - call: [disp.dispatch, rpc_ev, sess]
+                  - if: { condition: { '&&': [{ eq: [evt_kind, MirrorEventType.none] }, { eq: [loop_busy, 0] }] }, then: [{ call: [time.sleep_ms, 1] }] }
+                  # doc/spec/106 G2: faellige Jobs starten.  Im selben Takt wie
+                  # der Sweep — ein eigener Timer waere ein zweiter Ort, an dem
+                  # jemand die Frequenz aendert.
+                  - decl: [nowm, i64, { call: [time.now] }]
+                  - if:
+                      condition: { gt: [nowm, { +: [<.last_sched_ms, 5000] }] }
+                      then:
+                        - set: [<.last_sched_ms, nowm]
+                        - call: [g_runtime.cluster.tick_schedule, nowm]
+                        # Verwaiste Schritte zurueckholen: ohne das bleibt ein
+                        # Lauf fuer immer bei einem Agenten, der nie wiederkommt
+                        # (gemessen 2026-10-15 — die Rechnung dafuer gab es, nur
+                        # rief sie niemand auf).
+                        - call: [g_runtime.cluster.expire_leases, nowm]
+                  # Disconnect-Sweep (~alle 5s): abgelaufene getrennte Verbindungen aufräumen.
+                  - if:
+                      condition: { gt: [nowm, { +: [<.last_sweep_ms, 5000] }] }
+                      then:
+                        - set: [<.last_sweep_ms, nowm]
+                        - call: [g_runtime.reaper.sweep, nowm]
+                  # Schnappschuss fuer die Skript-Konsole (doc/spec/108 §11), im
+                  # Sweep-Takt: die Konsole laeuft in einem EIGENEN Prozess und kann das
+                  # KV nicht mitlesen, also schreibt der Server den Zustand heraus.
+                  - if:
+                      condition: { gt: [nowm, { +: [<.last_snap_ms, 5000] }] }
+                      then:
+                        - set: [<.last_snap_ms, nowm]
+                        # Erste Scheibe: Agenten.  Knoten- und Lauf-Zahlen kaemen aus
+                        # `cluster.snapshot`, und das ist je 5 s zu teuer fuer eine
+                        # Zeile Text — sie kommen, wenn jemand sie braucht.
+                        - call: [g_runtime.console.write_snapshot,
+                                 { call: [g_runtime.agents.online_count] },
+                                 { call: [g_runtime.agents.count] }]
+                  # doc/spec/110 M7: liegt Arbeit an, fuer die kein Agent da ist?
+                  # Der Agent ZIEHT, also ist das die einzige Entscheidung, die
+                  # ueberhaupt zu treffen ist.
+                  - if:
+                      condition: { '&&': [{ eq: [<.autoscale, 1] }, { gt: [nowm, { +: [<.last_scale_ms, 5000] }] }] }
+                      then:
+                        - set: [<.last_scale_ms, nowm]
+                        # Nur Schritte zaehlen, die der Agent, den wir starten
+                        # wuerden, auch NEHMEN darf (F110-37).
+                        # Zuerst die Toten aus der Liste: ein Container, der
+                        # beim Start gestorben ist, haelt sonst seinen Platz.
+                        - decl: [swept, i32, { call: [<.spawner.sweep_dead, g_runtime.tokens] }]
+                        # Was wartet — und WORIN?  Die Umgebung steht an der
+                        # Stufe (`image:`, aiml spec/62 §18), nicht in einem
+                        # Etikett (doc/spec/110 §110.29).
+                        - decl: [want, PendingWant, { call: [g_runtime.cluster.first_pending_want, { call: [<.spawner.labels_now] }] }]
+                        # Kann einer der ANWESENDEN das nehmen?  Dafuer muss er
+                        # dieselbe Umgebung tragen — ein Etikett genuegt nicht.
+                        - decl: [crew, AgentList, { call: [g_runtime.agents.snapshot] }]
+                        - decl: [have, i32, 0]
+                        - decl: [cix, i32, 0]
+                        - while:
+                            condition: { lt: [cix, crew.agents.len] }
+                            body:
+                              - decl: [one_agent, AgentInfo, { at: [crew.agents, cix] }]
+                              - set: [cix, { +: [cix, 1] }]
+                              - decl: [cand, ClaimWho]
+                              - set: [cand.agent_id, one_agent.agent_id]
+                              - set: [cand.labels, one_agent.labels]
+                              - set: [cand.image, one_agent.image]
+                              - if:
+                                  condition: { '&&': [{ neq: [one_agent.online, 0] }, { gt: [{ call: [g_runtime.cluster.pending_for, cand] }, 0] }] }
+                                  then: [{ set: [have, { +: [have, 1] }] }]
+                        - if:
+                            condition: { '&&': [{ eq: [want.any, 1] }, { '&&': [{ eq: [have, 0] }, { lt: [{ call: [<.spawner.live_count] }, <.max_containers] }] }] }
+                            then:
+                              - set: [<.spawn_seq, { +: [<.spawn_seq, 1] }]
+                              - call: [log.info, "[autoscale] Arbeit wartet auf Abbild '${want.image}' — starte Container"]
+                              # Die Vorgabe des Wirts einsetzen, wo die Stufe
+                              # nichts verlangt (doc/spec/110 F110-91) — hier,
+                              # wo beides bekannt ist.
+                              - decl: [ask, PendingWant, want]
+                              - if: { condition: { lt: [ask.mem_mb, 1] }, then: [{ set: [ask.mem_mb, <.limit_mb] }] }
+                              - decl: [born, RtLaunch, { call: [<.spawner.spawn_image, g_runtime.tokens, "rt-${<.boot_tag}-${<.spawn_seq}", ask, want.image] }]
+                        # Und umgekehrt: wer nichts zu tun hat, geht wieder —
+                        # JE CONTAINER gefragt.  „Nichts zu tun" heisst: er
+                        # haelt keinen Schritt (`agent_busy`) UND fuer ihn
+                        # wartet keiner (`pending_for`).  Vorher zaehlte nur das
+                        # Warten: ein zugeteilter Schritt wartet nicht mehr, und
+                        # der Container wurde mitten in der Arbeit abgeraeumt
+                        # (gemessen 21.10.2026, doc/spec/110 F110-55).
+                        - decl: [live_ids, list<string>, { call: [<.spawner.ids_now] }]
+                        - decl: [lix, i32, 0]
+                        - while:
+                            condition: { lt: [lix, live_ids.len] }
+                            body:
+                              - decl: [live_id, string, { at: [live_ids, lix] }]
+                              - set: [lix, { +: [lix, 1] }]
+                              - decl: [busy, i32, { call: [g_runtime.cluster.agent_busy, live_id] }]
+                              - decl: [mine_who, ClaimWho]
+                              - set: [mine_who.agent_id, live_id]
+                              - set: [mine_who.labels, { call: [<.spawner.labels_now] }]
+                              - set: [mine_who.image, { call: [<.spawner.image_of, live_id] }]
+                              - decl: [mine, i32, { call: [g_runtime.cluster.pending_for, mine_who] }]
+                              # Und: haelt er den Stand eines noch offenen Laufs?
+                              # Dann gehoert der Container dem Lauf, auch
+                              # waehrend er wartet (doc/spec/110 F110-85).
+                              - decl: [haelt, i32, { call: [g_runtime.cluster.serves_open_run, live_id] }]
+                              - if:
+                                  condition: { '&&': [{ eq: [busy, 0] }, { '&&': [{ eq: [mine, 0] }, { eq: [haelt, 0] }] }] }
+                                  then: [{ call: [<.spawner.reap_if_idle, g_runtime.tokens, live_id, nowm, 60000] }]
+
+                  # ── push: Ergebnis einer Stufe ablegen (aiml spec/62 §18) ──
+                  # Zweimal je Runde: einen anstossen, einen einsammeln.  Beides
+                  # ABGELOEST — ein Abbild sind hunderte Megabyte, und ein
+                  # Controller, der darin haengt, beantwortet keine RPC.
+                  - if:
+                      condition: { gt: [nowm, { +: [<.last_push_scan_ms, 2000] }] }
+                      then:
+                        - set: [<.last_push_scan_ms, nowm]
+                        - decl: [ready, PushTarget, { call: [g_runtime.cluster.push_ready] }]
+                        - if:
+                            condition: { eq: [ready.status, "ready"] }
+                            then:
+                              - decl: [root_at, string, { call: [<.spawner.rootfs_of, ready.agent] }]
+                              - if:
+                                  condition: { eq: [root_at.len, 0] }
+                                  then:
+                                    - call: [log.error, "[push] ${ready.message}/${ready.from_stage}: Agent '${ready.agent}' ist kein Container dieses Wirts — nur den kann er schneiden"]
+                                    - decl: [m_no, i32, { call: [g_runtime.cluster.push_mark, ready.message, ready.from_stage, "failed", ""] }]
+                                  else:
+                                    - decl: [started, i32, { call: [g_runtime.pusher.start, ready.message, ready.from_stage, ready.target, root_at] }]
+                                    - decl: [how, string, "failed"]
+                                    - if: { condition: { eq: [started, 1] }, then: [{ set: [how, "running"] }] }
+                                    - decl: [m_go, i32, { call: [g_runtime.cluster.push_mark, ready.message, ready.from_stage, how, ""] }]
+                        - decl: [done, PushTarget, { call: [g_runtime.pusher.poll] }]
+                        - if:
+                            condition: { gt: [done.from_stage.len, 0] }
+                            then:
+                              - decl: [m_fin, i32, { call: [g_runtime.cluster.push_mark, done.message, done.from_stage, done.status, done.digest] }]
+
+                  # Live-Push: Cluster-Änderungen an Abonnenten (~alle 400ms Signatur prüfen).
+                  - if:
+                      condition: { gt: [nowm, { +: [<.last_push_ms, 400] }] }
+                      then:
+                        - set: [<.last_push_ms, nowm]
+                        - call: [g_runtime.push.tick, sess]

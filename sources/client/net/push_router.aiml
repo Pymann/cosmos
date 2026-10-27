@@ -1,0 +1,36 @@
+# PushRouter — EINE Drain-Schleife fuer alle Pushes (doc/spec/105).
+#
+# Frueher eine freie Funktion, die drei Globals las.  Jetzt eine Instanz, die
+# ihre Kollaborateure sieht: `poll_rpc` EINMAL, dann reihum anbieten — eine
+# typspezifische Schleife je Push-Art wuerde fremde Ereignisse still schlucken.
+
+- import: "sources/client/net/live_state.aiml"
+- import: "sources/client/net/agents_state.aiml"
+
+- class:
+    name: PushRouter
+    members:
+      # Kollaborateure; von der Gruppe ueber `sees:` verdrahtet (spec/58 §5.1).
+      - [session,      ref<SessionState>]
+      - [live,         ref<LiveState>]
+      - [agents_state, ref<AgentsState>]
+    methods:
+      - def:
+          name: drain
+          access: public
+          static_off: ["str_cmp"]
+          body:
+            - if: { condition: { eq: [<.session.connected, 0] }, then: [{ return: [] }] }
+            - if: { condition: { peq: [<.session.conn, null] }, then: [{ return: [] }] }
+            - decl: [more, i32, 1]
+            - while:
+                condition: { eq: [more, 1] }
+                body:
+                  - decl: [rpc, rpc_event, { call: [<.session.conn.poll_rpc] }]
+                  - if:
+                      condition: { eq: [rpc.method, ""] }
+                      then: [{ set: [more, 0] }]
+                      else:
+                        - decl: [taken, i32, { call: [<.live.apply_push, rpc] }]
+                        - if: { condition: { eq: [taken, 0] }, then: [{ set: [taken, { call: [<.agents_state.apply_push, rpc] }] }] }
+                        - if: { condition: { eq: [taken, 0] }, then: [{ call: [log.warn, "[push] unbehandelt: ${rpc.method}"] }] }

@@ -1,0 +1,100 @@
+# ProvisionState — Einrichtungs-Fortschritt als Member statt als vier Globals
+# (doc/spec/105 Schritt 6).
+
+- import: "sources/client/net/session_state.aiml"
+- import: "sources/models/provision_reqs.aiml"
+
+- class:
+    name: ProvisionState
+    members:
+      # Kollaborateur; von der Gruppe ueber `sees: [session]` verdrahtet (spec/58 §5.1).
+      - [session, ref<SessionState>]
+      - [fingerprint, string]
+      - [status, string]
+      - [running, i32]
+      - [done, i32]
+    methods:
+      - def:
+          name: deprovision
+          access: public
+          args: [[req_in, ProvisionReq]]
+          return: { type: ProvisionResp, lifetime: producer }
+          body:
+            - decl: [out, ProvisionResp]
+            - if:
+                condition: { eq: [<.session.connected, 0] }
+                then: [{ set: [out.message, "keine Verbindung"] }, { return: out }]
+            - decl: [req, ProvisionReq, req_in]
+            - set: [req.token, <.session.token]
+            - decl: [res, ptr<ProvisionResp>, { new: ProvisionResp }]
+            - decl: [got, i32, { call: [<.session.conn.send_and_await, 0, "deprovision_agent", req, res, 120000] }]
+            - if:
+                condition: { neq: [got, 1] }
+                then: [{ set: [out.message, "keine Antwort vom Server"] }, { return: out }]
+            - set: [out.success, res.success]
+            - set: [out.failed_step, res.failed_step]
+            - set: [out.message, res.message]
+            - set: [out.fingerprint, res.fingerprint]
+            - set: [out.steps_done, res.steps_done]
+            - set: [out.token_id, res.token_id]
+            - set: [out.running, res.running]
+            - return: out
+
+      # status: wie weit ist der laufende Auftrag?  Wird JEDEN Rahmen gefragt,
+      # solange `running` 1 ist — so bleibt die Oberflaeche bedienbar, waehrend
+      # auf dem Knoten gearbeitet wird.
+      - def:
+          name: status
+          access: public
+          return: { type: ProvisionResp, lifetime: producer }
+          body:
+            - decl: [out, ProvisionResp]
+            - if:
+                condition: { eq: [<.session.connected, 0] }
+                then: [{ set: [out.message, "keine Verbindung"] }, { return: out }]
+            - decl: [req, ProvisionReq]
+            - set: [req.token, <.session.token]
+            - decl: [res, ptr<ProvisionResp>, { new: ProvisionResp }]
+            - decl: [got, i32, { call: [<.session.conn.send_and_await, 0, "provision_status", req, res, 4000] }]
+            - if:
+                condition: { neq: [got, 1] }
+                then: [{ set: [out.message, "keine Antwort vom Server"] }, { return: out }]
+            - set: [out.running, res.running]
+            - set: [out.success, res.success]
+            - set: [out.failed_step, res.failed_step]
+            - set: [out.message, res.message]
+            - set: [out.steps_done, res.steps_done]
+            - return: out
+
+      - def:
+          name: provision
+          access: public
+          args: [[req_in, ProvisionReq]]
+          return: { type: ProvisionResp, lifetime: producer }
+          body:
+            - decl: [out, ProvisionResp]
+            - if:
+                condition: { eq: [<.session.connected, 0] }
+                then: [{ set: [out.message, "keine Verbindung"] }, { return: out }]
+            - decl: [req, ProvisionReq, req_in]
+            - set: [req.token, <.session.token]
+            - decl: [res, ptr<ProvisionResp>, { new: ProvisionResp }]
+            # Lange Zeitschranke: auf einem echten Knoten dauert allein die
+            # Paketinstallation Sekunden bis Minuten.
+            # Kurze Zeitschranke: der Aufruf STARTET nur noch.  Die Schritte
+            # laufen auf dem Server nebenher, der Stand kommt ueber `status`.
+            - decl: [got, i32, { call: [<.session.conn.send_and_await, 0, "provision_agent", req, res, 15000] }]
+            - if:
+                condition: { neq: [got, 1] }
+                then: [{ set: [out.message, "keine Antwort vom Server"] }, { return: out }]
+            - set: [out.success, res.success]
+            - set: [out.failed_step, res.failed_step]
+            - set: [out.message, res.message]
+            - set: [out.fingerprint, res.fingerprint]
+            - set: [out.steps_done, res.steps_done]
+            - set: [out.token_id, res.token_id]
+            # OHNE das meldet die Oberflaeche „Nicht gestartet", waehrend der
+            # Server laengst arbeitet (gemeldet 2026-10-15): die Antwort sagte
+            # „angenommen", nur las sie niemand.
+            - set: [out.running, res.running]
+            - return: out

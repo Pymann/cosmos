@@ -1,0 +1,175 @@
+# LivePush — schiebt Cluster- und Agentenliste an ihre Abonnenten, sobald sich
+# etwas geändert hat (doc/spec/93, Stufe 3).
+#
+# Stand vorher: diese beiden Methoden hingen in CosmosDaemon und griffen über
+# `g_runtime` auf vier Dienste zu.  Der Zustand, der dazugehört — die letzte
+# gesendete Signatur je Strom —, lag als Member im Daemon, also war die
+# Push-Logik über zwei Ebenen verteilt.  Jetzt ist beides hier: Signatur-Status
+# als Member, Dienst-Zugriff über die sees-Kanten der Instanz.
+#
+# Die Signatur ist der Änderungsvergleich: gleiche Signatur → kein Push.  Ohne
+# das würde der Server alle 400 ms jedem Abonnenten dieselbe Sicht schicken.
+
+- import: "sources/models/agent_list.aiml"
+- import: "sources/shared/cluster_view.aiml"
+
+- class:
+    name: LivePush
+    members:
+      - [cluster_sig, string, ""]
+      - [agent_sig,   string, ""]
+    methods:
+      # cluster_signature: woran erkennt der Server, dass sich etwas GEAENDERT
+      # hat?  Eigene Methode, weil sie der einzige Grund ist, einen Schnappschuss
+      # zu schicken — und damit netzlos pruefbar sein muss (test_live_push_sig).
+      #
+      # Sie sah bis 2026-10-15 nur `jobs` (die Lauf-Datensaetze), NICHT
+      # `job_defs` (die angelegten Jobs).  Folge: ein neu angelegter Job aenderte
+      # die Signatur nicht, es ging kein Push raus, und die Jobliste im Client
+      # erfuhr nie von ihm — „er wird nicht unter Jobs gelistet" (User).
+      - def:
+          name: cluster_signature
+          access: public
+          static_off: ["str_cmp"]
+          args: [[view, ref<ClusterView>]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [sig, string, "n${view.nodes.len}w${view.workloads.len}p${view.pipelines.len}j${view.jobs.len}d${view.job_defs.len}L${view.layers.len}T${view.times.len};"]
+            - decl: [six, i32, 0]
+            - while:
+                condition: { lt: [six, view.jobs.len] }
+                body:
+                  - decl: [jrec, JobRecord, { at: [view.jobs, six] }]
+                  - set: [sig, "${sig}${jrec.job_id}:${jrec.state}:${jrec.exit_code}:${jrec.disconnects}:${jrec.updated_ms}|"]
+                  - set: [six, { +: [six, 1] }]
+            # Die SCHICHTEN (doc/spec/107 §107.1c): sie stehen als Platten im
+            # Bild, also muss die Signatur sie sehen (F107-44).  Ihre ANZAHL
+            # steht oben; hier die Groesse, denn eine Stufe, die erneut laeuft,
+            # ersetzt ihre Zeile statt eine neue anzuhaengen.
+            - decl: [lgx, i32, 0]
+            - while:
+                condition: { lt: [lgx, view.layers.len] }
+                body:
+                  - decl: [lrow, StageLayer, { at: [view.layers, lgx] }]
+                  - set: [sig, "${sig}${lrow.run_id}/${lrow.stage}:${lrow.bytes}:${lrow.files}|"]
+                  - set: [lgx, { +: [lgx, 1] }]
+            # Die LAUFZEITEN: eine Stufe, die endet, aendert sonst nichts, was
+            # die Signatur sieht — und die Zeit bliebe stehen (F107-44).
+            - decl: [tgx, i32, 0]
+            - while:
+                condition: { lt: [tgx, view.times.len] }
+                body:
+                  - decl: [trow, StageTime, { at: [view.times, tgx] }]
+                  - set: [sig, "${sig}${trow.stage}:${trow.started_ms}:${trow.ended_ms}|"]
+                  - set: [tgx, { +: [tgx, 1] }]
+            # Die angelegten Jobs: Name, Schalter, Auslöser und das letzte
+            # Ergebnis aendern sich beim Bearbeiten, ohne dass eine LAENGE das
+            # zeigt.  Ohne diese Felder sieht der Client eine Aenderung erst beim
+            # naechsten zufaelligen Push.
+            - decl: [dix, i32, 0]
+            - while:
+                condition: { lt: [dix, view.job_defs.len] }
+                body:
+                  - decl: [jdef, JobDef, { at: [view.job_defs, dix] }]
+                  # Die Signatur muss ALLES abdecken, was die Ansicht ZEIGT.  Was sie
+                  # zeigt und die Signatur nicht sieht, ist per Bauart veraltet — und
+                  # sieht fuer den Nutzer aus wie ein Fehler im Server.
+                  #
+                  # Anlass (User 2026-10-18): „die Jobs Ansicht wird nicht akurat
+                  # aktualisiert".  `last_ms`, `runs_total` und `runs_failed` stehen in
+                  # jeder Zeile der Jobliste, fehlten hier aber.  Endete ein Lauf mit
+                  # DEMSELBEN Zustand wie der vorige, aenderte sich nichts, was die
+                  # Signatur sah — kein Push, alte Zahlen.
+                  #
+                  # Der QUELLTEXT geht als HASH ein, nicht als Text: er steht im Editor
+                  # und muss wirken, ist aber das mit Abstand groesste Feld, und die
+                  # Signatur entsteht alle 400 ms.  Eine Laengenpruefung reichte nicht —
+                  # zwei Fassungen gleicher Laenge sind der Normalfall beim Bearbeiten.
+                  - decl: [src_fp, string, ""]
+                  - if:
+                      condition: { gt: [jdef.source.len, 0] }
+                      then: [{ set: [src_fp, { call: [hash.sha256, jdef.source] }] }]
+                  - set: [sig, "${sig}${jdef.job_id}:${jdef.name}:${jdef.enabled}:${jdef.interval_s}:${jdef.next_build}:${jdef.last_status}:${jdef.last_started_ms}:${jdef.last_ms}:${jdef.runs_total}:${jdef.runs_failed}:${jdef.last_run_id}:${src_fp}#"]
+                  - set: [dix, { +: [dix, 1] }]
+            # Die Laeufe selbst: ihr Zustand aendert sich, waehrend die ANZAHL
+            # gleich bleibt — sonst stuende ein Lauf im Client ewig auf „running".
+            - decl: [pix, i32, 0]
+            - while:
+                condition: { lt: [pix, view.pipelines.len] }
+                body:
+                  - decl: [prun, PipelineRun, { at: [view.pipelines, pix] }]
+                  - set: [sig, "${sig}${prun.run_id}:${prun.status}:${prun.ended_ms}~"]
+                  # Und die STUFEN.  Ohne sie sah die Signatur einen laufenden
+                  # Lauf die ganze Zeit gleich: Stufe 1 fertig, Stufe 2 laeuft —
+                  # alles innerhalb von `status: running`.  Es gab also keinen
+                  # Push, und die Oberflaeche zeigte die erste Kugel gelb, bis
+                  # der Lauf ENDETE und mit einem Schlag alles fertig war
+                  # (gemeldet 22.10.2026).  Genau das, wovor der Kommentar oben
+                  # warnt: was die Ansicht zeigt und die Signatur nicht sieht,
+                  # ist per Bauart veraltet.
+                  #
+                  # `attempt` gehoert dazu, weil ein zweiter Anlauf derselben
+                  # Stufe denselben Zustand haben kann („running" → „running")
+                  # und trotzdem eine andere Lage ist; `agent` ebenso, weil das
+                  # Bild zeigt, WER sie ausfuehrt.
+                  - decl: [gix, i32, 0]
+                  - while:
+                      condition: { lt: [gix, prun.stages.len] }
+                      body:
+                        - decl: [gstg, PipelineStage, { at: [prun.stages, gix] }]
+                        - set: [gix, { +: [gix, 1] }]
+                        - set: [sig, "${sig}${gstg.stage_id}:${gstg.status}:${gstg.attempt}:${gstg.agent},"]
+                  - set: [pix, { +: [pix, 1] }]
+            - return: sig
+
+- groupmethods:
+    group: CosmosRuntime
+    instances:
+      - instance: push
+        methods:
+          # tick: der einzige Aufruf, den die Schleife braucht.
+          - def:
+              name: tick
+              args: [[sess, mirror_session]]
+              body:
+                - call: [<.push_cluster, sess]
+                - call: [<.push_agents, sess]
+
+          - def:
+              name: push_agents
+              static_off: ["str_cmp"]
+              args: [[sess, mirror_session]]
+              body:
+                - decl: [sub_num, i32, { call: [<.agent_subs.count] }]
+                - if: { condition: { eq: [sub_num, 0] }, then: [{ return: [] }] }
+                - decl: [sig, string, { call: [<.agents.signature] }]
+                - if: { condition: { eq: [sig, <.agent_sig] }, then: [{ return: [] }] }
+                - set: [<.agent_sig, sig]
+                - decl: [lst, AgentList, { call: [<.agents.snapshot] }]
+                - decl: [pix, i32, 0]
+                - while:
+                    condition: { lt: [pix, sub_num] }
+                    body:
+                      - decl: [sub_peer, i32, { call: [<.agent_subs.at, pix] }]
+                      - call: [sess.send_rpc, sub_peer, "agents_update", 0, lst]
+                      - set: [pix, { +: [pix, 1] }]
+                - call: [log.info, "[live_push] pushed agents_update to ${sub_num} subscriber(s)"]
+
+          - def:
+              name: push_cluster
+              args: [[sess, mirror_session]]
+              body:
+                - decl: [sub_num, i32, { call: [<.cluster_subs.count] }]
+                - if: { condition: { eq: [sub_num, 0] }, then: [{ return: [] }] }
+                - decl: [view, ClusterView, { call: [<.cluster.snapshot_live] }]
+                - decl: [sig, string, { call: [<.cluster_signature, view] }]
+                - if: { condition: { eq: [sig, <.cluster_sig] }, then: [{ return: [] }] }
+                - set: [<.cluster_sig, sig]
+                - decl: [pix, i32, 0]
+                - while:
+                    condition: { lt: [pix, sub_num] }
+                    body:
+                      - decl: [sub_peer, i32, { call: [<.cluster_subs.at, pix] }]
+                      - call: [sess.send_rpc, sub_peer, "cluster_update", 0, view]
+                      - set: [pix, { +: [pix, 1] }]
+                - call: [log.info, "[live_push] pushed cluster_update to ${sub_num} subscriber(s)"]

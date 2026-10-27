@@ -1,0 +1,447 @@
+# Der Renderer der raeumlichen Pipeline (doc/spec/107 §107.1b, F107-13).
+#
+# Er ist DUMM: er bekommt fertige `SceneItem`s (gerechnet in PipeScene) und
+# zeichnet sie.  Was wo liegt und welche Farbe es traegt, entscheidet er nicht
+# — sonst waere die Aussage im Renderer gefangen und nicht pruefbar.
+#
+# Gezeichnet wird NACH der 2D-Oberflaeche in einen Ausschnitt (gl.viewport),
+# mit eigenem Tiefenpuffer.  Der Prefab-Pass kennt keine Tiefe; die Reihenfolge
+# ist deshalb die einfachste Trennung.
+
+- import: "sources/client/gfx/mesh_shapes.aiml"
+- import: "sources/client/gfx/pipe3d_shader.aiml"
+- import: "sources/shared/pipe_scene.aiml"
+
+- class:
+    name: Pipe3D
+    members:
+      - [shapes,  MeshShapes]
+      - [prog,    gl_shader]
+      - [ready,   i32]
+      - [yaw,     f32]
+      - [pitch,   f32]
+      - [dist,    f32]
+      - [ctr_x,   f32]
+      - [ctr_y,   f32]
+      - [ctr_z,   f32]
+      - [clock,   f32]
+    methods:
+      - def:
+          name: init
+          access: public
+          return: i32
+          body:
+            - if: { condition: { eq: [<.ready, 1] }, then: [{ return: 1 }] }
+            - call: [<.shapes.build]
+            # Desktop zuerst, dann GLES.  Ein fehlgeschlagenes Compile ist die
+            # ehrlichste Abfrage nach dem Ziel, die es hier gibt.
+            - set: [<.prog, { call: [gl.compile_shader, "${p3d_head_desktop}${p3d_vert_body}", "${p3d_head_desktop}${p3d_frag_body}"] }]
+            - if:
+                condition: { eq: [<.prog, null] }
+                then:
+                  - set: [<.prog, { call: [gl.compile_shader, "${p3d_head_gles}${p3d_vert_body}", "${p3d_head_gles}${p3d_frag_body}"] }]
+            - if:
+                condition: { eq: [<.prog, null] }
+                then:
+                  - call: [log.error, "[pipe3d] Shader liess sich nicht uebersetzen — die raeumliche Ansicht bleibt leer"]
+                  - return: 0
+            - set: [<.yaw, 38.0]
+            - set: [<.pitch, 24.0]
+            - set: [<.dist, 14.0]
+            - set: [<.ready, 1]
+            - return: 1
+
+      # fit: Blickpunkt und Abstand aus der Ausdehnung der Szene.  Ohne das
+      # haengt das Bild an festen Zahlen und bricht bei der ersten Pipeline,
+      # die mehr Stufen hat als die Beispiel-Pipeline.
+      - def:
+          name: is_ready
+          access: public
+          return: i32
+          body:
+            - return: <.ready
+
+      - def:
+          name: fit
+          access: public
+          args: [[items, list<SceneItem>]]
+          body:
+            - if: { condition: { eq: [items.len, 0] }, then: [{ return: [] }] }
+            - decl: [min_x, f32, 9999.0]
+            - decl: [max_x, f32, -9999.0]
+            - decl: [min_y, f32, 9999.0]
+            - decl: [max_y, f32, -9999.0]
+            - decl: [min_z, f32, 9999.0]
+            - decl: [max_z, f32, -9999.0]
+            - decl: [iix, i32, 0]
+            - while:
+                condition: { lt: [iix, items.len] }
+                body:
+                  - decl: [one, SceneItem, { at: [items, iix] }]
+                  - set: [iix, { +: [iix, 1] }]
+                  - if: { condition: { lt: [one.pos_x, min_x] }, then: [{ set: [min_x, one.pos_x] }] }
+                  - if: { condition: { gt: [one.pos_x, max_x] }, then: [{ set: [max_x, one.pos_x] }] }
+                  - if: { condition: { lt: [one.pos_y, min_y] }, then: [{ set: [min_y, one.pos_y] }] }
+                  - if: { condition: { gt: [one.pos_y, max_y] }, then: [{ set: [max_y, one.pos_y] }] }
+                  - if: { condition: { lt: [one.pos_z, min_z] }, then: [{ set: [min_z, one.pos_z] }] }
+                  - if: { condition: { gt: [one.pos_z, max_z] }, then: [{ set: [max_z, one.pos_z] }] }
+            - set: [<.ctr_x, { '*': [{ +: [min_x, max_x] }, 0.5] }]
+            - set: [<.ctr_y, { '*': [{ +: [min_y, max_y] }, 0.5] }]
+            - set: [<.ctr_z, { '*': [{ +: [min_z, max_z] }, 0.5] }]
+            - decl: [ext_x, f32, { -: [max_x, min_x] }]
+            - decl: [ext_y, f32, { -: [max_y, min_y] }]
+            - decl: [ext_z, f32, { -: [max_z, min_z] }]
+            - decl: [span, f32, ext_x]
+            - if: { condition: { gt: [ext_z, span] }, then: [{ set: [span, ext_z] }] }
+            - if: { condition: { gt: [ext_y, span] }, then: [{ set: [span, ext_y] }] }
+            - set: [<.dist, { +: [{ '*': [span, 1.25] }, 5.0] }]
+
+      # set_view: Blickwinkel setzen — fuer Proben und Tests, die keine Maus
+      # haben.
+      - def:
+          name: set_view
+          access: public
+          args: [[yaw, f32], [pitch, f32], [dist, f32]]
+          body:
+            - set: [<.yaw, yaw]
+            - set: [<.pitch, pitch]
+            - set: [<.dist, dist]
+
+      - def:
+          name: turn
+          access: public
+          args: [[dyaw, f32], [dpitch, f32]]
+          body:
+            - set: [<.yaw, { +: [<.yaw, dyaw] }]
+            - set: [<.pitch, { +: [<.pitch, dpitch] }]
+            - if: { condition: { gt: [<.pitch, 78.0] }, then: [{ set: [<.pitch, 78.0] }] }
+            - if: { condition: { lt: [<.pitch, -20.0] }, then: [{ set: [<.pitch, -20.0] }] }
+
+      - def:
+          name: zoom
+          access: public
+          args: [[factor, f32]]
+          body:
+            - set: [<.dist, { '*': [<.dist, factor] }]
+            - if: { condition: { lt: [<.dist, 3.0] }, then: [{ set: [<.dist, 3.0] }] }
+            - if: { condition: { gt: [<.dist, 80.0] }, then: [{ set: [<.dist, 80.0] }] }
+
+      # eye: die Kameralage aus Gier/Neigung/Abstand um den Mittelpunkt.
+      - def:
+          name: eye
+          access: public
+          return: vec3
+          body:
+            - decl: [yaw_rad, f32, { call: [math.to_radians, <.yaw] }]
+            - decl: [pitch_rad, f32, { call: [math.to_radians, <.pitch] }]
+            - decl: [cos_p, f32, { call: [math.cos, pitch_rad] }]
+            - decl: [eye_x, f32, { +: [<.ctr_x, { '*': [<.dist, { '*': [cos_p, { call: [math.sin, yaw_rad] }] }] }] }]
+            - decl: [eye_y, f32, { +: [<.ctr_y, { '*': [<.dist, { call: [math.sin, pitch_rad] }] }] }]
+            - decl: [eye_z, f32, { +: [<.ctr_z, { '*': [<.dist, { '*': [cos_p, { call: [math.cos, yaw_rad] }] }] }] }]
+            - return: { call: [math.vec3, eye_x, eye_y, eye_z] }
+
+      # `pull` zieht die Kamera zurueck, wenn der Ausschnitt schmaler als hoch
+      # ist: das Sichtfeld gilt senkrecht, also wird ein schmales Bild sonst
+      # enger — die Koerper wuechsen aus dem Feld heraus.
+      - def:
+          name: view_matrix
+          access: public
+          args: [[pull, f32]]
+          return: mat4
+          body:
+            - decl: [upward, vec3, { call: [math.vec3, 0.0, 1.0, 0.0] }]
+            - decl: [centre, vec3, { call: [math.vec3, <.ctr_x, <.ctr_y, <.ctr_z] }]
+            - decl: [keep, f32, <.dist]
+            - set: [<.dist, { '*': [<.dist, pull] }]
+            - decl: [spot, vec3, { call: [<.eye] }]
+            - set: [<.dist, keep]
+            - return: { call: [math.mat4_lookat, spot, centre, upward] }
+
+      # ── draw: der ganze Ausschnitt in einem Zug ────────────────────────
+      # `rect` ist in PHYSISCHEN Pixeln mit y von UNTEN (GL-Konvention) — der
+      # Aufrufer rechnet um, weil nur er die Fenstergroesse kennt.
+      - def:
+          name: draw
+          access: public
+          args: [[items, list<SceneItem>], [left, i32], [bottom, i32], [wide, i32], [high, i32]]
+          body:
+            - if: { condition: { eq: [<.ready, 0] }, then: [{ return: [] }] }
+            - if: { condition: { le: [wide, 0] }, then: [{ return: [] }] }
+            - call: [gl.viewport, left, bottom, wide, high]
+            - call: [gl.clear_depth]
+            - call: [gl.enable_depth_test]
+            # Kein Culling: bei dieser Anzahl spart es nichts, kostet aber eine
+            # Fehlerquelle — eine falsch herum gewickelte Mantelflaeche faellt
+            # sonst als Loch auf, nicht als Fehler.
+            - call: [gl.disable_cull_face]
+            - call: [gl.enable_blend]
+            - call: [<.prog.use]
+            - decl: [aspect, f32, { '/': [{ cast: [wide, f32] }, { cast: [high, f32] }] }]
+            # RADIANT, nicht Grad (math_runtime: tanf(fov*0.5)) — mit 42.0
+            # Radiant war das Sichtfeld so weit, dass die Szene zum Punkt wurde.
+            - decl: [fov, f32, { call: [math.to_radians, 42.0] }]
+            - decl: [proj, mat4, { call: [math.mat4_perspective, fov, aspect, 0.3, 300.0] }]
+            - call: [<.prog.uniform_mat4, "uProj", proj]
+            - decl: [pull, f32, 1.0]
+            - if: { condition: { lt: [aspect, 1.0] }, then: [{ set: [pull, { '/': [1.0, aspect] }] }] }
+            - call: [<.prog.uniform_mat4, "uView", { call: [<.view_matrix, pull] }]
+            - decl: [now_t, f32, <.clock]
+            - call: [<.prog.uniform_f32, "uTime", now_t]
+            - decl: [iix, i32, 0]
+            - while:
+                condition: { lt: [iix, items.len] }
+                body:
+                  - decl: [one, SceneItem, { at: [items, iix] }]
+                  - set: [iix, { +: [iix, 1] }]
+                  - call: [<.draw_one, one]
+            # Zustand zuruecksetzen: der naechste Rahmen zeichnet wieder 2D.
+            - call: [gl.disable_depth_test]
+            - call: [gl.disable_cull_face]
+
+      - def:
+          name: draw_one
+          args: [[one, ref<SceneItem>]]
+          body:
+            - decl: [len_sq, f32, { +: [{ +: [{ '*': [one.axis_x, one.axis_x] }, { '*': [one.axis_y, one.axis_y] }] }, { '*': [one.axis_z, one.axis_z] }] }]
+            - decl: [axis_len, f32, { call: [math.sqrt, len_sq] }]
+            - if: { condition: { lt: [axis_len, 0.0001] }, then: [{ set: [axis_len, 1.0] }] }
+            - decl: [up_x, f32, { '/': [one.axis_x, axis_len] }]
+            - decl: [up_y, f32, { '/': [one.axis_y, axis_len] }]
+            - decl: [up_z, f32, { '/': [one.axis_z, axis_len] }]
+            # Ein beliebiger Vektor, der nicht parallel zur Achse liegt — daraus
+            # die beiden anderen Richtungen.  Liegt die Achse nahe an Y, wird X
+            # zum Helfer; sonst Y.
+            - decl: [helper_x, f32, 0.0]
+            - decl: [helper_y, f32, 1.0]
+            - decl: [helper_z, f32, 0.0]
+            - decl: [up_y_abs, f32, up_y]
+            - if: { condition: { lt: [up_y_abs, 0.0] }, then: [{ set: [up_y_abs, { -: [0.0, up_y_abs] }] }] }
+            - if: { condition: { gt: [up_y_abs, 0.9] }, then: [{ set: [helper_x, 1.0] }, { set: [helper_y, 0.0] }] }
+            # right = helper x up, danach fwd = up x right (beide normiert).
+            - decl: [rgt_x, f32, { -: [{ '*': [helper_y, up_z] }, { '*': [helper_z, up_y] }] }]
+            - decl: [rgt_y, f32, { -: [{ '*': [helper_z, up_x] }, { '*': [helper_x, up_z] }] }]
+            - decl: [rgt_z, f32, { -: [{ '*': [helper_x, up_y] }, { '*': [helper_y, up_x] }] }]
+            - decl: [rgt_len, f32, { call: [math.sqrt, { +: [{ +: [{ '*': [rgt_x, rgt_x] }, { '*': [rgt_y, rgt_y] }] }, { '*': [rgt_z, rgt_z] }] }] }]
+            - if: { condition: { lt: [rgt_len, 0.0001] }, then: [{ set: [rgt_len, 1.0] }] }
+            - set: [rgt_x, { '/': [rgt_x, rgt_len] }]
+            - set: [rgt_y, { '/': [rgt_y, rgt_len] }]
+            - set: [rgt_z, { '/': [rgt_z, rgt_len] }]
+            - decl: [fwd_x, f32, { -: [{ '*': [up_y, rgt_z] }, { '*': [up_z, rgt_y] }] }]
+            - decl: [fwd_y, f32, { -: [{ '*': [up_z, rgt_x] }, { '*': [up_x, rgt_z] }] }]
+            - decl: [fwd_z, f32, { -: [{ '*': [up_x, rgt_y] }, { '*': [up_y, rgt_x] }] }]
+            # Die Basis TRAEGT die Groesse: Radius seitlich, Laenge entlang der
+            # Achse.  Eine Kugel ist in allen drei Richtungen ihr Radius.
+            - decl: [side, f32, one.radius]
+            - decl: [along, f32, one.radius]
+            - if: { condition: { neq: [one.kind, 0] }, then: [{ set: [along, axis_len] }] }
+            - call: [<.prog.uniform_vec3, "uOrigin", { call: [math.vec3, one.pos_x, one.pos_y, one.pos_z] }]
+            - call: [<.prog.uniform_vec3, "uRight", { call: [math.vec3, { '*': [rgt_x, side] }, { '*': [rgt_y, side] }, { '*': [rgt_z, side] }] }]
+            - call: [<.prog.uniform_vec3, "uUp", { call: [math.vec3, { '*': [up_x, along] }, { '*': [up_y, along] }, { '*': [up_z, along] }] }]
+            - call: [<.prog.uniform_vec3, "uFwd", { call: [math.vec3, { '*': [fwd_x, side] }, { '*': [fwd_y, side] }, { '*': [fwd_z, side] }] }]
+            - call: [<.prog.uniform_vec4, "uColor", { call: [<.rgba, one.color] }]
+            - call: [<.prog.uniform_i32, "uKind", one.kind]
+            - if: { condition: { eq: [one.kind, 0] }, then: [{ call: [<.shapes.sphere.draw] }] }
+            - if: { condition: { eq: [one.kind, 1] }, then: [{ call: [<.shapes.tube.draw] }] }
+            - if: { condition: { eq: [one.kind, 5] }, then: [{ call: [<.shapes.tube.draw] }] }
+            # Entworfene Modelle, wenn geladen; sonst der Grundkoerper.
+            - if:
+                condition: { eq: [one.kind, 2] }
+                then:
+                  - if:
+                      condition: { gt: [<.shapes.drum_parts.len, 0] }
+                      then: [{ call: [<.draw_parts, <.shapes.drum_parts] }]
+                      else: [{ call: [<.shapes.drum.draw] }]
+            - if:
+                condition: { eq: [one.kind, 3] }
+                then:
+                  - if:
+                      condition: { gt: [<.shapes.rack_parts.len, 0] }
+                      then: [{ call: [<.draw_parts, <.shapes.rack_parts] }]
+                      else: [{ call: [<.shapes.cube.draw] }]
+            - if: { condition: { eq: [one.kind, 4] }, then: [{ call: [<.shapes.cube.draw] }] }
+            # Platte (Schicht einer Stufe, doc/spec/107 §107.1c): der
+            # Grundzylinder, flach.  Kein eigenes Mesh — eine Platte IST ein
+            # flacher Zylinder, und das entworfene Trommel-Modell wuerde hier
+            # eine Datenbank behaupten.
+            - if: { condition: { eq: [one.kind, 6] }, then: [{ call: [<.shapes.drum.draw] }] }
+            - if: { condition: { eq: [one.kind, 7] }, then: [{ call: [<.shapes.drum.draw] }] }
+            # Haltepunkt: das entworfene Modell (Mast + Tuch, doc/spec/107
+            # §107.1d).  Fehlt es, bleibt ein Mast aus dem Grundzylinder — ein
+            # Zeichen weniger ist besser als gar keines.
+            - if:
+                condition: { eq: [one.kind, 8] }
+                then:
+                  - if:
+                      condition: { gt: [<.shapes.flag_parts.len, 0] }
+                      then: [{ call: [<.draw_parts, <.shapes.flag_parts] }]
+                      else: [{ call: [<.shapes.drum.draw] }]
+
+      # project: Weltlage → Bildkoordinaten (-1..+1), z = Tiefe vor der Kamera.
+      # Gegenstueck zu `pick`: dort vom Bild in die Welt, hier zurueck.  Beide
+      # rechnen mit DERSELBEN Kamerabasis — zwei Herleitungen waeren zwei
+      # Gelegenheiten, sie auseinanderlaufen zu lassen.
+      - def:
+          name: project
+          access: public
+          args: [[pos_x, f32], [pos_y, f32], [pos_z, f32], [aspect, f32]]
+          return: vec3
+          body:
+            - decl: [pull, f32, 1.0]
+            - if: { condition: { lt: [aspect, 1.0] }, then: [{ set: [pull, { '/': [1.0, aspect] }] }] }
+            - decl: [keep, f32, <.dist]
+            - set: [<.dist, { '*': [<.dist, pull] }]
+            - decl: [spot, vec3, { call: [<.eye] }]
+            - set: [<.dist, keep]
+            - decl: [fwd_x, f32, { -: [<.ctr_x, spot.x] }]
+            - decl: [fwd_y, f32, { -: [<.ctr_y, spot.y] }]
+            - decl: [fwd_z, f32, { -: [<.ctr_z, spot.z] }]
+            - decl: [fwd_len, f32, { call: [math.sqrt, { +: [{ +: [{ '*': [fwd_x, fwd_x] }, { '*': [fwd_y, fwd_y] }] }, { '*': [fwd_z, fwd_z] }] }] }]
+            - if: { condition: { lt: [fwd_len, 0.0001] }, then: [{ return: { call: [math.vec3, 0.0, 0.0, -1.0] } }] }
+            - set: [fwd_x, { '/': [fwd_x, fwd_len] }]
+            - set: [fwd_y, { '/': [fwd_y, fwd_len] }]
+            - set: [fwd_z, { '/': [fwd_z, fwd_len] }]
+            - decl: [rgt_x, f32, { -: [0.0, fwd_z] }]
+            - decl: [rgt_z, f32, fwd_x]
+            - decl: [rgt_len, f32, { call: [math.sqrt, { +: [{ '*': [rgt_x, rgt_x] }, { '*': [rgt_z, rgt_z] }] }] }]
+            - if: { condition: { lt: [rgt_len, 0.0001] }, then: [{ return: { call: [math.vec3, 0.0, 0.0, -1.0] } }] }
+            - set: [rgt_x, { '/': [rgt_x, rgt_len] }]
+            - set: [rgt_z, { '/': [rgt_z, rgt_len] }]
+            # oben = rechts x vorwaerts (rgt_y ist 0, das kuerzt zwei Terme weg)
+            - decl: [up_x, f32, { -: [0.0, { '*': [rgt_z, fwd_y] }] }]
+            - decl: [up_y, f32, { -: [{ '*': [rgt_z, fwd_x] }, { '*': [rgt_x, fwd_z] }] }]
+            - decl: [up_z, f32, { '*': [rgt_x, fwd_y] }]
+            - decl: [del_x, f32, { -: [pos_x, spot.x] }]
+            - decl: [del_y, f32, { -: [pos_y, spot.y] }]
+            - decl: [del_z, f32, { -: [pos_z, spot.z] }]
+            - decl: [cam_z, f32, { +: [{ +: [{ '*': [del_x, fwd_x] }, { '*': [del_y, fwd_y] }] }, { '*': [del_z, fwd_z] }] }]
+            - if: { condition: { lt: [cam_z, 0.2] }, then: [{ return: { call: [math.vec3, 0.0, 0.0, -1.0] } }] }
+            - decl: [cam_x, f32, { +: [{ +: [{ '*': [del_x, rgt_x] }, { '*': [del_y, 0.0] }] }, { '*': [del_z, rgt_z] }] }]
+            - decl: [cam_y, f32, { +: [{ +: [{ '*': [del_x, up_x] }, { '*': [del_y, up_y] }] }, { '*': [del_z, up_z] }] }]
+            - decl: [half_fov, f32, { call: [math.to_radians, 21.0] }]
+            - decl: [tan_half, f32, { '/': [{ call: [math.sin, half_fov] }, { call: [math.cos, half_fov] }] }]
+            - decl: [ndc_x, f32, { '/': [cam_x, { '*': [{ '*': [cam_z, tan_half] }, aspect] }] }]
+            - decl: [ndc_y, f32, { '/': [cam_y, { '*': [cam_z, tan_half] }] }]
+            - return: { call: [math.vec3, ndc_x, ndc_y, cam_z] }
+
+      # ── Auswahl: Strahl gegen Kugel (doc/spec/107 §107.1b) ────────────
+      # Analytisch, nicht ueber eine Pick-Textur: eine Kugel ist in
+      # geschlossener Form schneidbar, und ein zweiter Durchgang mit
+      # Ruecklesen waere ein Synchronisationspunkt fuer nichts.
+      #
+      # `ndc_x`/`ndc_y` sind -1..+1 im Ausschnitt (x nach rechts, y nach OBEN).
+      # Rueckgabe: die Kennung der naechsten getroffenen Kugel, sonst "".
+      - def:
+          name: pick
+          access: public
+          static_off: ["str_cmp"]
+          args: [[items, list<SceneItem>], [ndc_x, f32], [ndc_y, f32], [aspect, f32]]
+          return: { type: string, lifetime: producer }
+          body:
+            # KEINE Shader-Pruefung: das hier ist reine Geometrie und muss
+            # ohne Fenster pruefbar bleiben (test_pipe_scene).
+            # Dieselbe Kamera wie beim Zeichnen — sonst zeigt der Strahl
+            # woanders hin als das Bild.
+            - decl: [pull, f32, 1.0]
+            - if: { condition: { lt: [aspect, 1.0] }, then: [{ set: [pull, { '/': [1.0, aspect] }] }] }
+            - decl: [keep, f32, <.dist]
+            - set: [<.dist, { '*': [<.dist, pull] }]
+            - decl: [spot, vec3, { call: [<.eye] }]
+            - set: [<.dist, keep]
+            # Kamerabasis: vorwaerts zum Mittelpunkt, rechts und oben dazu.
+            - decl: [fwd_x, f32, { -: [<.ctr_x, spot.x] }]
+            - decl: [fwd_y, f32, { -: [<.ctr_y, spot.y] }]
+            - decl: [fwd_z, f32, { -: [<.ctr_z, spot.z] }]
+            - decl: [fwd_len, f32, { call: [math.sqrt, { +: [{ +: [{ '*': [fwd_x, fwd_x] }, { '*': [fwd_y, fwd_y] }] }, { '*': [fwd_z, fwd_z] }] }] }]
+            - if: { condition: { lt: [fwd_len, 0.0001] }, then: [{ return: "" }] }
+            - set: [fwd_x, { '/': [fwd_x, fwd_len] }]
+            - set: [fwd_y, { '/': [fwd_y, fwd_len] }]
+            - set: [fwd_z, { '/': [fwd_z, fwd_len] }]
+            # rechts = vorwaerts x hoch(0,1,0) = (-fwd_z, 0, fwd_x).
+            # Bis 2026-10-16 stand hier (fwd_z, 0, -fwd_x) — also hoch x
+            # vorwaerts.  Beide Achsen waren damit gespiegelt: der Strahl traf
+            # die Kugel auf der GEGENUEBERLIEGENDEN Seite, und der Test sah es
+            # nicht, weil er nur die Bildmitte prueft (die ist spiegelfest).
+            - decl: [rgt_x, f32, { -: [0.0, fwd_z] }]
+            - decl: [rgt_y, f32, 0.0]
+            - decl: [rgt_z, f32, fwd_x]
+            - decl: [rgt_len, f32, { call: [math.sqrt, { +: [{ '*': [rgt_x, rgt_x] }, { '*': [rgt_z, rgt_z] }] }] }]
+            - if: { condition: { lt: [rgt_len, 0.0001] }, then: [{ return: "" }] }
+            - set: [rgt_x, { '/': [rgt_x, rgt_len] }]
+            - set: [rgt_z, { '/': [rgt_z, rgt_len] }]
+            # oben = rechts x vorwaerts
+            - decl: [up_x, f32, { -: [{ '*': [rgt_y, fwd_z] }, { '*': [rgt_z, fwd_y] }] }]
+            - decl: [up_y, f32, { -: [{ '*': [rgt_z, fwd_x] }, { '*': [rgt_x, fwd_z] }] }]
+            - decl: [up_z, f32, { -: [{ '*': [rgt_x, fwd_y] }, { '*': [rgt_y, fwd_x] }] }]
+            # Richtung des Strahls aus den Bildkoordinaten (gleiches Sichtfeld
+            # wie die Projektion, 42 Grad senkrecht).
+            - decl: [half_fov, f32, { call: [math.to_radians, 21.0] }]
+            - decl: [tan_half, f32, { '/': [{ call: [math.sin, half_fov] }, { call: [math.cos, half_fov] }] }]
+            - decl: [ray_u, f32, { '*': [{ '*': [ndc_x, aspect] }, tan_half] }]
+            - decl: [ray_v, f32, { '*': [ndc_y, tan_half] }]
+            - decl: [dir_x, f32, { +: [{ +: [{ '*': [rgt_x, ray_u] }, { '*': [up_x, ray_v] }] }, fwd_x] }]
+            - decl: [dir_y, f32, { +: [{ +: [{ '*': [rgt_y, ray_u] }, { '*': [up_y, ray_v] }] }, fwd_y] }]
+            - decl: [dir_z, f32, { +: [{ +: [{ '*': [rgt_z, ray_u] }, { '*': [up_z, ray_v] }] }, fwd_z] }]
+            - decl: [best_t, f32, 100000.0]
+            - decl: [best_tag, string, ""]
+            - decl: [pix, i32, 0]
+            - while:
+                condition: { lt: [pix, items.len] }
+                body:
+                  - decl: [one, SceneItem, { at: [items, pix] }]
+                  - set: [pix, { +: [pix, 1] }]
+                  - if:
+                      condition: { '&&': [{ eq: [one.kind, 0] }, { gt: [one.tag.len, 0] }] }
+                      then:
+                        # |o + t d - c|^2 = r^2
+                        - decl: [off_x, f32, { -: [spot.x, one.pos_x] }]
+                        - decl: [off_y, f32, { -: [spot.y, one.pos_y] }]
+                        - decl: [off_z, f32, { -: [spot.z, one.pos_z] }]
+                        - decl: [coef_a, f32, { +: [{ +: [{ '*': [dir_x, dir_x] }, { '*': [dir_y, dir_y] }] }, { '*': [dir_z, dir_z] }] }]
+                        - decl: [coef_b, f32, { '*': [2.0, { +: [{ +: [{ '*': [off_x, dir_x] }, { '*': [off_y, dir_y] }] }, { '*': [off_z, dir_z] }] }] }]
+                        - decl: [coef_c, f32, { -: [{ +: [{ +: [{ '*': [off_x, off_x] }, { '*': [off_y, off_y] }] }, { '*': [off_z, off_z] }] }, { '*': [one.radius, one.radius] }] }]
+                        - decl: [disc, f32, { -: [{ '*': [coef_b, coef_b] }, { '*': [4.0, { '*': [coef_a, coef_c] }] }] }]
+                        - if:
+                            condition: { gt: [disc, 0.0] }
+                            then:
+                              - decl: [root, f32, { call: [math.sqrt, disc] }]
+                              - decl: [hit_t, f32, { '/': [{ -: [{ -: [0.0, coef_b] }, root] }, { '*': [2.0, coef_a] }] }]
+                              - if:
+                                  condition: { '&&': [{ gt: [hit_t, 0.0] }, { lt: [hit_t, best_t] }] }
+                                  then:
+                                    - set: [best_t, hit_t]
+                                    - set: [best_tag, one.tag]
+            - return: best_tag
+
+      - def:
+          name: draw_parts
+          args: [[parts, list<gl_mesh>]]
+          body:
+            - decl: [pix, i32, 0]
+            - while:
+                condition: { lt: [pix, parts.len] }
+                body:
+                  - decl: [one_part, gl_mesh, { at: [parts, pix] }]
+                  - set: [pix, { +: [pix, 1] }]
+                  - call: [one_part.draw]
+
+      # rgba: 0xRRGGBBAA → vec4.  Dieselbe Schreibweise wie in den Prefabs,
+      # damit Farben an einer Stelle gepflegt werden.
+      - def:
+          name: rgba
+          access: public
+          args: [[packed, i32]]
+          return: vec4
+          body:
+            - decl: [red, f32, { '/': [{ cast: [{ band: [{ ushr: [packed, 24] }, 255] }, f32] }, 255.0] }]
+            - decl: [green, f32, { '/': [{ cast: [{ band: [{ ushr: [packed, 16] }, 255] }, f32] }, 255.0] }]
+            - decl: [blue, f32, { '/': [{ cast: [{ band: [{ ushr: [packed, 8] }, 255] }, f32] }, 255.0] }]
+            - decl: [alpha, f32, { '/': [{ cast: [{ band: [packed, 255] }, f32] }, 255.0] }]
+            - return: { call: [math.vec4, red, green, blue, alpha] }
+
+      - def:
+          name: advance
+          access: public
+          args: [[seconds, f32]]
+          body:
+            - set: [<.clock, { +: [<.clock, seconds] }]
+            - if: { condition: { gt: [<.clock, 1000.0] }, then: [{ set: [<.clock, 0.0] }] }

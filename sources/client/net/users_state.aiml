@@ -1,0 +1,67 @@
+# UsersState — der Netz-Teil der Rechtevergabe (doc/spec/108 §2).
+#
+# Haelt die Kontenliste als Modell, damit der `container` der UsersScene sie binden
+# kann (`bind_list: "users"`, aiml spec/44_6 §5c).  Der Bildschirm zeichnet, diese
+# Klasse redet — dieselbe Trennung wie ueberall sonst im Client.
+
+- import: "sources/client/net/session_state.aiml"
+- import: "sources/models/level_reqs.aiml"
+
+- class:
+    name: UsersState
+    members:
+      - [session, ref<SessionState>]
+      - [view,    ptr<UserLevelResult>]
+      - [loaded,  i32, 0]
+      - [note,    string, ""]
+    methods:
+      - def:
+          name: init
+          body:
+            - set: [<.view, { new: UserLevelResult }]
+            - set: [<.view.my_level, 255]
+
+      - def:
+          name: refresh
+          access: public
+          return: i32
+          body:
+            - if: { condition: { eq: [<.session.connected, 0] }, then: [{ set: [<.note, "keine Verbindung"] }, { return: 0 }] }
+            - decl: [req, SetUserLevelReq]
+            - set: [req.token, <.session.token]
+            - decl: [fresh, ptr<UserLevelResult>, { new: UserLevelResult }]
+            - decl: [got, i32, { call: [<.session.conn.send_and_await, 0, "list_users", req, fresh, 4000] }]
+            - if: { condition: { neq: [got, 1] }, then: [{ set: [<.note, "Server antwortet nicht"] }, { return: 0 }] }
+            # ERST lesen, DANN uebergeben: `set: [<.view, fresh]` gibt den Besitz ab
+            # (ptr<T> hat genau einen Eigentuemer, spec/61 §6.2), danach ist `fresh`
+            # nicht mehr lesbar.  Der Compiler hat es gefunden — eine Zeile spaeter
+            # waere es ein use-after-free im Browser gewesen.
+            - decl: [ok_flag, i32, fresh.success]
+            - if:
+                condition: { eq: [ok_flag, 1] }
+                then: [{ set: [<.note, ""] }]
+                else: [{ set: [<.note, fresh.message] }]
+            - set: [<.view, fresh]
+            - set: [<.loaded, 1]
+            - return: ok_flag
+
+      # set_level: die Vergabe.  Der Server entscheidet (F108-4) — der Client zeigt nur
+      # den Grund, den der Server nennt.  Danach neu laden, damit die Liste nicht
+      # behauptet, was sie nicht geprueft hat.
+      - def:
+          name: set_level
+          access: public
+          args: [[target, string], [lvl, i32]]
+          return: i32
+          body:
+            - if: { condition: { eq: [<.session.connected, 0] }, then: [{ set: [<.note, "keine Verbindung"] }, { return: 0 }] }
+            - decl: [req, SetUserLevelReq]
+            - set: [req.token, <.session.token]
+            - set: [req.target_email, target]
+            - set: [req.level, lvl]
+            - decl: [out, ptr<UserLevelResult>, { new: UserLevelResult }]
+            - decl: [got, i32, { call: [<.session.conn.send_and_await, 0, "set_user_level", req, out, 4000] }]
+            - if: { condition: { neq: [got, 1] }, then: [{ set: [<.note, "Server antwortet nicht"] }, { return: 0 }] }
+            - set: [<.note, out.message]
+            - if: { condition: { eq: [out.success, 1] }, then: [{ decl: [again, i32, { call: [<.refresh] }] }] }
+            - return: out.success

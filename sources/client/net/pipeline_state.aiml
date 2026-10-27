@@ -1,0 +1,171 @@
+# PipelineState — Einreichen und Starten als Member statt als zwei Globals
+# (doc/spec/105 Schritt 7).
+
+- import: "sources/client/net/session_state.aiml"
+- import: "sources/models/job_reqs.aiml"
+- import: "sources/models/job_param_reqs.aiml"
+- import: "sources/models/pipeline_reqs.aiml"
+- import: "sources/models/run_window.aiml"
+- import: "sources/models/run_control.aiml"
+
+- class:
+    name: PipelineState
+    members:
+      # Kollaborateur; von der Gruppe ueber `sees: [session]` verdrahtet (spec/58 §5.1).
+      - [session, ref<SessionState>]
+      - [run_id, string]
+      - [status, string]
+    methods:
+      - def:
+          name: run_pipeline
+          access: public
+          args: [[source, string]]
+          return: { type: PipelineSubmitResp, lifetime: producer }
+          body:
+            - decl: [out, PipelineSubmitResp]
+            - set: [out.accepted, 0]
+            - if:
+                condition: { eq: [<.session.connected, 0] }
+                then: [{ set: [out.message, "keine Verbindung"] }, { return: out }]
+            - decl: [req, PipelineSubmitReq]
+            - set: [req.token, <.session.token]
+            - set: [req.source, source]
+            - decl: [res, ptr<PipelineSubmitResp>, { new: PipelineSubmitResp }]
+            - decl: [got, i32, { call: [<.session.conn.send_and_await, 0, "run_pipeline", req, res, 15000] }]
+            - if:
+                condition: { neq: [got, 1] }
+                then: [{ set: [out.message, "keine Antwort vom Server"] }, { return: out }]
+            - set: [out.accepted, res.accepted]
+            - set: [out.run_id, res.run_id]
+            - set: [out.message, res.message]
+            - set: [out.lane_count, res.lane_count]
+            - set: [<.run_id, res.run_id]
+            - set: [<.status, res.message]
+            - return: out
+
+      # ── doc/spec/106 §106.4: Jobs anlegen und starten ────────────────────
+      - def:
+          name: save_job
+          access: public
+          static_off: ["str_cmp"]
+          args: [[job_id, string], [name, string], [source, string], [interval_s, i32]]
+          return: { type: JobAck, lifetime: producer }
+          body:
+            - decl: [ack, JobAck]
+            - if: { condition: { eq: [<.session.connected, 0] }, then: [{ set: [ack.message, "keine Verbindung"] }, { return: ack }] }
+            - decl: [req, SaveJobReq]
+            - set: [req.token, <.session.token]
+            - set: [req.job_id, job_id]
+            - set: [req.name, name]
+            - set: [req.source, source]
+            - set: [req.enabled, 1]
+            - set: [req.interval_s, interval_s]
+            - decl: [out, ptr<JobAck>, { new: JobAck }]
+            - decl: [got, i32, { call: [<.session.conn.send_and_await, 0, "save_job", req, out, 4000] }]
+            - if: { condition: { neq: [got, 1] }, then: [{ set: [ack.message, "Server antwortet nicht"] }, { return: ack }] }
+            - set: [ack.accepted, out.accepted]
+            - set: [ack.message, out.message]
+            - set: [ack.job_id, out.job_id]
+            - return: ack
+
+      # set_job_params: die GANZE Liste schreiben (doc/spec/106 §106.6, F106-16).
+      # Nicht einzelne Zeilen: so ist der Zustand nach dem Schreiben derselbe
+      # wie in der Oberflaeche, und es gibt keine halb angewandte Aenderung.
+      - def:
+          name: set_job_params
+          access: public
+          static_off: ["str_cmp"]
+          args: [[job_id, string], [rows, list<ParamRow>], [prio, i32]]
+          return: { type: JobAck, lifetime: producer }
+          body:
+            - decl: [ack, JobAck]
+            - if: { condition: { eq: [<.session.connected, 0] }, then: [{ set: [ack.message, "keine Verbindung"] }, { return: ack }] }
+            - decl: [req, SetJobParamsReq]
+            - set: [req.token, <.session.token]
+            - set: [req.job_id, job_id]
+            - set: [req.rows, rows]
+            - set: [req.priority, prio]
+            - decl: [out, ptr<JobAck>, { new: JobAck }]
+            - decl: [got, i32, { call: [<.session.conn.send_and_await, 0, "set_job_params", req, out, 4000] }]
+            - if: { condition: { neq: [got, 1] }, then: [{ set: [ack.message, "Server antwortet nicht"] }, { return: ack }] }
+            - set: [ack.accepted, out.accepted]
+            - set: [ack.message, out.message]
+            - set: [ack.job_id, out.job_id]
+            - return: ack
+
+      # log_window: ein Byte-Fenster der Schritt-Ausgabe holen (doc/spec/103
+      # F103-19).  Derselbe Lesepfad wie bei AP1 (`read_run_output`) — es gibt
+      # ausdruecklich keinen zweiten, und der Server sammelt nichts im RAM.
+      #
+      # `ref` ist die STUFEN-Kennung: je Schritt ein eigenes Protokoll.
+      - def:
+          name: log_window
+          access: public
+          # `stream`: 0 = stdout, 1 = stderr.  Beide, nicht nur eines — der
+          # Grund eines Fehlschlags steht fast immer auf stderr (doc/spec/107
+          # F107-53).
+          args: [[ref, string], [offset, i64], [len, i32], [stream, i32]]
+          return: { type: RunWindow, lifetime: producer }
+          body:
+            - decl: [win, RunWindow]
+            - if: { condition: { eq: [<.session.connected, 0] }, then: [{ return: win }] }
+            - if: { condition: { eq: [ref.len, 0] }, then: [{ return: win }] }
+            - decl: [req, RunWindowReq]
+            - set: [req.token, <.session.token]
+            - set: [req.run_ref, ref]
+            - set: [req.stream, stream]
+            - set: [req.offset, offset]
+            - set: [req.len, len]
+            - decl: [out, ptr<RunWindow>, { new: RunWindow }]
+            - decl: [got, i32, { call: [<.session.conn.send_and_await, 0, "read_run_output", req, out, 4000] }]
+            - if: { condition: { neq: [got, 1] }, then: [{ return: win }] }
+            - set: [win.run_ref, out.run_ref]
+            - set: [win.offset, out.offset]
+            - set: [win.data, out.data]
+            - set: [win.next_offset, out.next_offset]
+            - set: [win.total, out.total]
+            - set: [win.done, out.done]
+            - return: win
+
+      # rewind: diese Stufe und alles danach in derselben Lane wieder wartend
+      # machen (doc/spec/101 §101.8).  Es rollt NICHT zurueck — die Schichten
+      # der frueheren Stufen bleiben liegen und werden wieder aufgelegt
+      # (doc/spec/110 F110-110); die gewaehlte Stufe selbst faengt neu an.
+      - def:
+          name: rewind
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run_id, string], [stage_id, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - if: { condition: { eq: [<.session.connected, 0] }, then: [{ return: "keine Verbindung" }] }
+            - decl: [req, RunCtrlReq]
+            - set: [req.token, <.session.token]
+            - set: [req.run_id, run_id]
+            - set: [req.stage_id, stage_id]
+            - decl: [out, ptr<RunCtrlResp>, { new: RunCtrlResp }]
+            - decl: [got, i32, { call: [<.session.conn.send_and_await, 0, "rewind_run", req, out, 4000] }]
+            - if: { condition: { neq: [got, 1] }, then: [{ return: "Server antwortet nicht" }] }
+            - if: { condition: { eq: [out.accepted, 0] }, then: [{ return: "${out.message}" }] }
+            - return: ""
+
+      - def:
+          name: start_job
+          access: public
+          static_off: ["str_cmp"]
+          args: [[job_id, string]]
+          return: { type: JobAck, lifetime: producer }
+          body:
+            - decl: [ack, JobAck]
+            - if: { condition: { eq: [<.session.connected, 0] }, then: [{ set: [ack.message, "keine Verbindung"] }, { return: ack }] }
+            - decl: [req, RunJobReq]
+            - set: [req.token, <.session.token]
+            - set: [req.job_id, job_id]
+            - decl: [out, ptr<JobAck>, { new: JobAck }]
+            - decl: [got, i32, { call: [<.session.conn.send_and_await, 0, "run_job", req, out, 4000] }]
+            - if: { condition: { neq: [got, 1] }, then: [{ set: [ack.message, "Server antwortet nicht"] }, { return: ack }] }
+            - set: [ack.accepted, out.accepted]
+            - set: [ack.message, out.message]
+            - set: [ack.run_id, out.run_id]
+            - set: [ack.build, out.build]
+            - return: ack

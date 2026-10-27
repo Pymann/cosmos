@@ -1,0 +1,21 @@
+# ActionResult — das gespeicherte Ergebnis eines Schritts (doc/spec/92 §92.2).
+#
+# Ein Treffer im ActionCache ersetzt die Ausführung, also muss hier alles
+# stehen, was der Aufrufer sonst aus dem Lauf bekommen hätte.
+#
+# `exit_code != 0` wird AUCH gespeichert: ein reproduzierbarer Fehlschlag ist
+# ein Ergebnis.  Würde man nur Erfolge behalten, liefe jeder kaputte Schritt
+# endlos neu.
+#
+# `output_tree == ""` ist der Fehlschlag-Marker von `lookup`.  Das ist
+# eindeutig, weil jeder echte Baum eine 64-Hex-Adresse hat — auch der leere
+# (sha256("") laut §92.2), also gibt es keinen gültigen Baum mit leerer Adresse.
+
+- model:
+    name: ActionResult
+    fields:
+      - [output_tree, string]   # tree_id des Ergebnis-Baums ("" = kein Treffer)
+      - [exit_code,   i32]
+      - [out_bytes,   i64]
+      - [err_bytes,   i64]
+      - [created_ms,  i64]

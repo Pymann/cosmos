@@ -1,0 +1,12 @@
+# Cosmos controller entry point: ./controller --port 19870 --job-id job-1 --command "..." [--exit-when-done]
+- import: "sources/server/job_controller.aiml"
+
+- def:
+    name: main
+    return: i32
+    body:
+      - decl: [cfg, ControllerCfg]
+      - call: [sys.arg_dump, cfg]
+      - decl: [ctl, ptr<JobController>, { new: JobController }]
+      - call: [ctl.init, cfg]
+      - return: { call: [ctl.run] }

@@ -1,0 +1,57 @@
+# "get_cluster" RPC (ClusterReq → ClusterView).  Token-gesichert: ein
+# ungültiges/abgelaufenes Token wird abgelehnt (leere Sicht), sonst der Snapshot aus `<.cluster`.
+- import: "sources/models/cluster_reqs.aiml"
+- import: "sources/shared/cluster_view.aiml"
+
+# Stufe 2 (spec/58): diese Handler waren Klassen, die die Dienste über
+# Globals erreichten.  Jetzt sind sie Instanzen der CosmosRuntime und ihr
+# `run` steht hier als Gruppen-Methode — Zugriff nur über die deklarierten
+# sees-Kanten.  KEIN Import aus dem Server: die Gruppen-Datei importiert
+# diese Datei (§1.1), umgekehrt gäbe es einen Zyklus.
+
+- groupmethods:
+    group: CosmosRuntime
+    instances:
+      - instance: get_cluster
+        methods:
+          - def:
+              name: run
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, ClusterReq]
+                - decl: [rc_val, i32, { call: [session.decode_rpc, rpc, req] }]
+                - if:
+                    condition: { neq: [rc_val, 0] }
+                    then:
+                      - decl: [empty, ClusterView]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, empty]
+                      - return: []
+                - decl: [req_pid, string, { call: [<.auth.pid_for_token, req.token] }]
+                - if:
+                    condition: { eq: [req_pid.len, 0] }
+                    then:
+                      - decl: [empty2, ClusterView]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, empty2]
+                      - return: []
+                - decl: [view, ClusterView, { call: [<.cluster.snapshot_live] }]
+                - call: [session.reply_rpc, rpc, "set_result", 0, view]
+      - instance: subscribe_cluster
+        methods:
+          - def:
+              name: run
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, ClusterReq]
+                - decl: [rc_val, i32, { call: [session.decode_rpc, rpc, req] }]
+                - decl: [view, ClusterView]
+                - if:
+                    condition: { neq: [rc_val, 0] }
+                    then: [{ call: [session.reply_rpc, rpc, "set_result", 0, view] }, { return: [] }]
+                - decl: [req_pid, string, { call: [<.auth.pid_for_token, req.token] }]
+                - if:
+                    condition: { eq: [req_pid.len, 0] }
+                    then: [{ call: [session.reply_rpc, rpc, "set_result", 0, view] }, { return: [] }]
+                # Abonnent registrieren (dedupe über peer_id), dann initialen Snapshot zurückgeben.
+                - decl: [fresh_sub, i32, { call: [<.cluster_subs.add, rpc.peer_id] }]
+                - set: [view, { call: [<.cluster.snapshot_live] }]
+                - call: [session.reply_rpc, rpc, "set_result", 0, view]

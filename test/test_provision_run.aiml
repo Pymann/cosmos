@@ -1,0 +1,280 @@
+# Abnahme P1/P2/P6 (doc/spec/94): ein ECHTER Einrichtungslauf über SSH.
+#
+# Gegenüber ist der SSH-Testserver aus aiml-spec/32_6 §7 (im Testprozess, nur
+# 127.0.0.1) — er führt die Befehle wirklich aus.  Harmlos wird der Lauf nicht
+# durch eine Testverzweigung im Produktionscode, sondern durch Konfiguration:
+# alle Zielpfade zeigen in ein Wegwerf-Verzeichnis, `sudo_prefix` ist leer, und
+# Paket-/Dienst-Befehl sind `true`.  Als Dienstnutzer dient der aktuelle Nutzer,
+# damit `install -o` ohne Privilegien gelingt.
+#
+# Geprüft wird:
+#   P6  der Lauf scheitert am NACHWEIS (Schritt 9) — ohne AppArmor-Profil und
+#       uidmap traegt die Isolation auf diesem Host nicht, und genau das soll
+#       der letzte Schritt aufdecken statt stillschweigend "fertig" zu melden
+#   -   alle Schritte davor laufen durch, und ihre Wirkung ist nachweisbar:
+#       Binary bitgleich (Hash), Profil mit Installationspfad, Token in einer
+#       Datei, Einheit mit --agent-token-file
+#   P2  fail closed: ein scheiternder Schritt bricht ab und wird benannt
+#   P1  Idempotenz: zweimal einrichten ergibt denselben Stand
+# Expected exit code: 0
+
+- import: "sources/server/agent_provisioner.aiml"
+- import: "sources/server/provision_worker.aiml"
+
+- def:
+    name: expect
+    args: [[what, string], [cond, i32]]
+    return: i32
+    body:
+      - if:
+          condition: { eq: [cond, 1] }
+          then: [{ print: ["  ok   ${what}"] }, { return: 0 }]
+      - print: ["  FAIL ${what}"]
+      - return: 1
+
+# Ein Pseudo-Binary mit Nullbytes und 0xFF: daran scheitert jede
+# string-basierte Übertragung, und der Hash-Vergleich wird aussagekräftig.
+- def:
+    name: make_fake_binary
+    args: [[dst, path]]
+    return: i32
+    body:
+      - decl: [buf, buffer<u8>]
+      - call: [buf.alloc, 65536]
+      - decl: [bix, i32, 0]
+      - while:
+          condition: { lt: [bix, 65536] }
+          body:
+            - call: [buf.write, { '%': [bix, 251] }, u8]
+            - set: [bix, { +: [bix, 1] }]
+      - decl: [out, file_handle, { call: [io.open, dst, "w"] }]
+      - if: { condition: { eq: [out, null] }, then: [{ return: 0 }] }
+      - decl: [wrote, i32, { call: [buf.write_to, out] }]
+      - call: [io.close, out]
+      - if: { condition: { gt: [wrote, 0] }, then: [{ return: 1 }] }
+      - return: 0
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      - decl: [envm, map<string:string>, { call: [sys.env] }]
+      - decl: [cur_user, string, "nobody"]
+      - if: { condition: { gt: [{ call: [envm.contains, "USER"] }, 0] }, then: [{ set: [cur_user, { call: [envm.get, "USER"] }] }] }
+
+      - decl: [work, string, "/tmp/cosmos_prov_test"]
+      - decl: [work_path, path, work]
+      - call: [io.remove_all, work_path]
+      - decl: [stage_p, path, "${work}/stage"]
+      - call: [io.mkdir_all, stage_p]
+      - decl: [src_dir, path, "${work}/src"]
+      - call: [io.mkdir_all, src_dir]
+
+      - decl: [bin_src, path, "${work}/src/agent"]
+      - if:
+          condition: { neq: [{ call: [make_fake_binary, bin_src] }, 1] }
+          then: [{ print: ["FAIL Pseudo-Binary liess sich nicht schreiben"] }, { return: 1 }]
+      - decl: [src_hash, string, { call: [hash.sha256_file, bin_src] }]
+
+      # Die Laufzeit reist als ARCHIV mit (doc/spec/94 Schritt 5): seit der
+      # Umstellung auf `runtime.tar.gz` entpackt der Installationsschritt das
+      # Paket, also muss der Test ein echtes gzip-Archiv hochschieben — eine
+      # Pseudo-Datei liess `tar -xzf` mit rc=2 scheitern.  Inhalt wie beim
+      # echten Paket: `lib/` + `bwrap`, denn der Schritt chownt genau die zwei.
+      - decl: [rt_dir, path, "${work}/rtsrc"]
+      - decl: [rt_lib, path, "${work}/rtsrc/lib"]
+      - call: [io.mkdir_all, rt_lib]
+      - decl: [rt_so, path, "${work}/rtsrc/lib/libaiml.so"]
+      - if:
+          condition: { neq: [{ call: [make_fake_binary, rt_so] }, 1] }
+          then: [{ print: ["FAIL Pseudo-Laufzeit liess sich nicht schreiben"] }, { return: 1 }]
+      - decl: [rt_bwrap, path, "${work}/rtsrc/bwrap"]
+      - if:
+          condition: { neq: [{ call: [make_fake_binary, rt_bwrap] }, 1] }
+          then: [{ print: ["FAIL Pseudo-bwrap liess sich nicht schreiben"] }, { return: 1 }]
+      - decl: [rt_src, path, "${work}/src/runtime.tar.gz"]
+      - decl: [tar_argv, list<string>]
+      - call: [tar_argv.push, "tar"]
+      - call: [tar_argv.push, "-czf"]
+      - call: [tar_argv.push, "${work}/src/runtime.tar.gz"]
+      - call: [tar_argv.push, "-C"]
+      - call: [tar_argv.push, "${work}/rtsrc"]
+      - call: [tar_argv.push, "lib"]
+      - call: [tar_argv.push, "bwrap"]
+      - decl: [tar_proc, process, { call: [sys.exe, tar_argv, {capture: true, timeout: 20000}] }]
+      - decl: [tar_rc, i32, { call: [tar_proc.wait] }]
+      - if:
+          condition: { neq: [tar_rc, 0] }
+          then: [{ print: ["FAIL Laufzeit-Archiv liess sich nicht packen (rc=${tar_rc})"] }, { return: 1 }]
+
+      # subuid/subgid als leere Dateien anlegen — der Schritt haengt sonst am
+      # grep auf eine fehlende Datei.
+      - decl: [su_file, path, "${work}/subuid"]
+      - decl: [sg_file, path, "${work}/subgid"]
+      - call: [io.write_file, su_file, ""]
+      - call: [io.write_file, sg_file, ""]
+
+      - decl: [port, i32, 22901]
+      - decl: [srv, ssh_test_server, { call: [ssh.test_listen, port, "deploy", "pw-prov"] }]
+      - if:
+          condition: { eq: [srv, null] }
+          then: [{ print: ["FAIL Testserver startet nicht (Port ${port})"] }, { return: 1 }]
+      - decl: [srv_thread, thread_handle, { call: [srv.serve_async] }]
+      - decl: [host_fp, string, { call: [srv.fingerprint] }]
+
+      - decl: [cfg, ProvisionConfig]
+      - set: [cfg.host, "127.0.0.1"]
+      - set: [cfg.port, port]
+      - set: [cfg.login_user, "deploy"]
+      - set: [cfg.service_user, cur_user]
+      - set: [cfg.install_dir, "${work}/opt"]
+      - set: [cfg.stage_dir, "${work}/stage"]
+      # Arbeitsverzeichnis des Dienstes — im Wegwerf-Verzeichnis, damit der
+      # Abnahme-Lauf ohne Privilegien auskommt (auf einem Knoten /var/lib/...).
+      - set: [cfg.work_dir, "${work}/agentwork"]
+      - set: [cfg.apparmor_dir, "${work}/apparmor.d"]
+      - set: [cfg.systemd_dir, "${work}/systemd"]
+      - set: [cfg.subuid_file, "${work}/subuid"]
+      - set: [cfg.subgid_file, "${work}/subgid"]
+      - set: [cfg.sudo_prefix, ""]
+      # Ohne Privilegien gelingt kein `chown root:root` — der Abnahme-Lauf
+      # nimmt den aktuellen Nutzer.  Auf einem echten Knoten bleibt root:root
+      # (Vorgabe), sonst waere die userns-Berechtigung uebertragbar (§94.3).
+      - set: [cfg.runtime_owner, "${cur_user}:${cur_user}"]
+      - set: [cfg.verify_prefix, ""]
+      # `true <pfad>` beendet mit 0 und ignoriert das Argument — der echte
+      # apparmor_parser braucht root und ist hier nicht das Pruefziel.
+      # Der Reload nach dem Entfernen der Einheit MUSS gestubbt sein: ungestubbt
+      # lief `systemctl daemon-reload` auf dem Rechner des Entwicklers und polkit
+      # fragte mitten im Testlauf nach dem Passwort (18.10.2026).
+      - set: [cfg.service_reload_cmd, "true"]
+      - set: [cfg.apparmor_reload_cmd, "true"]
+      - set: [cfg.apparmor_unload_cmd, "true"]
+      - set: [cfg.pkg_install_cmd, "true"]
+      - set: [cfg.service_install_cmd, "true"]
+      - set: [cfg.service_check_cmd, "true"]
+      # Leer = kein Stopp-Versuch; der Test hat keinen echten Dienst.
+      - set: [cfg.service_stop_cmd, ""]
+      - set: [cfg.subuid_base, 100000]
+      - set: [cfg.subuid_count, 65536]
+      - set: [cfg.token_label, "testknoten"]
+
+      - decl: [tok, string, "feedfacecafebabe.00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"]
+      - decl: [prov, ptr<AgentProvisioner>, { new: AgentProvisioner }]
+      - decl: [steps, list<ProvisionStep>, { call: [prov.plan, cfg, bin_src, rt_src, tok, "ws://127.0.0.1:8799"] }]
+
+      # ── Nebenlaeufig: derselbe Ablauf im eigenen FADEN ─────────────────
+      # Der Server fuehrt die Einrichtung seit 2026-10-15 nebenher aus — sonst
+      # beantwortet er sekundenlang nichts (gemessen: neun Sekunden Stille, der
+      # Agent verlor sein Lehen).  Geprueft wird, dass der Faden dasselbe
+      # Ergebnis liefert UND dass der Aufrufer waehrenddessen weiterarbeiten
+      # kann: die Schleife unten laeuft, waehrend der Faden werkelt.
+      - decl: [job, ptr<ProvisionWorker>, { new: ProvisionWorker }]
+      # init zuerst: so wird die Instanz auch in der Gruppe aufgestellt
+      # (`constructor: [init]`).  Die Klasse haelt es zusaetzlich selbst aus.
+      - call: [job.init]
+      - call: [job.prepare]
+      - decl: [job_steps, list<ProvisionStep>, { call: [prov.plan, cfg, bin_src, rt_src, tok, "ws://127.0.0.1:8799"] }]
+      - call: [job.set_job, cfg, job_steps, host_fp, "pw-prov", "nicht-benutzt"]
+      - set: [fails, { +: [fails, { call: [expect, "der Auftrag gilt als laufend", { eq: [{ call: [job.is_running] }, 1] }] }] }]
+      - decl: [worker, thread_handle, { spawn: [provision_worker_main, job] }]
+      - decl: [spins, i32, 0]
+      - while:
+          condition: { '&&': [{ eq: [{ call: [job.is_done] }, 0] }, { lt: [spins, 600] }] }
+          body:
+            - call: [time.sleep_ms, 100]
+            - set: [spins, { +: [spins, 1] }]
+      - call: [worker.join]
+      - set: [fails, { +: [fails, { call: [expect, "der Faden wurde fertig", { eq: [{ call: [job.is_done] }, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und der Aufrufer konnte derweil arbeiten", { gt: [spins, 0] }] }] }]
+      - decl: [tres, ProvisionResult, { call: [job.snapshot] }]
+      - print: ["[prov] Faden: success=${tres.success} failed=${tres.failed_step} steps=${tres.steps_done}"]
+      - set: [fails, { +: [fails, { call: [expect, "nebenlaeufig scheitert er an derselben Stelle (Nachweis)", { eq: [tres.failed_step, "verify_isolation"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "danach laeuft kein Auftrag mehr", { eq: [{ call: [job.is_running] }, 0] }] }] }]
+
+      # ── Lauf 1 ──────────────────────────────────────────────────────────
+      - decl: [res, ProvisionResult, { call: [prov.run, cfg, steps, host_fp, "pw-prov", "nicht-benutzt"] }]
+      - print: ["[prov] Lauf 1: success=${res.success} failed=${res.failed_step} steps=${res.steps_done}"]
+
+      - set: [fails, { +: [fails, { call: [expect, "P6 Lauf scheitert am Nachweis (Schritt 9)", { eq: [res.failed_step, "verify_isolation"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "P6 und meldet NICHT eingerichtet", { eq: [res.success, 0] }] }] }]
+      # Der Nachweis ist jetzt Schritt 9 von 11 (Befund 5a): danach folgen
+      # service_start und service_active, die bei einem Fehlschlag nie
+      # erreicht werden — genau das ist der Punkt.
+      - set: [fails, { +: [fails, { call: [expect, "alle Schritte VOR dem Nachweis liefen durch", { eq: [res.steps_done, { -: [steps.len, 3] }] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Befund 5a Dienst wurde NIE gestartet", { lt: [res.steps_done, steps.len] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Fingerprint wurde gemeldet", { gt: [{ call: [res.fingerprint.index_of, "SHA256:"] }, -1] }] }] }]
+
+      # ── Wirkung der Schritte nachweisen ─────────────────────────────────
+      - decl: [bin_dst, path, "${work}/opt/agent"]
+      - set: [fails, { +: [fails, { call: [expect, "Binary liegt am Installationsort", { eq: [{ call: [io.is_file, bin_dst] }, 1] }] }] }]
+      - decl: [dst_hash, string, { call: [hash.sha256_file, bin_dst] }]
+      - set: [fails, { +: [fails, { call: [expect, "Binary ist bitgleich (Nullbytes inklusive)", { eq: [dst_hash, src_hash] }] }] }]
+
+      - decl: [prof_dst, path, "${work}/apparmor.d/cosmos-agent"]
+      - decl: [prof_txt, string, { call: [io.read_file, prof_dst] }]
+      - set: [fails, { +: [fails, { call: [expect, "Profil nennt den Installationspfad", { gt: [{ call: [prof_txt.index_of, "${work}/opt/agent"] }, -1] }] }] }]
+
+      - decl: [tok_dst, path, "${work}/opt/agent.token"]
+      - decl: [tok_txt, string, { call: [io.read_file, tok_dst] }]
+      - set: [fails, { +: [fails, { call: [expect, "Token steht in der Datei", { gt: [{ call: [tok_txt.index_of, tok] }, -1] }] }] }]
+
+      - decl: [unit_dst, path, "${work}/systemd/cosmos-agent.service"]
+      - decl: [unit_txt, string, { call: [io.read_file, unit_dst] }]
+      - set: [fails, { +: [fails, { call: [expect, "Einheit nutzt --agent-token-file", { gt: [{ call: [unit_txt.index_of, "--agent-token-file"] }, -1] }] }] }]
+
+      - decl: [su_txt, string, { call: [io.read_file, su_file] }]
+      - set: [fails, { +: [fails, { call: [expect, "ID-Bereich eingetragen", { gt: [{ call: [su_txt.index_of, "${cur_user}:100000:65536"] }, -1] }] }] }]
+
+      # ── P1 Idempotenz: derselbe Lauf noch einmal ────────────────────────
+      - decl: [res2, ProvisionResult, { call: [prov.run, cfg, steps, host_fp, "pw-prov", "nicht-benutzt"] }]
+      - set: [fails, { +: [fails, { call: [expect, "P1 zweiter Lauf kommt genauso weit", { eq: [res2.steps_done, res.steps_done] }] }] }]
+      - decl: [su_txt2, string, { call: [io.read_file, su_file] }]
+      - set: [fails, { +: [fails, { call: [expect, "P1 ID-Bereich nicht doppelt eingetragen", { eq: [su_txt2, su_txt] }] }] }]
+
+      # ── P2 fail closed: ein Schritt scheitert ───────────────────────────
+      - decl: [bad_cfg, ProvisionConfig, cfg]
+      - set: [bad_cfg.pkg_install_cmd, "exit 3"]
+      - decl: [bad_steps, list<ProvisionStep>, { call: [prov.plan, bad_cfg, bin_src, rt_src, tok, "ws://127.0.0.1:8799"] }]
+      - decl: [res3, ProvisionResult, { call: [prov.run, bad_cfg, bad_steps, host_fp, "pw-prov", "nicht-benutzt"] }]
+      - set: [fails, { +: [fails, { call: [expect, "P2 Abbruch beim scheiternden Schritt", { eq: [res3.failed_step, "uidmap_package"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "P2 Abbruch VOR den spaeteren Schritten", { lt: [res3.steps_done, 3] }] }] }]
+
+      # ── Falscher Fingerprint: Abbruch VOR der Anmeldung ─────────────────
+      - decl: [res4, ProvisionResult, { call: [prov.run, cfg, steps, "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "pw-prov", "nicht-benutzt"] }]
+      - set: [fails, { +: [fails, { call: [expect, "S4 falscher Host-Key bricht ab", { eq: [res4.failed_step, "host_key"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "S4 und zwar ohne einen Schritt auszufuehren", { eq: [res4.steps_done, 0] }] }] }]
+
+      # ── P8: leerer Fingerprint ist KEIN stilles Vertrauen (Befund 5b) ────
+      - decl: [res5, ProvisionResult, { call: [prov.run, cfg, steps, "", "pw-prov", "nicht-benutzt"] }]
+      - set: [fails, { +: [fails, { call: [expect, "P8 leerer Fingerprint → unbestaetigt", { eq: [res5.failed_step, "host_key_unconfirmed"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "P8 kein Schritt ausgefuehrt", { eq: [res5.steps_done, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "P8 Fingerprint zum Anzeigen geliefert", { eq: [res5.fingerprint, host_fp] }] }] }]
+
+      # ── P9 Rückbau: alles wieder weg ────────────────────────────────────
+      - decl: [down, list<ProvisionStep>, { call: [prov.teardown_plan, cfg] }]
+      - decl: [res_down, ProvisionResult, { call: [prov.run_teardown, cfg, down, host_fp, "pw-prov", "nicht-benutzt"] }]
+      - print: ["[prov] Rueckbau: success=${res_down.success} failed='${res_down.failed_step}' steps=${res_down.steps_done}"]
+      - set: [fails, { +: [fails, { call: [expect, "P9 Rueckbau gelingt vollstaendig", { eq: [res_down.success, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "P9 Binary ist weg", { eq: [{ call: [io.is_file, bin_dst] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "P9 Profil ist weg", { eq: [{ call: [io.is_file, prof_dst] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "P9 Token-Datei ist weg", { eq: [{ call: [io.is_file, tok_dst] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "P9 Dienst-Einheit ist weg", { eq: [{ call: [io.is_file, unit_dst] }, 0] }] }] }]
+      - decl: [su_after, string, { call: [io.read_file, su_file] }]
+      - set: [fails, { +: [fails, { call: [expect, "P9 ID-Bereich ist gestrichen", { lt: [{ call: [su_after.index_of, "${cur_user}:100000"] }, 0] }] }] }]
+
+      # Zweimal zurueckbauen darf nicht scheitern (Idempotenz).
+      - decl: [res_down2, ProvisionResult, { call: [prov.run_teardown, cfg, down, host_fp, "pw-prov", "nicht-benutzt"] }]
+      - set: [fails, { +: [fails, { call: [expect, "P9 zweiter Rueckbau scheitert nicht", { eq: [res_down2.success, 1] }] }] }]
+
+      - call: [srv.stop]
+      - call: [srv_thread.join]
+      - call: [io.remove_all, work_path]
+
+      - if:
+          condition: { neq: [fails, 0] }
+          then: [{ print: ["test_provision_run FAIL (${fails})"] }, { return: 1 }]
+      - print: ["test_provision_run PASS"]
+      - return: 0

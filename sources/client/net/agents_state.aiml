@@ -1,0 +1,209 @@
+# AgentsState — Agentenliste und Lauf-Ausgabe als Member statt als Globals
+# (doc/spec/105 Schritt 2, Muster des 9rooms-Clients).
+#
+# Vorher lagen hier acht Globals.  `g_live_agents` war eines davon, und sein
+# Weiterreichen an einen ptr<T>-Parameter hat den WASM-Client zum Absturz
+# gebracht (LiveTable_agents, 2026-10-14).
+#
+# Liste und Lauf-Ausgabe liegen in EINER Klasse, obwohl doc/spec/105 sie
+# getrennt auffuehrt: derselbe Push-Verteiler bedient beide und derselbe
+# Bildschirm zeigt beide.  Zwei Klassen haetten zwei Leihgaben durch jede
+# Signatur bedeutet, ohne etwas zu trennen, was wirklich getrennt ist.
+#
+# §AP1.5a: `run_tail` haelt nur ein BEGRENZTES Fenster (`run_tail_cap` Zeichen).
+# Laeuft es ueber, faellt der Anfang weg — der Client sammelt die Ausgabe ebenso
+# wenig wie der Server.
+
+- import: "sources/client/net/session_state.aiml"
+- import: "sources/models/agent_exec.aiml"
+- import: "sources/models/auth_reqs.aiml"
+
+- class:
+    name: AgentsState
+    members:
+      # Kollaborateur; von der Gruppe ueber `sees: [session]` verdrahtet
+      # (spec/58 §5.1) — darum duerfen gewoehnliche Methoden ihn benutzen.
+      - [session,      ref<SessionState>]
+      - [list,         ptr<AgentList>]
+      - [list_seq,     i32]
+      # Wann kam diese Liste an?  Die Alters-Angaben („zuletzt gesehen") muessen
+      # gegen die SERVER-Uhr laufen, nicht gegen die des Browsers — sonst traegt
+      # eine Uhren-Differenz in die Anwesenheit hinein (doc/spec/104 F99-10).
+      - [got_ms,       i64]
+      - [stamp_ms,     i64]
+      - [run_ref,      string]
+      - [run_tail,     string]
+      - [run_tail_cap, i32, 8000]
+      - [run_exit,     i32, -99]
+      - [run_live,     i32]
+      - [run_seq,      i32]
+    methods:
+      - def:
+          name: has
+          access: public
+          return: i32
+          body:
+            - if: { condition: { peq: [<.list, null] }, then: [{ return: 0 }] }
+            - return: 1
+
+      - def:
+          name: revision
+          access: public
+          return: i32
+          body: [{ return: <.list_seq }]
+
+      # adopt_list: EIN Weg hinein.  Zwei Zuweisungen nebeneinander (Abruf und
+      # Push) liefen auseinander, sobald eine davon ein Feld mehr pflegen musste
+      # — genau so entstand im LiveState die „Stand vor 497799 h"-Anzeige.
+      - def:
+          name: adopt_list
+          access: public
+          args: [[fresh, ptr<AgentList>, { lifetime: consumed }]]
+          body:
+            - set: [<.list, fresh]
+            - set: [<.list_seq, { +: [<.list_seq, 1] }]
+            - set: [<.got_ms, { call: [time.now] }]
+            - if: { condition: { pneq: [<.list, null] }, then: [{ set: [<.stamp_ms, <.list.taken_ms] }] }
+
+      # server_now: dieselbe fortgeschriebene Server-Uhr wie LiveState.
+      # Ohne eine gemeinsame Uhr widersprechen sich die Ansichten: derselbe
+      # Agent stand unten als „verbunden" und rechts als „weg seit 48 s".
+      - def:
+          name: server_now
+          access: public
+          return: i64
+          body:
+            - if: { condition: { le: [<.stamp_ms, 0] }, then: [{ return: { call: [time.now] } }] }
+            - decl: [since, i64, { -: [{ call: [time.now] }, <.got_ms] }]
+            - if: { condition: { lt: [since, 0] }, then: [{ set: [since, 0] }] }
+            - return: { +: [<.stamp_ms, since] }
+
+      - def:
+          name: subscribe
+          access: public
+          return: i32
+          body:
+            - if: { condition: { eq: [<.session.connected, 0] }, then: [{ return: 0 }] }
+            - decl: [req, TokenReq]
+            - set: [req.token, <.session.token]
+            # Push IMMER in ein FRISCHES Modell dekodieren (re-decode in ein gefülltes
+            # Ziel mit list<Model> korrumpiert — siehe cluster_rpc).
+            - decl: [fresh, ptr<AgentList>, { new: AgentList }]
+            - decl: [got, i32, { call: [<.session.conn.send_and_await, 0, "subscribe_agents", req, fresh, 4000] }]
+            - if:
+                condition: { eq: [got, 1] }
+                then: [{ call: [<.adopt_list, fresh] }]
+            - return: got
+
+      # net_run_on_agent: Kommando + cwd beauftragen.  Setzt <.run_ref und leert das Tail.
+      - def:
+          name: run_on_agent
+          access: public
+          args: [[agent_id, string], [command, string], [cwd, string]]
+          return: { type: RunAck, lifetime: producer }
+          body:
+            - decl: [ack, RunAck]
+            - if: { condition: { eq: [<.session.connected, 0] }, then: [{ set: [ack.reason, "keine Verbindung"] }, { return: ack }] }
+            - decl: [req, RunReq]
+            - set: [req.token, <.session.token]
+            - set: [req.agent_id, agent_id]
+            - set: [req.command, command]
+            - set: [req.cwd, cwd]
+            - decl: [out, ptr<RunAck>, { new: RunAck }]
+            - decl: [got, i32, { call: [<.session.conn.send_and_await, 0, "run_on_agent", req, out, 4000] }]
+            - if: { condition: { neq: [got, 1] }, then: [{ set: [ack.reason, "Server antwortet nicht"] }, { return: ack }] }
+            - set: [ack.accepted, out.accepted]
+            - set: [ack.run_ref, out.run_ref]
+            - set: [ack.reason, out.reason]
+            - if:
+                condition: { eq: [ack.accepted, 1] }
+                then:
+                  - set: [<.run_ref, ack.run_ref]
+                  - set: [<.run_tail, ""]
+                  - set: [<.run_exit, -99]
+                  - set: [<.run_live, 1]
+                  - set: [<.run_seq, { +: [<.run_seq, 1] }]
+            - return: ack
+
+      # net_read_run_output: ein Byte-Fenster des Laufs holen (Scrollback, §AP1.5a).
+      - def:
+          name: read_output
+          access: public
+          args: [[stream, i32], [offset, i64], [len, i32]]
+          return: { type: RunWindow, lifetime: producer }
+          body:
+            - decl: [win, RunWindow]
+            - if: { condition: { eq: [<.session.connected, 0] }, then: [{ return: win }] }
+            - if: { condition: { eq: [<.run_ref.len, 0] }, then: [{ return: win }] }
+            - decl: [req, RunWindowReq]
+            - set: [req.token, <.session.token]
+            - set: [req.run_ref, <.run_ref]
+            - set: [req.stream, stream]
+            - set: [req.offset, offset]
+            - set: [req.len, len]
+            - decl: [out, ptr<RunWindow>, { new: RunWindow }]
+            - decl: [got, i32, { call: [<.session.conn.send_and_await, 0, "read_run_output", req, out, 4000] }]
+            - if: { condition: { neq: [got, 1] }, then: [{ return: win }] }
+            - set: [win.run_ref, out.run_ref]
+            - set: [win.stream, out.stream]
+            - set: [win.offset, out.offset]
+            - set: [win.data, out.data]
+            - set: [win.next_offset, out.next_offset]
+            - set: [win.total, out.total]
+            - set: [win.done, out.done]
+            - return: win
+
+      # agent_tail_push: Chunk ans begrenzte Tail-Fenster hängen (Anfang fällt weg).
+      - def:
+          name: tail_push
+          access: public
+          args: [[prefix, string], [chunk, string]]
+          body:
+            - set: [<.run_tail, "${<.run_tail}${prefix}${chunk}"]
+            - if:
+                condition: { gt: [<.run_tail.len, <.run_tail_cap] }
+                then:
+                  - decl: [cut, i32, { -: [<.run_tail.len, <.run_tail_cap] }]
+                  - set: [<.run_tail, { call: [<.run_tail.substr, cut] }]
+            - set: [<.run_seq, { +: [<.run_seq, 1] }]
+
+      # agent_apply_push: einen Server-Push verarbeiten.  1 = war ein AP1-Push.
+      - def:
+          name: apply_push
+          access: public
+          static_off: ["str_cmp"]
+          args: [[rpc, rpc_event]]
+          return: i32
+          body:
+            - if:
+                condition: { eq: [rpc.method, "agents_update"] }
+                then:
+                  - decl: [fresh, ptr<AgentList>, { new: AgentList }]
+                  - if:
+                      condition: { eq: [{ call: [<.session.conn.decode_rpc, rpc, fresh] }, 0] }
+                      then: [{ call: [<.adopt_list, fresh] }]
+                  - return: 1
+            - if:
+                condition: { eq: [rpc.method, "command_output"] }
+                then:
+                  - decl: [msg, ptr<OutChunk>, { new: OutChunk }]
+                  - if:
+                      condition: { eq: [{ call: [<.session.conn.decode_rpc, rpc, msg] }, 0] }
+                      then:
+                        - if:
+                            condition: { eq: [msg.stream, OutStream.err] }
+                            then: [{ call: [<.tail_push, "[err] ", msg.chunk] }]
+                            else: [{ call: [<.tail_push, "", msg.chunk] }]
+                  - return: 1
+            - if:
+                condition: { eq: [rpc.method, "command_result"] }
+                then:
+                  - decl: [res, ptr<RunResult>, { new: RunResult }]
+                  - if:
+                      condition: { eq: [{ call: [<.session.conn.decode_rpc, rpc, res] }, 0] }
+                      then:
+                        - set: [<.run_exit, res.exit_code]
+                        - set: [<.run_live, 0]
+                        - call: [<.tail_push, "\n", "── exit ${res.exit_code} ──\n"]
+                  - return: 1
+            - return: 0

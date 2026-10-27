@@ -1,0 +1,83 @@
+# AP1.9-Handler: Enrollment-Tokens erzeugen, auflisten, widerrufen (doc/spec/90 §AP1.9).
+# Alle drei sind nutzer-token-gesichert.  Das erzeugte Agent-Token verlässt den
+# Server genau einmal (Antwort auf create) und wird NICHT geloggt.
+
+- import: "sources/models/agent_exec.aiml"
+
+# Stufe 2 (spec/58): diese Handler waren Klassen, die die Dienste über
+# Globals erreichten.  Jetzt sind sie Instanzen der CosmosRuntime und ihr
+# `run` steht hier als Gruppen-Methode — Zugriff nur über die deklarierten
+# sees-Kanten.  KEIN Import aus dem Server: die Gruppen-Datei importiert
+# diese Datei (§1.1), umgekehrt gäbe es einen Zyklus.
+
+- groupmethods:
+    group: CosmosRuntime
+    instances:
+      - instance: create_agent_token
+        methods:
+          - def:
+              name: run
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, AgentTokenReq]
+                - decl: [res, AgentTokenNew]
+                - if:
+                    condition: { neq: [{ call: [session.decode_rpc, rpc, req] }, 0] }
+                    then:
+                      - set: [res.reason, "decode failed"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, res]
+                      - return: []
+                - decl: [req_pid, string, { call: [<.auth.pid_for_token, req.token] }]
+                - if:
+                    condition: { eq: [req_pid.len, 0] }
+                    then:
+                      - set: [res.reason, "unauthorized"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, res]
+                      - return: []
+                - decl: [label, string, req.label]
+                - if: { condition: { eq: [label.len, 0] }, then: [{ set: [label, "unbenannt"] }] }
+                - set: [res, { call: [<.tokens.create, label, req_pid] }]
+                - call: [session.reply_rpc, rpc, "set_result", 0, res]
+                - call: [log.info, "[agent_token] created ${res.token_id} label='${label}'"]
+      - instance: list_agent_tokens
+        methods:
+          - def:
+              name: run
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, TokenReq]
+                - decl: [lst, AgentTokenList]
+                - if:
+                    condition: { neq: [{ call: [session.decode_rpc, rpc, req] }, 0] }
+                    then: [{ call: [session.reply_rpc, rpc, "set_result", 0, lst] }, { return: [] }]
+                - decl: [req_pid, string, { call: [<.auth.pid_for_token, req.token] }]
+                - if:
+                    condition: { eq: [req_pid.len, 0] }
+                    then: [{ call: [session.reply_rpc, rpc, "set_result", 0, lst] }, { return: [] }]
+                - set: [lst, { call: [<.tokens.snapshot] }]
+                - call: [session.reply_rpc, rpc, "set_result", 0, lst]
+      - instance: revoke_agent_token
+        methods:
+          - def:
+              name: run
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, AgentTokenRevoke]
+                - decl: [ack, AgentAck]
+                - if:
+                    condition: { neq: [{ call: [session.decode_rpc, rpc, req] }, 0] }
+                    then:
+                      - set: [ack.reason, "decode failed"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, ack]
+                      - return: []
+                - decl: [req_pid, string, { call: [<.auth.pid_for_token, req.token] }]
+                - if:
+                    condition: { eq: [req_pid.len, 0] }
+                    then:
+                      - set: [ack.reason, "unauthorized"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, ack]
+                      - return: []
+                - set: [ack.accepted, { call: [<.tokens.revoke, req.token_id] }]
+                - if: { condition: { eq: [ack.accepted, 0] }, then: [{ set: [ack.reason, "unbekanntes Token"] }] }
+                - call: [session.reply_rpc, rpc, "set_result", 0, ack]
+                - call: [log.info, "[agent_token] revoke ${req.token_id} ok=${ack.accepted}"]

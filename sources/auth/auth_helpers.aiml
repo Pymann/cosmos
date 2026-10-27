@@ -1,0 +1,128 @@
+# Auth-Helpers — pure-function utilities für Password-Hash und
+# Email-Validierung.  Keine Models, keine Klassen → trägt 0 zum 3-Cap bei.
+#
+# Password-Hashing (Lazy-Migration, kein Wipe/Re-Register):
+#   NEU:    pbkdf2$<salt>$<derived>   — salt=random_hex(16), derived=pbkdf2(plain,salt,100k)
+#   LEGACY: <64-hex>                  — sha256("${email}:${plain}") (kein '$'-Präfix)
+# gespeichert wird IMMER nur der Hash, NIE das plain Password (auch nicht in Tests).
+# verify_password akzeptiert beide Formate; handle_login re-hasht Legacy → pbkdf2
+# beim ersten erfolgreichen Login (needs_rehash).  hash_password_new erzeugt NUR
+# noch pbkdf2; hash_password (Legacy sha256) bleibt für verify_password + Alt-Tests.
+
+# Iterationszahl für pbkdf2 — bewusst langsam gegen Brute-Force.  Als Funktion
+# zentralisiert, damit ein späteres Hochsetzen genau eine Stelle betrifft.
+- def:
+    name: pbkdf2_iters
+    args: []
+    return: i32
+    body:
+      - return: 100000
+
+# hash_password — LEGACY sha256("${email}:${plain}").  Nur noch für den Legacy-
+# Verify-Zweig + bestehende Tests; NEUE Hashes kommen von hash_password_new.
+- def:
+    name: hash_password
+    args: [[email, string], [plain, string]]
+    # producer: returns the owned sha256 rc-string; the caller adopts it (else it leaks at the caller,
+    # legacy verify path — leak_probes/round3 §1).
+    return: { type: string, lifetime: producer }
+    body:
+      - return: { call: [hash.sha256, "${email}:${plain}"] }
+
+# hash_password_new — aktuelles Format: pbkdf2 mit per-User Secure-Random-Salt.
+# salt ist nicht geheim, muss nur pro User eindeutig sein → random_hex genügt.
+# Rückgabe self-describing "pbkdf2$<salt>$<derived>" (Salt im Wert eingebettet →
+# kein neues User-Feld, KV-Schema-Fingerprint unverändert).
+- def:
+    name: hash_password_new
+    args: [[plain, string]]
+    # producer: returns an owned composed string; the caller adopts it. Without this the outer
+    # interpolation return leaks its reference (113 B/call). salt/derived are now owned temps
+    # (random_hex/pbkdf2 builtin registration) → their decls drop them. (leak_probes/round3 §2)
+    return: { type: string, lifetime: producer }
+    body:
+      - decl: [salt, string, { call: [math.random_hex, 16] }]
+      - decl: [derived, string, { call: [hash.pbkdf2, plain, salt, { call: [pbkdf2_iters] }] }]
+      - return: "pbkdf2$${salt}$${derived}"
+
+# verify_password — prüft plain gegen den gespeicherten Hash (beide Formate).
+# Immer constant-time (hash.const_time_eq).  Rückgabe 1=match, 0=nein.
+- def:
+    name: verify_password
+    args: [[stored, string], [email, string], [plain, string]]
+    return: i32
+    body:
+      - if:
+          condition: { eq: [{ call: [stored.starts_with, "pbkdf2$"] }, 1] }
+          then:
+            - decl: [parts, list<string>, { call: [stored.split, "$"] }]
+            - if: { condition: { neq: [parts.len, 3] }, then: [{ return: 0 }] }
+            - decl: [salt, string, { at: [parts, 1] }]
+            - decl: [want, string, { at: [parts, 2] }]
+            - decl: [got,  string, { call: [hash.pbkdf2, plain, salt, { call: [pbkdf2_iters] }] }]
+            - return: { call: [hash.const_time_eq, got, want] }
+      # Legacy: sha256("${email}:${plain}")
+      - decl: [legacy, string, { call: [hash_password, email, plain] }]
+      - return: { call: [hash.const_time_eq, stored, legacy] }
+
+# needs_rehash — 1 wenn der gespeicherte Hash noch im Legacy-Format ist (kein
+# pbkdf2$-Präfix) → handle_login upgraded ihn nach erfolgreichem Login.
+- def:
+    name: needs_rehash
+    args: [[stored, string]]
+    return: i32
+    body:
+      - if: { condition: { eq: [{ call: [stored.starts_with, "pbkdf2$"] }, 1] }, then: [{ return: 0 }] }
+      - return: 1
+
+# Minimaler Email-Validator: muss '@' enthalten UND nach dem '@' einen '.'
+# Kein RFC-5322; genug um leere Strings und triviale Tippfehler auszufiltern.
+- def:
+    name: validate_email
+    args: [[email, string]]
+    return: i32
+    body:
+      - if: { condition: { eq: [email.len, 0] }, then: [{ return: 0 }] }
+      - decl: [at_parts, list<string>, { call: [email.split, "@"] }]
+      - if: { condition: { neq: [at_parts.len, 2] }, then: [{ return: 0 }] }
+      - decl: [domain, string, { at: [at_parts, 1] }]
+      - if: { condition: { eq: [domain.len, 0] }, then: [{ return: 0 }] }
+      - decl: [dot_parts, list<string>, { call: [domain.split, "."] }]
+      - if: { condition: { lt: [dot_parts.len, 2] }, then: [{ return: 0 }] }
+      # Beide Hälften (vor und nach dem .) müssen non-empty sein.
+      - decl: [first, string, { at: [dot_parts, 0] }]
+      - decl: [second, string, { at: [dot_parts, 1] }]
+      - if: { condition: { eq: [first.len, 0] }, then: [{ return: 0 }] }
+      - if: { condition: { eq: [second.len, 0] }, then: [{ return: 0 }] }
+      - return: 1
+
+# clearance_of — die EINE Stelle, an der aus einem gespeicherten Wert eine Freigabe wird
+# (doc/spec/108 F108-2a).  Kein Aufrufer liest das Feld direkt; sonst stuende die Regel an
+# zwei Stellen und die zweite waere die falsche.
+#
+# Alles ausserhalb 1..255 wird 255 = am stärksten eingeschränkt.  Das deckt drei Faelle mit
+# einer Regel ab: kein Eintrag (der Aufrufer uebergibt 0), ein vergessenes Feld im Blob
+# (ebenfalls 0) und ein unsinniger Wert.  0 darf NIE Admin heissen (spec/65 F65-22) — es
+# ist der Wert eines vergessenen Feldes, und ein Default, der Rechte vergibt, ist die
+# kuerzeste denkbare Eskalation.
+- def:
+    name: clearance_of
+    args: [[raw, i32]]
+    return: i32
+    body:
+      - if: { condition: { lt: [raw, 1] },   then: [{ return: 255 }] }
+      - if: { condition: { gt: [raw, 255] }, then: [{ return: 255 }] }
+      - return: raw
+
+# valid_level — darf dieser Wert GESETZT werden?  Getrennt von `clearance_of`, weil die
+# beiden Fragen verschieden sind: beim LESEN wird ein unsinniger Wert still zur strengsten
+# Freigabe (fail closed), beim SETZEN muss er abgelehnt werden, damit der Betreiber seinen
+# Tippfehler sieht statt ihn als 255 wiederzufinden.
+- def:
+    name: valid_level
+    args: [[raw, i32]]
+    return: i32
+    body:
+      - if: { condition: { lt: [raw, 1] },   then: [{ return: 0 }] }
+      - if: { condition: { gt: [raw, 255] }, then: [{ return: 0 }] }
+      - return: 1

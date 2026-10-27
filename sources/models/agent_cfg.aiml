@@ -1,0 +1,53 @@
+# Aufruf-Konfiguration des Agenten (sys.arg_dump → jedes Feld ist ein Flag).
+# Eigene Datei, damit sowohl der Runner als auch der Exec-Pfad sie benutzen
+# koennen, ohne einander zu importieren.
+
+- model:
+    name: AgentCfg
+    fields:
+      - [port,     i32,    19870]
+      - [agent_id, string, "agent-1"]
+      # AP1 (doc/spec/90): --exec-url gesetzt → ws/wss-Modus gegen cosmosd (AgentExec)
+      # statt des tcp-Controller-Pfads.  --stop-after N beendet nach N Läufen (Test).
+      - [exec_url,   string, ""]
+      - [stop_after, i32,    0]
+      # Enrollment-Token (§AP1.9), drei Quellen — Rangfolge in agent_main:
+      #   --agent-token <wert>      bequem, aber in der Prozessliste SICHTBAR
+      #   --agent-token-file <pfad> Datei, nicht in der Prozessliste
+      #   COSMOS_AGENT_TOKEN        Umgebung
+      - [agent_token,      string, ""]
+      - [agent_token_file, string, ""]
+      # --verify-isolation: Selbsttest statt Dienst (doc/spec/91 A5).
+      - [verify_isolation, i32,    0]
+      # --bwrap-path: die mitgelieferte Sandkasten-Kopie (AppArmor haengt am Pfad).
+      - [bwrap_path,      string, "/opt/cosmos/bwrap"]
+      # --labels x86_64,linux: welche Schritte dieser Agent nehmen DARF (F103-3).
+      - [labels,          string, ""]
+      # --work-root: wo die Schritte arbeiten.  Auf einem Knoten relativ zum
+      # Arbeitsverzeichnis; IM CONTAINER muss es ein beschreibbarer Bind sein —
+      # die Wurzel ist dort read-only, und ein Agent, der sein
+      # Arbeitsverzeichnis nicht anlegen kann, nimmt den Schritt an und faellt
+      # still um (gemessen 21.10.2026, doc/spec/110 F110-56).
+      - [work_root,       string, "steps"]
+      # --in-container 1: der Agent laeuft IN einem Container.  Dann ist der
+      # Container die Grenze und der Schritt laeuft direkt (doc/spec/110 F110-62).
+      # Gesagt, nicht erschnueffelt: wer den Container startet, weiss es — und
+      # eine Vermutung aus /proc/self/uid_map war genau einmal falsch und kostete
+      # eine Stunde (21.10.2026).
+      - [in_container,    i32, 0]
+      # --image <name>: in WELCHEM Abbild dieser Agent laeuft.  Der Server
+      # teilt danach zu (doc/spec/110 F110-73); "" = Dateisystem des Knotens.
+      - [image,           string, ""]
+      # --shares "name:/ziel:modus,…": wo der Wirt Freigaben in diesen
+      # Container gehaengt hat (doc/spec/110 §110.35).  Der Agent BRAUCHT das,
+      # obwohl er sie nicht selbst einhaengt: der overlayfs einer Stufe legt
+      # sich ueber die ganze Wurzel und wuerde sie sonst verdecken — ein `rw`
+      # landete dann in der Schicht statt auf der Freigabe (F110-107).
+      - [shares,          string, ""]
+      # --require-check "<spec>": NUR pruefen, ob die Umgebung die Vorbedingung
+      # erfuellt (aiml spec/62 §18.2), und beenden.  Gebraucht, weil die
+      # Vorbedingung IN der Schicht gilt, nicht im Blick des Agenten
+      # (doc/spec/110 F110-109): der Schritt ruft denselben Agenten mit diesem
+      # Schalter innerhalb seiner Wurzel auf.  Eine zweite Fassung der Pruefung
+      # als Shell-Schleife waere die Kopie, die auseinanderlaeuft.
+      - [require_check,   string, ""]

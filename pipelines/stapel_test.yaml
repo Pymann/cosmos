@@ -1,0 +1,10 @@
+# Kurze Gegenprobe fuer `base:` (aiml spec/62 §18.4): sieht ein Lauf die
+# Schichten eines FRUEHEREN Laufs — und laesst sich damit arbeiten?
+- pipeline:
+    name: stapel_test
+    base: "run:aiml-vom-Base-Image-5"
+    steps:
+      - stage:
+          name: sehe_ich_den_unterbau
+          timeout: 300000
+          run: "set -e; echo '== Schicht 1 (apt) =='; gcc --version | head -1; llvm-config-18 --version; echo '== Schicht 2/4 (venv+exodus) =='; if ! /opt/venv/bin/exodus --help >/dev/null 2>&1; then ln -sfn /work/aiml-vom-Base-Image-5/ws/exodus /ws/exodus; echo '(editierbarer Einbau — Arbeitsplatz eingehaengt)'; fi; /opt/venv/bin/exodus --help | head -2; echo '== Compiler aus dem anderen Lauf =='; ls -lh /work/aiml-vom-Base-Image-5/ws/aiml/out/aiml/aiml; echo '== eigene Schicht =='; echo markierung > /etc/nur-dieser-lauf; ls /etc/nur-dieser-lauf"

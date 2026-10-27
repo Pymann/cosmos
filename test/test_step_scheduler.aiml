@@ -1,0 +1,200 @@
+# Abnahme doc/spec/101: wer bekommt welchen Schritt.
+#
+# Geprueft wird vor allem, was im Betrieb weh tut und was man sonst nie testet:
+#   * eine Lane geht der REIHE nach: Stufe 2 erst, wenn Stufe 1 fertig ist
+#   * ein abgelaufenes Lehen gibt den Schritt FREI (F101-3) — sonst bleibt er
+#     fuer immer bei einem Knoten, der nie wiederkommt
+#   * ein Bericht zu einem Schritt, dessen Lehen abgelaufen ist, wird
+#     VERWORFEN: sein Ergebnis gehoert nicht mehr ihm
+#   * ein gescheiterter Schritt haelt seine Nachfolger zurueck (F101-10)
+# Expected exit code: 0
+
+- import: "sources/server/pipeline_submit.aiml"
+- import: "sources/shared/step_scheduler.aiml"
+
+- def:
+    name: expect
+    args: [[what, string], [cond, i32]]
+    return: i32
+    body:
+      - if:
+          condition: { eq: [cond, 1] }
+          then: [{ print: ["  ok   ${what}"] }, { return: 0 }]
+      - print: ["  FAIL ${what}"]
+      - return: 1
+
+# Zwei Lanes, zwei Stufen -> vier Eintraege.
+- def:
+    name: two_by_two
+    return: { type: string, lifetime: producer }
+    body:
+      - return: "- pipeline:\n    name: sched_demo\n    params:\n      - [arch, string, [x86_64, arm64]]\n    steps:\n      - stage:\n          name: build\n          steps:\n            - step: { name: compile, cache: pure, args: [arch], return: i32, body: [{ return: 0 }] }\n      - stage:\n          name: test\n          steps:\n            - step: { name: check, cache: pure, args: [arch], return: i32, body: [{ return: 0 }] }\n"
+
+# Wer fragt (doc/spec/110 §110.29): Kennung, Etiketten, Abbild als EIN Wert —
+# eine Methode nimmt hoechstens fuenf Argumente.
+- def:
+    name: asks
+    static_off: ["str_cmp"]
+    args: [[agent_id, string], [labels, string], [image, string]]
+    return: { type: ClaimWho, lifetime: producer }
+    body:
+      - decl: [out, ClaimWho]
+      - set: [out.agent_id, agent_id]
+      - set: [out.labels, labels]
+      - set: [out.image, image]
+      - return: out
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      - decl: [submit, ptr<PipelineSubmit>, { new: PipelineSubmit }]
+      - decl: [sched, ptr<StepScheduler>, { new: StepScheduler }]
+      - decl: [run, PipelineRun, { call: [submit.expand, { call: [two_by_two] }, "run-sched", ""] }]
+      - set: [fails, { +: [fails, { call: [expect, "vier Eintraege (2 Lanes x 2 Stufen)", { eq: [run.stages.len, 4] }] }] }]
+
+      - decl: [now_ms, i64, 1000000]
+
+      # ── Zuteilung: nur die ERSTE Stufe je Lane ist bereit ───────────────
+      - decl: [first, StepClaim, { call: [sched.claim, run, now_ms, 30000, { call: [asks, "builder-1", "", ""] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "ein Schritt wird zugeteilt", { eq: [first.found, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und es ist die erste Stufe", { gt: [{ call: [first.stage_name.index_of, "build"] }, -1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "das Lehen hat eine Frist", { eq: [first.lease_until, { +: [now_ms, 30000] }] }] }] }]
+
+      # Die zweite Zuteilung bekommt die ANDERE Lane, nicht die zweite Stufe.
+      - decl: [second, StepClaim, { call: [sched.claim, run, now_ms, 30000, { call: [asks, "builder-2", "", ""] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "der zweite Agent bekommt die andere Lane", { eq: [second.found, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "auch das ist eine erste Stufe", { gt: [{ call: [second.stage_name.index_of, "build"] }, -1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und eine ANDERE Lane", { neq: [first.bindings, second.bindings] }] }] }]
+
+      # Jetzt ist nichts mehr bereit: beide zweiten Stufen warten.
+      - decl: [third, StepClaim, { call: [sched.claim, run, now_ms, 30000, { call: [asks, "builder-3", "", ""] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "die zweiten Stufen warten noch", { eq: [third.found, 0] }] }] }]
+
+      # ── Fertig melden gibt die naechste Stufe frei ──────────────────────
+      - decl: [rc_rep, i32, { call: [sched.report, run, first.stage_id, 1, "builder-1", first.attempt] }]
+      - set: [fails, { +: [fails, { call: [expect, "der Bericht wird angenommen", { eq: [rc_rep, 0] }] }] }]
+      - decl: [fourth, StepClaim, { call: [sched.claim, run, now_ms, 30000, { call: [asks, "builder-1", "", ""] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "danach ist die zweite Stufe dieser Lane bereit", { eq: [fourth.found, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und zwar in DERSELBEN Lane", { eq: [fourth.bindings, first.bindings] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und es ist die zweite Stufe", { gt: [{ call: [fourth.stage_name.index_of, "test"] }, -1] }] }] }]
+
+      # ── Abgelaufenes Lehen gibt den Schritt frei (F101-3) ───────────────
+      - decl: [later, i64, { +: [now_ms, 60000] }]
+      - decl: [freed, i32, { call: [sched.expire, run, later] }]
+      - set: [fails, { +: [fails, { call: [expect, "abgelaufene Lehen werden zurueckgegeben", { ge: [freed, 1] }] }] }]
+      - decl: [again, StepClaim, { call: [sched.claim, run, later, 30000, { call: [asks, "builder-9", "", ""] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "der freigegebene Schritt ist wieder zuteilbar", { eq: [again.found, 1] }] }] }]
+
+      # ── Ein Bericht nach Ablauf: WER meldet, entscheidet ───────────────
+      # `second` lief auf builder-2, sein Lehen lief ab und der Schritt wurde
+      # builder-9 zugeteilt.  Jetzt gehoert er einem ANDEREN — builder-2 darf
+      # ihn nicht mehr abschliessen.
+      # (Dass `second` hier noch nachmelden duerfte, waere KORREKT, solange
+      # builder-9 eine andere Stufe nahm — der genaue Fall steht unten.)
+      # Und ein Fremder darf einen laufenden Schritt ebenso wenig abschliessen.
+      - decl: [rc_alien, i32, { call: [sched.report, run, again.stage_id, 1, "wildfremd", 0] }]
+      - set: [fails, { +: [fails, { call: [expect, "ein fremder Agent darf nicht abschliessen", { neq: [rc_alien, 0] }] }] }]
+
+      # ── Kurze Stoerung: der LETZTE Halter darf nachmelden ───────────────
+      # Das Lehen lief ab, aber niemand hat den Schritt neu genommen — die
+      # Arbeit IST getan.  Sie zu verwerfen hiesse, sie zu wiederholen.
+      - decl: [run3, PipelineRun, { call: [submit.expand, { call: [two_by_two] }, "run-sched3", ""] }]
+      - decl: [held, StepClaim, { call: [sched.claim, run3, now_ms, 30000, { call: [asks, "builder-blip", "", ""] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "ein Schritt ist zugeteilt", { eq: [held.found, 1] }] }] }]
+      - decl: [freed3, i32, { call: [sched.expire, run3, { +: [now_ms, 60000] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "sein Lehen laeuft ab", { ge: [freed3, 1] }] }] }]
+      - decl: [rc_blip, i32, { call: [sched.report, run3, held.stage_id, 1, "builder-blip", held.attempt] }]
+      - set: [fails, { +: [fails, { call: [expect, "der letzte Halter darf nachmelden (keine Doppelausfuehrung)", { eq: [rc_blip, 0] }] }] }]
+      - decl: [after_blip, PipelineStage, { at: [run3.stages, 0] }]
+      - set: [fails, { +: [fails, { call: [expect, "und der Schritt gilt als erledigt", { eq: [after_blip.status, "done"] }] }] }]
+
+      # ── … aber NUR, solange ihn niemand neu genommen hat ───────────────
+      - decl: [run4, PipelineRun, { call: [submit.expand, { call: [two_by_two] }, "run-sched4", ""] }]
+      - decl: [held4, StepClaim, { call: [sched.claim, run4, now_ms, 30000, { call: [asks, "builder-slow", "", ""] }] }]
+      - decl: [freed4, i32, { call: [sched.expire, run4, { +: [now_ms, 60000] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "das Lehen laeuft ab", { ge: [freed4, 1] }] }] }]
+      # Gezielt DIESELBE Stufe neu zuteilen: ein Etikett gibt es nicht, also
+      # nimmt der naechste Anfrager die erste bereite — das ist sie.
+      - decl: [taken4, StepClaim, { call: [sched.claim, run4, { +: [now_ms, 60000] }, 30000, { call: [asks, "builder-fast", "", ""] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "ein anderer Agent nimmt genau diese Stufe", { eq: [taken4.stage_id, held4.stage_id] }] }] }]
+      - decl: [rc_over, i32, { call: [sched.report, run4, held4.stage_id, 1, "builder-slow", held4.attempt] }]
+      - set: [fails, { +: [fails, { call: [expect, "dann wird der Bericht des Ueberholten verworfen", { neq: [rc_over, 0] }] }] }]
+
+      # ── Ein gescheiterter Schritt haelt seine Nachfolger zurueck ────────
+      - decl: [run2, PipelineRun, { call: [submit.expand, { call: [two_by_two] }, "run-sched2", ""] }]
+      - decl: [bad, StepClaim, { call: [sched.claim, run2, now_ms, 30000, { call: [asks, "builder-1", "", ""] }] }]
+      - decl: [rc_bad, i32, { call: [sched.report, run2, bad.stage_id, 0, "builder-1", bad.attempt] }]
+      - set: [fails, { +: [fails, { call: [expect, "Fehlschlag wird angenommen", { eq: [rc_bad, 0] }] }] }]
+      - decl: [after_fail, StepClaim, { call: [sched.claim, run2, now_ms, 30000, { call: [asks, "builder-1", "", ""] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "die andere Lane laeuft weiter", { eq: [after_fail.found, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "aber nicht hinter dem Fehlschlag", { neq: [after_fail.bindings, bad.bindings] }] }] }]
+
+      # ── F103-12: der Agent GIBT einen verlorenen Schritt zurueck ────────
+      - decl: [run5, PipelineRun, { call: [submit.expand, { call: [two_by_two] }, "run-sched5", ""] }]
+      - decl: [mine, StepClaim, { call: [sched.claim, run5, now_ms, 30000, { call: [asks, "builder-crash", "", ""] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "ein Schritt ist zugeteilt", { eq: [mine.found, 1] }] }] }]
+      # Ein fremder Agent darf ihn NICHT freigeben.
+      - decl: [rc_foreign, i32, { call: [sched.release, run5, mine.stage_id, "builder-other", 0] }]
+      - set: [fails, { +: [fails, { call: [expect, "ein Fremder gibt nichts zurueck", { eq: [rc_foreign, -1] }] }] }]
+      # Der Halter darf — und der Schritt ist SOFORT wieder zu haben, ohne dass
+      # die Frist ablaufen muss.
+      - decl: [rc_give, i32, { call: [sched.release, run5, mine.stage_id, "builder-crash", mine.attempt] }]
+      - set: [fails, { +: [fails, { call: [expect, "der Halter gibt zurueck", { eq: [rc_give, 0] }] }] }]
+      - decl: [retake, StepClaim, { call: [sched.claim, run5, { +: [now_ms, 1000] }, 30000, { call: [asks, "builder-fresh", "", ""] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "sofort neu zuteilbar, ohne Fristablauf", { eq: [retake.stage_id, mine.stage_id] }] }] }]
+      # Schon abgeschlossen = nichts verloren: ein Bericht, der vor dem Absturz
+      # durchkam, darf nicht zur Wiederholung werden.
+      - decl: [rc_done, i32, { call: [sched.report, run5, retake.stage_id, 1, "builder-fresh", retake.attempt] }]
+      - set: [fails, { +: [fails, { call: [expect, "der neue Halter meldet fertig", { eq: [rc_done, 0] }] }] }]
+      - decl: [rc_late, i32, { call: [sched.release, run5, retake.stage_id, "builder-fresh", retake.attempt] }]
+      - set: [fails, { +: [fails, { call: [expect, "ein fertiger Schritt wird nicht freigegeben", { eq: [rc_late, 1] }] }] }]
+      - decl: [rc_ghost, i32, { call: [sched.release, run5, "gibt-es-nicht", "builder-crash", 0] }]
+      - set: [fails, { +: [fails, { call: [expect, "unbekannte Stufe wird benannt", { eq: [rc_ghost, -2] }] }] }]
+
+      # ── F101-7: die Versuchsnummer trennt alt von neu ───────────────────
+      # Der Fall, den die Halter-Regel allein NICHT loesen kann: derselbe Agent
+      # bekommt denselben Schritt zweimal.  Sein spaeter Bericht aus Versuch 1
+      # darf Versuch 2 nicht abschliessen.
+      - decl: [run6, PipelineRun, { call: [submit.expand, { call: [two_by_two] }, "run-sched6", ""] }]
+      - decl: [try1, StepClaim, { call: [sched.claim, run6, now_ms, 30000, { call: [asks, "builder-twice", "", ""] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "der erste Versuch hat die Nummer 1", { eq: [try1.attempt, 1] }] }] }]
+      - decl: [freed6, i32, { call: [sched.expire, run6, { +: [now_ms, 60000] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "das Lehen laeuft ab", { ge: [freed6, 1] }] }] }]
+      - decl: [try2, StepClaim, { call: [sched.claim, run6, { +: [now_ms, 60000] }, 30000, { call: [asks, "builder-twice", "", ""] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "derselbe Agent nimmt ihn erneut", { eq: [try2.stage_id, try1.stage_id] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "das ist Versuch 2", { eq: [try2.attempt, 2] }] }] }]
+      - decl: [rc_old, i32, { call: [sched.report, run6, try1.stage_id, 1, "builder-twice", try1.attempt] }]
+      - set: [fails, { +: [fails, { call: [expect, "der Bericht aus Versuch 1 wird abgewiesen", { neq: [rc_old, 0] }] }] }]
+      - decl: [rc_new, i32, { call: [sched.report, run6, try2.stage_id, 1, "builder-twice", try2.attempt] }]
+      - set: [fails, { +: [fails, { call: [expect, "der aus Versuch 2 wird angenommen", { eq: [rc_new, 0] }] }] }]
+      # Ein Agent ohne Nummer (0) faellt auf die Halter-Regel zurueck — sonst
+      # koennte ein noch nicht erneuerter Agent nicht mehr arbeiten (F101-6).
+      - decl: [run7, PipelineRun, { call: [submit.expand, { call: [two_by_two] }, "run-sched7", ""] }]
+      - decl: [old_cl, StepClaim, { call: [sched.claim, run7, now_ms, 30000, { call: [asks, "builder-alt", "", ""] }] }]
+      - decl: [rc_zero, i32, { call: [sched.report, run7, old_cl.stage_id, 1, "builder-alt", 0] }]
+      - set: [fails, { +: [fails, { call: [expect, "ohne Nummer gilt die Halter-Regel weiter", { eq: [rc_zero, 0] }] }] }]
+
+      # ── F103-3: ein Etikett am Schritt schliesst fremde Agenten aus ──────
+      - decl: [lab_run, PipelineRun]
+      - set: [lab_run.run_id, "r-lab"]
+      - decl: [lab_stage, PipelineStage]
+      - set: [lab_stage.stage_id, "s-arm"]
+      - set: [lab_stage.name, "compile [arch=arm64]"]
+      - set: [lab_stage.status, "pending"]
+      - set: [lab_stage.required_label, "arm64"]
+      - call: [lab_run.stages.push, lab_stage]
+
+      - decl: [wrong, StepClaim, { call: [sched.claim, lab_run, now_ms, 30000, { call: [asks, "x86-box", "x86_64,linux", ""] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "falsches Etikett bekommt nichts", { eq: [wrong.found, 0] }] }] }]
+      - decl: [right, StepClaim, { call: [sched.claim, lab_run, now_ms, 30000, { call: [asks, "arm-box", "linux, arm64", ""] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "passendes Etikett bekommt den Schritt", { eq: [right.found, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Leerzeichen im Etikett stoeren nicht", { eq: [right.stage_id, "s-arm"] }] }] }]
+
+      - if:
+          condition: { neq: [fails, 0] }
+          then: [{ print: ["test_step_scheduler FAIL (${fails})"] }, { return: 1 }]
+      - print: ["test_step_scheduler PASS"]
+      - return: 0

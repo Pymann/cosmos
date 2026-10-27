@@ -1,0 +1,115 @@
+# ResUsage/ResSampler — die eigene Last eines Prozesses messen (doc/spec/109).
+#
+# Gemeinsam fuer Server UND Agent: beide sind gewoehnliche Linux-Prozesse, und beide
+# wollen dieselbe Zahl.  Zwei Messungen mit zwei Formeln waeren zwei Wahrheiten ueber
+# dieselbe Maschine.
+#
+# Quelle ist /proc, gelesen mit `io.read_file`:
+#   /proc/self/stat    Feld 14/15 = utime/stime in Uhr-Ticks (100/s auf Linux)
+#   /proc/self/status  VmRSS      = belegter Arbeitsspeicher in kB
+#
+# CPU ist eine ABLEITUNG, kein Zustand: sie braucht zwei Messungen.  Der erste Aufruf
+# liefert darum 0 Promille und nicht etwa den Durchschnitt seit Prozessstart — der
+# waere eine andere Groesse und saehe nur aus wie Auslastung.
+#
+# Promille statt Prozent, weil i32 und weil 0,5 % bei vier Agenten sonst als 0 steht.
+
+- model:
+    name: ResUsage
+    fields:
+      - [cpu_permille, i32]   # 1000 = ein Kern voll ausgelastet
+      - [rss_kb,       i64]
+      - [sampled_ms,   i64]
+
+- class:
+    name: ResSampler
+    members:
+      - [last_ticks, i64, 0]
+      - [last_ms,    i64, 0]
+      - [primed,     i32, 0]
+    methods:
+      # read_ticks: utime+stime aus /proc/self/stat.
+      #
+      # ACHTUNG beim Zerlegen: Feld 2 ist der Programmname IN KLAMMERN und darf
+      # Leerzeichen enthalten — "(my prog)".  Wer stumpf an Leerzeichen trennt, zaehlt
+      # falsch, sobald der Name eines hat.  Darum wird ab der SCHLIESSENDEN Klammer
+      # gezaehlt: danach ist Feld 1 der Zustand, und utime/stime sind 12 und 13.
+      - def:
+          name: read_ticks
+          return: i64
+          body:
+            - decl: [stat_p, path, "/proc/self/stat"]
+            - decl: [raw, string, { call: [io.read_file, stat_p] }]
+            - if: { condition: { eq: [raw.len, 0] }, then: [{ return: 0 }] }
+            - decl: [close_at, i32, { call: [raw.index_of, ") "] }]
+            - if: { condition: { lt: [close_at, 0] }, then: [{ return: 0 }] }
+            - decl: [rest, string, { call: [raw.substr, { +: [close_at, 2] }, { -: [raw.len, { +: [close_at, 2] }] }] }]
+            - decl: [cols, list<string>, { call: [rest.split, " "] }]
+            # cols[0] = Zustand, cols[11] = utime, cols[12] = stime
+            - if: { condition: { lt: [cols.len, 13] }, then: [{ return: 0 }] }
+            - decl: [utime_s, string, { at: [cols, 11] }]
+            - decl: [stime_s, string, { at: [cols, 12] }]
+            - return: { +: [{ call: [utime_s.to_int] }, { call: [stime_s.to_int] }] }
+
+      # read_rss_kb: VmRSS aus /proc/self/status.
+      - def:
+          name: read_rss_kb
+          return: i64
+          body:
+            - decl: [stat_p, path, "/proc/self/status"]
+            - decl: [raw, string, { call: [io.read_file, stat_p] }]
+            - if: { condition: { eq: [raw.len, 0] }, then: [{ return: 0 }] }
+            - decl: [lines, list<string>, { call: [raw.split, "\n"] }]
+            - decl: [rsi, i32, 0]
+            - while:
+                condition: { lt: [rsi, lines.len] }
+                body:
+                  - decl: [line, string, { at: [lines, rsi] }]
+                  - if:
+                      condition: { eq: [{ call: [line.index_of, "VmRSS:"] }, 0] }
+                      then:
+                        - decl: [tail_s, string, { call: [line.substr, 6, { -: [line.len, 6] }] }]
+                        - decl: [parts, list<string>, { call: [tail_s.split, " "] }]
+                        - decl: [pix, i32, 0]
+                        - while:
+                            condition: { lt: [pix, parts.len] }
+                            body:
+                              # TRIMMEN, nicht nur auf Laenge pruefen: /proc/self/status
+                              # rueckt mit einem TABULATOR ein, also ist das erste Stueck
+                              # "\t" — nicht leer, aber auch keine Zahl, und `to_int`
+                              # machte daraus 0.  Gemessen 17.10.2026.
+                              - decl: [raw_one, string, { at: [parts, pix] }]
+                              - decl: [one, string, { call: [raw_one.trim] }]
+                              - if:
+                                  condition: { gt: [one.len, 0] }
+                                  then: [{ return: { call: [one.to_int] } }]
+                              - set: [pix, { +: [pix, 1] }]
+                  - set: [rsi, { +: [rsi, 1] }]
+            - return: 0
+
+      # sample: eine Messung.  Der erste Aufruf setzt nur den Bezugspunkt.
+      - def:
+          name: sample
+          return: ResUsage
+          body:
+            - decl: [out, ResUsage]
+            - decl: [now_ms, i64, { call: [time.now] }]
+            - decl: [ticks, i64, { call: [<.read_ticks] }]
+            - set: [out.rss_kb, { call: [<.read_rss_kb] }]
+            - set: [out.sampled_ms, now_ms]
+            - if:
+                condition: { eq: [<.primed, 0] }
+                then:
+                  - set: [<.primed, 1]
+                  - set: [<.last_ticks, ticks]
+                  - set: [<.last_ms, now_ms]
+                  - return: out
+            - decl: [d_ms, i64, { -: [now_ms, <.last_ms] }]
+            - decl: [d_ticks, i64, { -: [ticks, <.last_ticks] }]
+            - set: [<.last_ticks, ticks]
+            - set: [<.last_ms, now_ms]
+            - if: { condition: { le: [d_ms, 0] }, then: [{ return: out }] }
+            # Ticks sind 10 ms (100/s).  Promille = verbrauchte ms * 1000 / vergangene ms.
+            - decl: [used_ms, i64, { "*": [d_ticks, 10] }]
+            - set: [out.cpu_permille, { /: [{ "*": [used_ms, 1000] }, d_ms] }]
+            - return: out

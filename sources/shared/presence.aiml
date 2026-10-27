@@ -1,0 +1,106 @@
+# Presence — ist dieser Agent da? (doc/spec/104 §104.3)
+#
+# GETEILTER Code zwischen Server und Client (F104-8), nicht zweimal dieselbe
+# Regel: steht im Lauf "Agent weg", muss der Server denselben Schluss ziehen,
+# sonst teilt er einem Toten Schritte zu.  Zwei Implementierungen laufen
+# auseinander, diese nicht.
+#
+# Anwesenheit ist ABGELEITET, nicht gespeichert (F104-3): gerechnet gegen die
+# Server-Uhr aus dem Schnappschuss (F99-10).  Niemand schreibt "online" in ein
+# Feld, das stehen bleibt, wenn der Agent still verschwindet.
+
+- import: "sources/shared/node.aiml"
+
+- class:
+    name: Presence
+    methods:
+      # Vorgabefrist: dreimal der Herzschlag-Takt.  Kuerzer meldet jeden
+      # verpassten Schlag als Ausfall, laenger verschweigt einen echten.
+      - def:
+          name: timeout_ms
+          access: public
+          return: i64
+          body: [{ return: 15000 }]
+
+      - def:
+          name: is_online
+          access: public
+          static_off: ["str_cmp"]
+          args: [[node, Node], [now_ms, i64]]
+          return: i32
+          body:
+            - if: { condition: { eq: [node.agent_id.len, 0] }, then: [{ return: 0 }] }
+            - if: { condition: { le: [node.last_seen_ms, 0] }, then: [{ return: 0 }] }
+            - decl: [age, i64, { -: [now_ms, node.last_seen_ms] }]
+            # Eine Uhr, die rueckwaerts geht, heisst NICHT "anwesend": ein
+            # negatives Alter ist ein Fehler, kein frischer Schlag.
+            - if: { condition: { lt: [age, 0] }, then: [{ return: 0 }] }
+            - if: { condition: { lt: [age, { call: [<.timeout_ms] }] }, then: [{ return: 1 }] }
+            - return: 0
+
+      # F104-5: Zeichen UND Wort.  Farbe allein scheidet aus (wie F97-17).
+      - def:
+          name: mark
+          access: public
+          static_off: ["str_cmp"]
+          args: [[node, Node], [now_ms, i64]]
+          return: { type: string, lifetime: producer }
+          body:
+            - if: { condition: { eq: [node.agent_id.len, 0] }, then: [{ return: "  " }] }
+            - if: { condition: { eq: [{ call: [<.is_online, node, now_ms] }, 1] }, then: [{ return: "* " }] }
+            - return: "o "
+
+      - def:
+          name: phrase
+          access: public
+          static_off: ["str_cmp"]
+          args: [[node, Node], [now_ms, i64]]
+          return: { type: string, lifetime: producer }
+          body:
+            - if: { condition: { eq: [node.agent_id.len, 0] }, then: [{ return: "kein Agent" }] }
+            - if: { condition: { le: [node.last_seen_ms, 0] }, then: [{ return: "nie gesehen" }] }
+            - if: { condition: { eq: [{ call: [<.is_online, node, now_ms] }, 1] }, then: [{ return: "verbunden" }] }
+            - decl: [span, string, { call: [<.ago, node.last_seen_ms, now_ms] }]
+            - return: "weg seit ${span}"
+
+      # Alter in Worten.  Sekunden unterhalb einer Minute, darueber Minuten:
+      # "weg seit 312 s" laesst den Leser rechnen.
+      - def:
+          name: ago
+          access: public
+          static_off: ["str_cmp"]
+          args: [[then_ms, i64], [now_ms, i64]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [age, i64, { -: [now_ms, then_ms] }]
+            - if: { condition: { lt: [age, 0] }, then: [{ return: "?" }] }
+            - decl: [secs, i64, { /: [age, 1000] }]
+            - if: { condition: { lt: [secs, 60] }, then: [{ return: "${secs} s" }] }
+            - decl: [mins, i64, { /: [secs, 60] }]
+            - if: { condition: { lt: [mins, 60] }, then: [{ return: "${mins} min" }] }
+            - decl: [hours, i64, { /: [mins, 60] }]
+            - return: "${hours} h"
+
+      # F104-6: Jede Ansicht nennt das Alter ihres Schnappschusses, und eine
+      # veraltete Ansicht sagt es als GANZE — ein alter Wert sieht sonst aus
+      # wie ein aktueller.
+      - def:
+          name: stale_after_ms
+          access: public
+          return: i64
+          body: [{ return: 10000 }]
+
+      - def:
+          name: snapshot_line
+          access: public
+          static_off: ["str_cmp"]
+          args: [[taken_ms, i64], [now_ms, i64]]
+          return: { type: string, lifetime: producer }
+          body:
+            - if: { condition: { le: [taken_ms, 0] }, then: [{ return: "Stand: unbekannt" }] }
+            - decl: [age, i64, { -: [now_ms, taken_ms] }]
+            - decl: [span, string, { call: [<.ago, taken_ms, now_ms] }]
+            - if:
+                condition: { ge: [age, { call: [<.stale_after_ms] }] }
+                then: [{ return: "VERALTET — Stand vor ${span}" }]
+            - return: "Stand: vor ${span}"

@@ -1,0 +1,609 @@
+# rt_oci — CAS ⇄ OCI-Image (doc/spec/110 §110.25).
+#
+# Beide Richtungen, und das ist kein Zufall: ein Cut ist ein Baum, der ueber
+# seinen Inhalt adressiert ist, ein OCI-Image ist ein Baum aus Blobs, die ueber
+# ihren Inhalt adressiert sind.  Dieselbe Idee in zwei Formaten — also ist die
+# Wandlung eine Umschreibung, keine Uebersetzung mit Verlust.
+#
+#   export: Cut  → `blobs/sha256/*` + `index.json` + `oci-layout`
+#   import: Image → rootfs + fertiges cosmos-rt-Bundle
+#
+# Was NICHT verlustfrei geht, steht in §110.25: ein Cut ist EINE Schicht (seine
+# Geschichte liegt im step_key, nicht im Baum), und ein Image mit N Schichten
+# kommt als EIN rootfs zurueck.  Der Baum bleibt gleich, die Schichtung nicht.
+#
+# Beides laeuft IM NAMESPACE (F110-47): die Dateien eines Cuts gehoeren
+# abgebildeten Kennungen, draussen sind sie weder lesbar noch schreibbar.
+
+- import: "sources/runtime/rt_model_config.aiml"
+- import: "sources/runtime/rt_model_oci_img.aiml"
+- import: "sources/runtime/rt_model_oci_cfg.aiml"
+
+- class:
+    name: RtOci
+    members:
+      - [base,  string]    # Wurzel fuer den Hilfs-Container (deploy/rt_base)
+      - [rtbin, string]    # cosmos-rt
+      - [work,  string]    # Arbeitsverzeichnis (Bundle + Zwischendateien)
+      - [quiet, i32]
+    methods:
+      # abs_of: ein Mount und eine Wurzel brauchen einen ABSOLUTEN Pfad —
+      # cosmos-rt loest `root.path` sonst gegen das Bundle auf, nicht gegen das
+      # Arbeitsverzeichnis des Aufrufers (gemessen 18.10.2026).
+      - def:
+          name: abs_of
+          access: public
+          static_off: ["str_cmp"]
+          args: [[some, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - if: { condition: { eq: [{ call: [some.starts_with, "/"] }, 1] }, then: [{ return: some }] }
+            - return: "${{ call: [path.cwd] }}/${some}"
+
+      - def:
+          name: init
+          access: public
+          static_off: ["str_cmp"]
+          args: [[base_dir, string], [rt_bin, string], [work_dir, string]]
+          body:
+            - set: [<.base, { call: [<.abs_of, base_dir] }]
+            - set: [<.rtbin, rt_bin]
+            - set: [<.work, work_dir]
+            - call: [io.mkdir_all, work_dir]
+            # Die Bind-Ziele muessen in der Wurzel VORHANDEN sein: eine
+            # readonly-Wurzel kann sie nicht mehr anlegen.
+            - call: [io.mkdir_all, "${<.base}/src"]
+            - call: [io.mkdir_all, "${<.base}/out"]
+
+      # ns_run: einen Befehl im Namespace laufen lassen, /src gelesen, /out
+      # geschrieben.  Das Bundle schreibt diese Datei selbst — mit denselben
+      # Modellen, die cosmos-rt liest (kein zweites Format, kein Python).
+      - def:
+          name: ns_run
+          access: public
+          static_off: ["str_cmp"]
+          args: [[cmd, string], [src_dir, string], [out_dir, string]]
+          return: i32
+          body:
+            - decl: [bdir, string, "${<.work}/ns"]
+            - call: [io.remove_all, bdir]
+            - call: [io.mkdir_all, bdir]
+            - decl: [conf, RtConfig]
+            - set: [conf.ociVersion, "1.0.2"]
+            - set: [conf.hostname, "oci-wandler"]
+            - call: [conf.process.args.push, "/bin/sh"]
+            - call: [conf.process.args.push, "-c"]
+            - call: [conf.process.args.push, cmd]
+            - call: [conf.process.env.push, "PATH=/usr/sbin:/usr/bin:/sbin:/bin"]
+            - call: [conf.process.env.push, "LC_ALL=C"]
+            - set: [conf.process.cwd, "/"]
+            - set: [conf.process.noNewPrivileges, true]
+            - set: [conf.root.path, <.base]
+            - set: [conf.root.readonly, true]
+            - decl: [msrc, RtMount]
+            - set: [msrc.destination, "/src"]
+            - set: [msrc.source, { call: [<.abs_of, src_dir] }]
+            - call: [msrc.options.push, "rbind"]
+            - call: [msrc.options.push, "ro"]
+            - call: [conf.mounts.push, msrc]
+            - decl: [mout, RtMount]
+            - set: [mout.destination, "/out"]
+            - set: [mout.source, { call: [<.abs_of, out_dir] }]
+            - call: [mout.options.push, "rbind"]
+            - call: [conf.mounts.push, mout]
+            # /dev vom Wirt.  Die Wurzel des Wandlers ist readonly und bringt
+            # kein `/dev/null` mit — eine Umleitung nach /dev/null scheiterte
+            # darum mit „Read-only file system", und mit `set -e` nahm sie den
+            # ganzen Schnitt mit (doc/spec/110 F110-100).  Ein Kommando ohne
+            # /dev/null zu schreiben waere die unzuverlaessigere Haelfte der
+            # Loesung: das naechste brauchte es wieder.
+            - decl: [mdev, RtMount]
+            - set: [mdev.destination, "/dev"]
+            - set: [mdev.source, "/dev"]
+            - call: [mdev.options.push, "rbind"]
+            - call: [conf.mounts.push, mdev]
+            - decl: [nsp, RtNamespace]
+            - set: [nsp.type, "pid"]
+            - call: [conf.linux.namespaces.push, nsp]
+            - decl: [nsm, RtNamespace]
+            - set: [nsm.type, "mount"]
+            - call: [conf.linux.namespaces.push, nsm]
+            - decl: [nsu, RtNamespace]
+            - set: [nsu.type, "user"]
+            - call: [conf.linux.namespaces.push, nsu]
+            - decl: [nsi, RtNamespace]
+            - set: [nsi.type, "ipc"]
+            - call: [conf.linux.namespaces.push, nsi]
+            - decl: [nst, RtNamespace]
+            - set: [nst.type, "uts"]
+            - call: [conf.linux.namespaces.push, nst]
+
+            - decl: [style, JsonStyle]
+            - set: [style.bare, 1]
+            - set: [style.pretty, 1]
+            - call: [io.write_file, "${bdir}/config.json", { call: [sys.serialize, conf, style] }]
+
+            # `--build 1`: die Capabilities bleiben IM Namespace (F110-46).  Ohne
+            # sie kann `tar` weder fremde Eigentuemer setzen noch deren Dateien
+            # lesen — und genau das ist die Arbeit hier.
+            - decl: [argv, list<string>, [<.rtbin]]
+            - call: [argv.push, "--bundle"]
+            - call: [argv.push, bdir]
+            - call: [argv.push, "--build"]
+            - call: [argv.push, "1"]
+            - call: [argv.push, "--quiet"]
+            - call: [argv.push, "1"]
+            - decl: [proc, process, { call: [sys.exe, argv, { capture: true }] }]
+            - if:
+                condition: { eq: [proc, null] }
+                then: [{ call: [log.error, "[oci] ${<.rtbin} nicht startbar"] }, { return: -1 }]
+            - decl: [code, i32, { call: [proc.wait] }]
+            - if:
+                condition: { neq: [code, 0] }
+                then:
+                  - call: [log.error, "[oci] Namespace-Schritt endete mit ${code}"]
+                  - call: [log.error, "[oci] ${proc.stderr_buffer}"]
+            - return: code
+
+      # hex_of: "sha256:abcd…" → "abcd…".  Ein Digest ohne Algorithmus-Praefix
+      # ist kein Digest; ein Blob-Pfad mit Praefix ist kein Pfad.
+      - def:
+          name: hex_of
+          access: public
+          static_off: ["str_cmp"]
+          args: [[digest, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [mark, i32, { call: [digest.index_of, ":"] }]
+            - if: { condition: { lt: [mark, 0] }, then: [{ return: digest }] }
+            - return: { call: [digest.substr, { +: [mark, 1] }] }
+
+      # blob_text: einen kleinen Blob (JSON) ablegen.  Gehasht wird, was
+      # GESCHRIEBEN wird — nicht, was gemeint war.
+      - def:
+          name: blob_text
+          access: public
+          static_off: ["str_cmp"]
+          args: [[image, string], [body, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [hex, string, { call: [hash.sha256, body] }]
+            - call: [io.mkdir_all, "${image}/blobs/sha256"]
+            - call: [io.write_file, "${image}/blobs/sha256/${hex}", body]
+            - return: hex
+
+      # blob_file: eine grosse Datei zum Blob machen — stroemend gehasht
+      # (`sha256_file`), nicht in den Speicher geladen: eine Schicht ist
+      # hunderte Megabyte.
+      - def:
+          name: blob_file
+          access: public
+          static_off: ["str_cmp"]
+          args: [[image, string], [src, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [hex, string, { call: [hash.sha256_file, src] }]
+            - call: [io.mkdir_all, "${image}/blobs/sha256"]
+            - call: [io.rename, src, "${image}/blobs/sha256/${hex}"]
+            - return: hex
+
+      # stamp: RFC3339, denn das verlangt das Image-Format.  `time.format_utc`
+      # liefert "YYYY-MM-DD HH:MM" — daraus wird hier die genormte Form.
+      - def:
+          name: stamp
+          access: public
+          static_off: ["str_cmp"]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [raw, string, { call: [time.format_utc, { call: [time.now] }] }]
+            - decl: [iso, string, { call: [raw.replace, " ", "T"] }]
+            - return: "${iso}:00Z"
+
+      # ── Richtung 1: Cut → OCI-Image ─────────────────────────────────────
+      # Der Cut wird EINE Schicht.  Mehr waere eine Luege: seine Geschichte
+      # steht im step_key (doc/spec/96), nicht im Baum — und ein Image, das
+      # Schichten erfindet, die es nie gab, laesst sich nicht nachpruefen.
+      - def:
+          name: export_cut
+          access: public
+          static_off: ["str_cmp"]
+          args: [[cut, string], [image, string], [ref_name, string], [arch, string]]
+          return: i32
+          body:
+            # Ein LEERER Schnitt ist kein Abbild (gemessen 21.10.2026: ein
+            # vertippter Aufruf — `--cut` statt `--bundle` — exportierte ein
+            # leeres Verzeichnis IN ein vorhandenes Layout und ersetzte dessen
+            # `index.json` durch ein Manifest mit 96-Byte-Schicht.  Der Lauf
+            # darueber, 125 MB, war damit unerreichbar, obwohl seine Bloecke
+            # noch dalagen.  Ein Schreibzugriff, der ein Abbild still ENTWERTET,
+            # gehoert abgewiesen, nicht geloggt.)
+            - if:
+                condition: { eq: [{ call: [io.is_dir, cut] }, false] }
+                then: [{ call: [log.error, "[oci] ${cut} ist kein Verzeichnis"] }, { return: 1 }]
+            - decl: [probe, list<path>, { call: [io.list_dir, cut] }]
+            - if:
+                condition: { eq: [probe.len, 0] }
+                then:
+                  - call: [log.error, "[oci] ${cut} ist LEER — daraus wird kein Abbild"]
+                  - call: [log.error, "  Wolltest du HEREIN? Dann `--image ${image} --bundle ${cut}`."]
+                  - return: 1
+            - decl: [out_dir, string, "${<.work}/out"]
+            - call: [io.remove_all, out_dir]
+            - call: [io.mkdir_all, out_dir]
+            - call: [io.mkdir_all, "${image}/blobs/sha256"]
+
+            # `--sort=name` und `gzip -n`: ohne beides haengt die Adresse an der
+            # Lesereihenfolge des Dateisystems und am Zeitstempel im gzip-Kopf —
+            # derselbe Baum bekaeme zwei Digests.
+            - decl: [cmd, string, 'set -e; tar --numeric-owner --sort=name -C /src -cf /out/layer.tar .']
+            - set: [cmd, '${cmd}; sha256sum /out/layer.tar | cut -c1-64 > /out/diffid']
+            - set: [cmd, '${cmd}; gzip -n -6 /out/layer.tar']
+            - decl: [code, i32, { call: [<.ns_run, cmd, cut, out_dir] }]
+            - if: { condition: { neq: [code, 0] }, then: [{ return: 1 }] }
+
+            # diff_id = Digest des UNKOMPRIMIERTEN Tars (so verlangt es das
+            # Format), die Blob-Adresse die des komprimierten.
+            - decl: [diff_raw, string, { call: [io.read_file, "${out_dir}/diffid"] }]
+            - decl: [diff_id, string, { call: [diff_raw.trim] }]
+            - if:
+                condition: { neq: [diff_id.len, 64] }
+                then: [{ call: [log.error, "[oci] kein diff_id (${diff_id.len} Zeichen)"] }, { return: 1 }]
+            - decl: [gzip_at, string, "${out_dir}/layer.tar.gz"]
+            - decl: [lsize, i64, { call: [io.file_size, gzip_at] }]
+            - decl: [lhex, string, { call: [<.blob_file, image, gzip_at] }]
+
+            - decl: [style, JsonStyle]
+            - set: [style.bare, 1]
+            # spec/29 §5.2c: die Image-Spec sagt zu `variant` „SHOULD be omitted
+            # if unknown"; `annotations: {}` und `Entrypoint: []` sind fuer
+            # fremde Leser Ballast.  Ein Modell hat kein „nicht gesetzt" — der
+            # Stil macht daraus eines.
+            - set: [style.skip_empty, 1]
+
+            - decl: [icfg, OciImgCfg]
+            - set: [icfg.architecture, arch]
+            - set: [icfg.osname, "linux"]
+            - set: [icfg.created, { call: [<.stamp] }]
+            - call: [icfg.rootfs.diff_ids.push, "sha256:${diff_id}"]
+            - call: [icfg.config.Env.push, "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"]
+            - call: [icfg.config.Cmd.push, "/bin/sh"]
+            - decl: [cfg_json, string, { call: [sys.serialize, icfg, style] }]
+            - decl: [chex, string, { call: [<.blob_text, image, cfg_json] }]
+
+            - decl: [man, OciManifest]
+            - set: [man.config.mediaType, "application/vnd.oci.image.config.v1+json"]
+            - set: [man.config.digest, "sha256:${chex}"]
+            - set: [man.config.size, { cast: [cfg_json.len, i64] }]
+            - decl: [lay, OciDesc]
+            - set: [lay.mediaType, "application/vnd.oci.image.layer.v1.tar+gzip"]
+            - set: [lay.digest, "sha256:${lhex}"]
+            - set: [lay.size, lsize]
+            - call: [man.layers.push, lay]
+            - decl: [man_json, string, { call: [sys.serialize, man, style] }]
+            - decl: [mhex, string, { call: [<.blob_text, image, man_json] }]
+
+            - decl: [idx, OciIndex]
+            - decl: [mref, OciRef]
+            - set: [mref.mediaType, "application/vnd.oci.image.manifest.v1+json"]
+            - set: [mref.digest, "sha256:${mhex}"]
+            - set: [mref.size, { cast: [man_json.len, i64] }]
+            - set: [mref.platform.architecture, arch]
+            - set: [mref.platform.osname, "linux"]
+            - if:
+                condition: { gt: [ref_name.len, 0] }
+                then: [{ call: [mref.annotations.put, "org.opencontainers.image.ref.name", ref_name] }]
+            - call: [idx.manifests.push, mref]
+            - decl: [pstyle, JsonStyle]
+            - set: [pstyle.bare, 1]
+            - set: [pstyle.pretty, 1]
+            - set: [pstyle.skip_empty, 1]
+            - call: [io.write_file, "${image}/index.json", { call: [sys.serialize, idx, pstyle] }]
+            - decl: [lout, OciLayout]
+            - call: [io.write_file, "${image}/oci-layout", { call: [sys.serialize, lout, style] }]
+            - call: [io.remove_all, out_dir]
+
+            - if:
+                condition: { eq: [<.quiet, 0] }
+                then:
+                  - call: [log.info, "[oci] Schicht  sha256:${lhex} (${lsize} B, diff_id sha256:${diff_id})"]
+                  - call: [log.info, "[oci] Manifest sha256:${mhex}"]
+                  - call: [log.info, "[oci] ${image} — mit `skopeo copy oci:${image} …` uebertragbar"]
+            - return: 0
+
+      # ── Richtung 2: OCI-Image → rootfs + Bundle ─────────────────────────
+      # Die Schichten werden IN DER REIHENFOLGE aufgelegt, mit Whiteouts: eine
+      # obere Schicht kann eine Datei LOESCHEN (`.wh.name`) oder einen ganzen
+      # Ordner opak machen (`.wh..wh..opq`).  Wer das ueberspringt, bekommt
+      # geloeschte Dateien zurueck — und das ist der haeufigste Fehler in
+      # selbstgebauten Image-Lesern.
+      # ── export_layers: ein Abbild aus den SCHICHTEN eines Laufs ─────────
+      # (doc/spec/110 F110-95)
+      #
+      # Statt einer Scheibe ueber die ganze Wurzel wird jede Stufe zu ihrer
+      # eigenen Schicht.  Zwei Dinge sind dabei nicht offensichtlich:
+      #
+      #   * overlayfs markiert Geloeschtes als GERAETEDATEI (0:0), OCI erwartet
+      #     eine Datei `.wh.<name>`.  Ohne die Umsetzung verschwindet beim
+      #     Import keine Datei, sondern es erscheint eine kaputte Geraetedatei —
+      #     eine Loeschung ginge still verloren.
+      #   * Umgesetzt wird in einer HARDLINK-Kopie (`cp -al`), nicht im
+      #     Original: die Schicht soll den Export ueberleben, damit ein
+      #     Wiedereinstieg sie noch auflegen kann.  Hardlinks kosten nichts,
+      #     auch bei 1,5 GB.
+      - def:
+          name: export_layers
+          access: public
+          static_off: ["str_cmp"]
+          args: [[layers, string], [image, string], [ref_name, string], [arch, string]]
+          return: i32
+          body:
+            - if:
+                condition: { eq: [{ call: [io.is_dir, layers] }, false] }
+                then: [{ call: [log.error, "[oci] ${layers} ist kein Verzeichnis"] }, { return: 1 }]
+            - call: [io.mkdir_all, "${image}/blobs/sha256"]
+            - decl: [icfg, OciImgCfg]
+            - set: [icfg.architecture, arch]
+            - set: [icfg.osname, "linux"]
+            - set: [icfg.created, { call: [<.stamp] }]
+            - call: [icfg.config.Env.push, "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"]
+            - call: [icfg.config.Cmd.push, "/bin/sh"]
+            - decl: [man, OciManifest]
+            - decl: [nix, i32, 0]
+            - decl: [built, i32, 0]
+            - while:
+                condition: { lt: [nix, 256] }
+                body:
+                  - decl: [updir, string, "${layers}/${nix}/upper"]
+                  - decl: [up_p, path, updir]
+                  - set: [nix, { +: [nix, 1] }]
+                  - if:
+                      condition: { eq: [{ call: [io.is_dir, up_p] }, true] }
+                      then:
+                        - decl: [out_dir, string, "${<.work}/lay"]
+                        - call: [io.remove_all, out_dir]
+                        - call: [io.mkdir_all, out_dir]
+                        - decl: [cmd, string, 'set -e; rm -rf /out/w; mkdir -p /out/w; cp -al /src/. /out/w/ 2>/dev/null || cp -a /src/. /out/w/']
+                        # Gerätedatei 0:0 → `.wh.<name>` (OCI).
+                        - set: [cmd, '${cmd}; cd /out/w; find . -type c | while read -r w; do mm=$(stat -c "%t %T" "$w" 2>/dev/null); if [ "$mm" = "0 0" ]; then rm -f "$w"; : > "$(dirname "$w")/.wh.$(basename "$w")"; fi; done']
+                        - set: [cmd, '${cmd}; tar --numeric-owner --sort=name -C /out/w -cf /out/layer.tar .']
+                        - set: [cmd, '${cmd}; sha256sum /out/layer.tar | cut -c1-64 > /out/diffid; gzip -n -6 /out/layer.tar; rm -rf /out/w']
+                        - decl: [code, i32, { call: [<.ns_run, cmd, updir, out_dir] }]
+                        - if:
+                            condition: { neq: [code, 0] }
+                            then: [{ call: [log.error, "[oci] Schicht ${updir} liess sich nicht schneiden"] }, { return: 1 }]
+                        - decl: [diff_raw, string, { call: [io.read_file, "${out_dir}/diffid"] }]
+                        - decl: [diff_id, string, { call: [diff_raw.trim] }]
+                        - if:
+                            condition: { neq: [diff_id.len, 64] }
+                            then: [{ call: [log.error, "[oci] Schicht ohne diff_id"] }, { return: 1 }]
+                        - decl: [gz_at, string, "${out_dir}/layer.tar.gz"]
+                        - decl: [lsz, i64, { call: [io.file_size, gz_at] }]
+                        - decl: [lhex, string, { call: [<.blob_file, image, gz_at] }]
+                        - call: [icfg.rootfs.diff_ids.push, "sha256:${diff_id}"]
+                        - decl: [lay, OciDesc]
+                        - set: [lay.mediaType, "application/vnd.oci.image.layer.v1.tar+gzip"]
+                        - set: [lay.digest, "sha256:${lhex}"]
+                        - set: [lay.size, lsz]
+                        - call: [man.layers.push, lay]
+                        - set: [built, { +: [built, 1] }]
+                        - if: { condition: { eq: [<.quiet, 0] }, then: [{ call: [log.info, "[oci] Schicht ${built}: ${lsz} B (diff_id sha256:${diff_id})"] }] }
+            - if:
+                condition: { eq: [built, 0] }
+                then: [{ call: [log.error, "[oci] keine Schichten unter ${layers} — daraus wird kein Abbild"] }, { return: 1 }]
+            - decl: [style, JsonStyle]
+            - set: [style.bare, 1]
+            - set: [style.skip_empty, 1]
+            - decl: [cfg_json, string, { call: [sys.serialize, icfg, style] }]
+            - decl: [chex, string, { call: [<.blob_text, image, cfg_json] }]
+            - set: [man.config.mediaType, "application/vnd.oci.image.config.v1+json"]
+            - set: [man.config.digest, "sha256:${chex}"]
+            - set: [man.config.size, { cast: [cfg_json.len, i64] }]
+            - decl: [man_json, string, { call: [sys.serialize, man, style] }]
+            - decl: [mhex, string, { call: [<.blob_text, image, man_json] }]
+            - decl: [idx, OciIndex]
+            - decl: [mref, OciRef]
+            - set: [mref.mediaType, "application/vnd.oci.image.manifest.v1+json"]
+            - set: [mref.digest, "sha256:${mhex}"]
+            - set: [mref.size, { cast: [man_json.len, i64] }]
+            - set: [mref.platform.architecture, arch]
+            - set: [mref.platform.osname, "linux"]
+            - if:
+                condition: { gt: [ref_name.len, 0] }
+                then: [{ call: [mref.annotations.put, "org.opencontainers.image.ref.name", ref_name] }]
+            - call: [idx.manifests.push, mref]
+            - decl: [pstyle, JsonStyle]
+            - set: [pstyle.bare, 1]
+            - set: [pstyle.pretty, 1]
+            - set: [pstyle.skip_empty, 1]
+            - call: [io.write_file, "${image}/index.json", { call: [sys.serialize, idx, pstyle] }]
+            - decl: [lout, OciLayout]
+            - set: [lout.imageLayoutVersion, "1.0.0"]
+            - call: [io.write_file, "${image}/oci-layout", { call: [sys.serialize, lout, pstyle] }]
+            - if:
+                condition: { eq: [<.quiet, 0] }
+                then:
+                  - call: [log.info, "[oci] ${built} Schicht(en) → Manifest sha256:${mhex}"]
+            - return: 0
+
+      - def:
+          name: import_image
+          access: public
+          static_off: ["str_cmp"]
+          args: [[image, string], [bundle, string], [arch, string]]
+          return: i32
+          body:
+            - decl: [idx_raw, string, { call: [io.read_file, "${image}/index.json"] }]
+            - if:
+                condition: { eq: [idx_raw.len, 0] }
+                then: [{ call: [log.error, "[oci] ${image}/index.json fehlt — kein Image-Layout"] }, { return: 1 }]
+            - decl: [idx, OciIndex, { call: [sys.deserialize, idx_raw, "OciIndex"] }]
+            - if:
+                condition: { eq: [idx.manifests.len, 0] }
+                then: [{ call: [log.error, "[oci] index.json nennt kein Manifest"] }, { return: 1 }]
+
+            # Plattformwahl: ein Index kann x86_64 UND aarch64 fuehren.  Ohne
+            # Wunsch nimmt der erste Eintrag — mit Wunsch nur der passende.
+            - decl: [pick, OciRef]
+            - decl: [found, i32, 0]
+            - decl: [idi, i32, 0]
+            - while:
+                condition: { lt: [idi, idx.manifests.len] }
+                body:
+                  - decl: [cand, OciRef, { at: [idx.manifests, idi] }]
+                  - set: [idi, { +: [idi, 1] }]
+                  - if:
+                      condition: { eq: [found, 0] }
+                      then:
+                        - if:
+                            condition: { '||': [{ eq: [arch.len, 0] }, { eq: [cand.platform.architecture, arch] }] }
+                            then: [{ set: [pick, cand] }, { set: [found, 1] }]
+            - if:
+                condition: { eq: [found, 0] }
+                then: [{ call: [log.error, "[oci] kein Manifest fuer ${arch}"] }, { return: 1 }]
+
+            - decl: [mhex, string, { call: [<.hex_of, pick.digest] }]
+            - decl: [man_raw, string, { call: [io.read_file, "${image}/blobs/sha256/${mhex}"] }]
+            - if:
+                condition: { eq: [man_raw.len, 0] }
+                then: [{ call: [log.error, "[oci] Blob ${mhex} fehlt"] }, { return: 1 }]
+            - decl: [man, OciManifest, { call: [sys.deserialize, man_raw, "OciManifest"] }]
+            - if:
+                condition: { eq: [man.layers.len, 0] }
+                then: [{ call: [log.error, "[oci] Manifest ohne Schichten"] }, { return: 1 }]
+
+            - decl: [chex, string, { call: [<.hex_of, man.config.digest] }]
+            - decl: [cfg_raw, string, { call: [io.read_file, "${image}/blobs/sha256/${chex}"] }]
+            - decl: [icfg, OciImgCfg, { call: [sys.deserialize, cfg_raw, "OciImgCfg"] }]
+
+            - call: [io.mkdir_all, "${bundle}/rootfs"]
+            - decl: [lix, i32, 0]
+            - while:
+                condition: { lt: [lix, man.layers.len] }
+                body:
+                  - decl: [lay, OciDesc, { at: [man.layers, lix] }]
+                  - decl: [lhex, string, { call: [<.hex_of, lay.digest] }]
+                  - set: [lix, { +: [lix, 1] }]
+                  # `tar -xf` erkennt gzip/zstd selbst — darum trennt dieser
+                  # Zweig nicht nach Medientyp: Docker nennt dieselbe Schicht
+                  # anders als OCI, der Inhalt ist derselbe.
+                  - decl: [cmd, string, 'set -e; rm -rf /out/.lay; mkdir -p /out/.lay /out/rootfs']
+                  - set: [cmd, '${cmd}; tar --numeric-owner -xf /src/blobs/sha256/${lhex} -C /out/.lay; cd /out/.lay']
+                  # Opake Ordner zuerst: der Marker sagt „was unten liegt, gilt
+                  # nicht mehr" — also leeren, BEVOR diese Schicht einzieht.
+                  - set: [cmd, '${cmd}; find . -name ".wh..wh..opq" | while read -r mrk; do dir=$(dirname "$mrk"); rm -rf "/out/rootfs/$dir"; mkdir -p "/out/rootfs/$dir"; rm -f "$mrk"; done']
+                  - set: [cmd, '${cmd}; find . -name ".wh.*" | while read -r wht; do tgt=$(dirname "$wht")/$(basename "$wht" | cut -c5-); rm -rf "/out/rootfs/$tgt"; rm -f "$wht"; done']
+                  - set: [cmd, '${cmd}; cp -a /out/.lay/. /out/rootfs/; rm -rf /out/.lay']
+                  - decl: [code, i32, { call: [<.ns_run, cmd, image, bundle] }]
+                  - if:
+                      condition: { neq: [code, 0] }
+                      then: [{ call: [log.error, "[oci] Schicht ${lhex} liess sich nicht auflegen"] }, { return: 1 }]
+
+            - decl: [wrote, i32, { call: [<.write_bundle, bundle, icfg] }]
+            - if: { condition: { neq: [wrote, 0] }, then: [{ return: 1 }] }
+            - if:
+                condition: { eq: [<.quiet, 0] }
+                then:
+                  - call: [log.info, "[oci] ${man.layers.len} Schicht(en) → ${bundle}/rootfs"]
+                  - call: [log.info, "[oci] startklar: ${<.rtbin} --bundle ${bundle}"]
+            - return: 0
+
+      # write_bundle: aus der Image-Konfiguration ein cosmos-rt-Bundle.  Das ist
+      # der Punkt, an dem ein fremdes Image LAUFFAEHIG wird und nicht nur
+      # entpackt daliegt — Entrypoint, Cmd, Env und WorkingDir sind genau die
+      # Angaben, die ein Image ueber seinen Start macht.
+      - def:
+          name: write_bundle
+          access: public
+          static_off: ["str_cmp"]
+          args: [[bundle, string], [icfg, OciImgCfg]]
+          return: i32
+          body:
+            - decl: [conf, RtConfig]
+            - set: [conf.ociVersion, "1.0.2"]
+            - set: [conf.hostname, "oci-import"]
+            - decl: [eix, i32, 0]
+            - while:
+                condition: { lt: [eix, icfg.config.Entrypoint.len] }
+                body:
+                  - call: [conf.process.args.push, { at: [icfg.config.Entrypoint, eix] }]
+                  - set: [eix, { +: [eix, 1] }]
+            - decl: [cix, i32, 0]
+            - while:
+                condition: { lt: [cix, icfg.config.Cmd.len] }
+                body:
+                  - call: [conf.process.args.push, { at: [icfg.config.Cmd, cix] }]
+                  - set: [cix, { +: [cix, 1] }]
+            - if:
+                condition: { eq: [conf.process.args.len, 0] }
+                then: [{ call: [conf.process.args.push, "/bin/sh"] }]
+            - decl: [vix, i32, 0]
+            - while:
+                condition: { lt: [vix, icfg.config.Env.len] }
+                body:
+                  - call: [conf.process.env.push, { at: [icfg.config.Env, vix] }]
+                  - set: [vix, { +: [vix, 1] }]
+            - if:
+                condition: { eq: [conf.process.env.len, 0] }
+                then: [{ call: [conf.process.env.push, "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"] }]
+            - set: [conf.process.cwd, "/"]
+            - if: { condition: { gt: [icfg.config.WorkingDir.len, 0] }, then: [{ set: [conf.process.cwd, icfg.config.WorkingDir] }] }
+            - set: [conf.process.noNewPrivileges, true]
+            - set: [conf.root.path, "rootfs"]
+            - set: [conf.root.readonly, false]
+
+            # Ein Image-rootfs bringt ein LEERES /dev mit — die Geraete bindet
+            # der Host hinein, und ein Bind braucht ein vorhandenes Ziel
+            # (F110-45: ohne /dev/urandom stirbt schon apts HTTP-Helfer).
+            - call: [io.mkdir_all, "${bundle}/rootfs/dev"]
+            - decl: [devs, list<string>, ["null"]]
+            - call: [devs.push, "zero"]
+            - call: [devs.push, "full"]
+            - call: [devs.push, "random"]
+            - call: [devs.push, "urandom"]
+            - decl: [dix, i32, 0]
+            - while:
+                condition: { lt: [dix, devs.len] }
+                body:
+                  - decl: [dev, string, { at: [devs, dix] }]
+                  - set: [dix, { +: [dix, 1] }]
+                  - if:
+                      condition: { eq: [{ call: [io.is_file, "${bundle}/rootfs/dev/${dev}"] }, false] }
+                      then: [{ call: [io.write_file, "${bundle}/rootfs/dev/${dev}", ""] }]
+                  - decl: [mdev, RtMount]
+                  - set: [mdev.destination, "/dev/${dev}"]
+                  - set: [mdev.source, "/dev/${dev}"]
+                  - call: [mdev.options.push, "bind"]
+                  - call: [conf.mounts.push, mdev]
+            - decl: [mproc, RtMount]
+            - set: [mproc.destination, "/proc"]
+            - set: [mproc.type, "proc"]
+            - set: [mproc.source, "proc"]
+            - call: [conf.mounts.push, mproc]
+            - decl: [mtmp, RtMount]
+            - set: [mtmp.destination, "/tmp"]
+            - set: [mtmp.type, "tmpfs"]
+            - set: [mtmp.source, "tmpfs"]
+            - call: [mtmp.options.push, "nosuid"]
+            - call: [mtmp.options.push, "nodev"]
+            - call: [mtmp.options.push, "mode=1777"]
+            - call: [conf.mounts.push, mtmp]
+            - decl: [kinds, list<string>, ["pid"]]
+            - call: [kinds.push, "mount"]
+            - call: [kinds.push, "user"]
+            - call: [kinds.push, "ipc"]
+            - call: [kinds.push, "uts"]
+            - decl: [kix, i32, 0]
+            - while:
+                condition: { lt: [kix, kinds.len] }
+                body:
+                  - decl: [nsx, RtNamespace]
+                  - set: [nsx.type, { at: [kinds, kix] }]
+                  - call: [conf.linux.namespaces.push, nsx]
+                  - set: [kix, { +: [kix, 1] }]
+            - call: [conf.linux.maskedPaths.push, "/proc/sysrq-trigger"]
+
+            - decl: [style, JsonStyle]
+            - set: [style.bare, 1]
+            - set: [style.pretty, 1]
+            - call: [io.write_file, "${bundle}/config.json", { call: [sys.serialize, conf, style] }]
+            - return: 0

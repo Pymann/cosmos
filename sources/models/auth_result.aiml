@@ -1,0 +1,16 @@
+# AuthResult — gemeinsame Antwort-Struktur für alle Auth-RPCs
+# (submit_register / submit_login / validate_token).
+#
+# Vertrag:
+#   success=1 → token + email gesetzt, message ist begrüßende Notiz
+#   success=0 → token="", email="", message ist Fehlertext zur Anzeige
+
+- model:
+    name: AuthResult
+    fields:
+      - [success, i32]
+      - [message, string]
+      - [token,   string]
+      - [email,   string]
+      - [display_name, string]   # Nickname — Client cached ihn als g_nick (In-Game-Anzeige)
+      - [player_id,    string]   # opake Konten-Identität — Client cached als g_pid

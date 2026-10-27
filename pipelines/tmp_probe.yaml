@@ -1,0 +1,8 @@
+- pipeline:
+    name: tmp_probe
+    image: ubuntu-base
+    steps:
+      - stage:
+          name: tmp_schreiben
+          timeout: 120000
+          run: "set -e; ls -ld /tmp; su -s /bin/sh _apt -c 'echo test > /tmp/als_apt' && echo 'als _apt schreibbar'; apt-get update -o Acquire::Retries=0 2>&1 | tail -5"

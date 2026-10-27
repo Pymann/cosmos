@@ -1,0 +1,45 @@
+# RPC-Modelle der Agenten-Einrichtung (doc/spec/94 §94.5a).
+#
+# Static-Check (spec/49 §14): 2 models.
+
+# ProvisionReq — was die Oberfläche schickt.
+#
+# `sudo_password` ist das empfindlichste Feld im ganzen System: es öffnet den
+# Knoten vollständig und lässt sich, anders als ein Token, nicht widerrufen.
+# Es wird nicht gespeichert, nicht geloggt und geht auf dem Knoten über stdin
+# (§94.3 S1-S3).
+#
+# `expected_fp` leer = Phase 1 ("ich kenne den Knoten noch nicht"): der Server
+# liefert den Fingerprint zum Anzeigen und führt KEINEN Schritt aus.
+- model:
+    name: ProvisionReq
+    fields:
+      - [token,          string]   # Sitzung des angemeldeten Nutzers
+      - [host,           string]
+      - [port,           i32]
+      - [login_user,     string]
+      - [login_password, string]   # leer = Schlüssel/Agent versuchen
+      - [sudo_password,  string]
+      - [expected_fp,    string]
+      - [label,          string]   # Beschriftung des Enrollment-Tokens
+      - [agent_id,       string]   # Name des Agenten (--agent-id)
+      - [agent_labels,   string]   # Etiketten (--labels), kommagetrennt
+      - [token_id,       string]   # nur beim Rueckbau: dieses Token widerrufen
+
+# ProvisionResp — was die Oberfläche anzeigt.
+#
+# `token_id` nennt nur die Kennung des erzeugten Enrollment-Tokens, nie das
+# Geheimnis: das verlässt den Server ausschliesslich über den SSH-Kanal zum
+# Knoten (§AP1.9).
+- model:
+    name: ProvisionResp
+    fields:
+      - [success,     i32]
+      - [failed_step, string]
+      - [message,     string]
+      - [fingerprint, string]
+      - [steps_done,  i32]
+      - [token_id,    string]
+      # 1 = der Auftrag laeuft noch.  Die Einrichtung ist nebenlaeufig, damit
+      # der Server waehrenddessen antwortet (doc/spec/94).
+      - [running,     i32]

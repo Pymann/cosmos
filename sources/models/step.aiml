@@ -1,0 +1,50 @@
+# Schritt-Modell (doc/spec/91 §AP2.D, Scheibe 3).
+#
+# Static-Check (spec/49 §14): 2 models.
+
+# Ein Schritt ist eine inhaltsadressierte Aktion.  `body` ist die Shell-Zeile
+# ODER die aiml-Quelle — beides wird gehasht, damit ein aiml-Schritt genauso
+# cachebar ist wie ein Shell-Schritt (§AP2.D).  WIE ein Knoten aiml ausführt
+# (Subprozess, in-process, vorkompiliert) ist Eigenschaft des Knotens, nicht
+# des Schritts, und steht deshalb nicht hier.
+- model:
+    name: StepDef
+    fields:
+      - [kind,       string]        # "shell" | "aiml"
+      - [body,       string]
+      - [input_tree, string]        # tree_id ("" = kein Input)
+      - [cwd,        string]
+      - [env,        list<string>]  # beruecksichtigte Variablen als "k=v"
+      # Wiederverwendungsklasse und Sonde (doc/spec/92 §92.2, §96.6; aiml
+      # spec/62 §7/§9).  Vorgabe ist 0 = opaque: wer Wiederverwendung will,
+      # sagt es — nicht umgekehrt.
+      - [cache_class, i32]           # 0 opaque | 1 resolved | 2 pure
+      - [resolve,     string]        # der Sondenbefehl (NICHT im Schluessel)
+      - [resolve_out, string]        # ihr Ergebnis ("" = nicht aufgeloest)
+      # WORIN der Schritt laeuft (aiml spec/62 §18, F62-66/67): die Umgebung ist
+      # Schluesselmaterial.  Eingetragen wird die DIGEST des Abbilds, nicht sein
+      # Name oder Pfad (F62-130) — ein Name bewegt sich, der Inhalt nicht.
+      # "" heisst: gegen den Rechner, und das ist auch eine Umgebung.
+      - [image_digest, string]
+      # WELCHE Freigaben eingehaengt waren (aiml spec/62 §18.1b, F62-139):
+      # "name:/ziel:modus,…".  Name und Ziel gehoeren zum Schluessel — derselbe
+      # Befehl mit und ohne `/mnt/quellen` ist nicht derselbe Schritt.  Der
+      # INHALT der Freigabe gehoert NICHT dazu; er ist nicht messbar, und eine
+      # Aufzeichnung, die so taete, waere eine Luege ueber die
+      # Reproduzierbarkeit.  Genau darum ist die Vorgabe `opaque`.
+      - [shares,       string]
+
+# Ergebnis einer Schritt-Abfrage bzw. -Aufzeichnung.
+#
+# `cached = 1` heisst: der Schritt wurde NICHT ausgefuehrt, das Ergebnis kommt
+# aus dem ActionCache.  `exit_code != 0` wird mitgecacht — ein reproduzierbarer
+# Fehlschlag ist ein Ergebnis (doc/spec/92 §92.2).
+- model:
+    name: StepOutcome
+    fields:
+      - [cached,      i32]
+      - [step_key,    string]
+      - [output_tree, string]
+      - [exit_code,   i32]
+      - [out_bytes,   i64]
+      - [err_bytes,   i64]

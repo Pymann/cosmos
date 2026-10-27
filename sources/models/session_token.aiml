@@ -1,0 +1,9 @@
+# SessionToken — serverseitige Sitzungs-Metadaten zu einem Token (Lücke 3: Token-Ablauf).
+# tokens-KV bleibt token→email (unverändert); dieses parallele KV token→SessionToken trägt
+# den Ablaufzeitpunkt, damit handle_validate abgelaufene Tokens serverseitig verwerfen kann.
+# i64-Feld statt String → kein String→i64-Parsing nötig (es gibt nur parse_i32).
+
+- model:
+    name: SessionToken
+    fields:
+      - [expires_at, i64]   # time.now-Millisekunden, ab denen das Token ungültig ist (0 = nie)

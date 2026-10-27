@@ -1,0 +1,30 @@
+# Die OCI-Konfiguration als Modelle (doc/spec/110 §110.1).
+#
+# Die Feldnamen heißen EXAKT wie im JSON (`ociVersion`, `noNewPrivileges`,
+# `maskedPaths`).  Das weicht von der Schreibweise des Projekts ab und ist
+# Absicht: eine Umbenennung wäre eine zweite Namenstabelle, die bei jeder
+# Erweiterung der OCI-Spec nachgepflegt werden müsste.
+#
+# Drei Typen je Datei (aiml spec/49 §14) — daher die Aufteilung.
+
+- model:
+    name: RtUser
+    fields:
+      - [uid, i32]
+      - [gid, i32]
+
+- model:
+    name: RtProcess
+    fields:
+      - [terminal, bool]
+      - [user,     RtUser]
+      - [args,     list<string>]
+      - [env,      list<string>]
+      - [cwd,      string]
+      - [noNewPrivileges, bool]
+
+- model:
+    name: RtRoot
+    fields:
+      - [path,     string]
+      - [readonly, bool]

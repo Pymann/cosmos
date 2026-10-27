@@ -1,0 +1,27 @@
+# Betriebssicht (doc/spec/99): Agenten, geöffnete Speicher, Verbindungen.
+#
+# Ein Schnappschuss je Takt, mit seinem ZEITPUNKT (F99-10): die Oberfläche
+# rechnet das Alter daraus und nicht aus der eigenen Uhr, weil die Uhren
+# auseinanderlaufen.  Ohne Alter sieht eine eingefrorene Sicht gesund aus.
+
+- model:
+    name: KvStoreInfo
+    fields:
+      - [name,      string]
+      - [path,      string]
+      - [wal_used,  i64]
+      - [entries,   i64]
+      - [writes,    i64]   # Zaehler, kein Zeitstempel (aiml spec/31)
+
+- model:
+    name: ConnSummary
+    fields:
+      - [authenticated,   i32]   # Zahl der angemeldeten Verbindungen
+      - [unauthenticated, i32]   # F99-8: gezaehlt, nicht einzeln aufgefuehrt
+
+- model:
+    name: LiveView
+    fields:
+      - [taken_ms, i64]              # Server-Uhr beim Schnappschuss (F99-10)
+      - [stores,   list<KvStoreInfo>]
+      - [conns,    ConnSummary]

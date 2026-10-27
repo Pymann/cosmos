@@ -1,0 +1,26 @@
+# Praeambel, die die Konsole dem Nutzer-Quelltext VORANSTELLT (doc/spec/108 F108-9).
+# Kein `level:` hier — das waere Selbstbeglaubigung (spec/65 F65-6) und wuerde den Lauf
+# ablehnen.  Die Level stehen in der Angebots-Tabelle, also beim Wirt.
+- extern: "C"
+  defs:
+    - def:
+        name: cosmos_whoami
+        args: []
+        return: string
+    - def:
+        name: cosmos_cluster_summary
+        args: []
+        return: string
+
+# --- ab hier der Quelltext des Nutzers ---
+- def:
+    name: main
+    return: i32
+    body:
+      - decl: [who, string, { call: [cosmos_whoami] }]
+      - decl: [sum, string, { call: [cosmos_cluster_summary] }]
+      - call: [log.info, "actor=${who}"]
+      - call: [log.info, "cluster=${sum}"]
+      - if: { condition: { eq: [who.len, 0] }, then: [{ return: [1] }] }
+      - if: { condition: { eq: [sum.len, 0] }, then: [{ return: [2] }] }
+      - return: [0]

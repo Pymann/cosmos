@@ -1,0 +1,161 @@
+# cosmos Static-Host — serves the WASM client bundle (out/client/).
+#
+# Third binary of the browser-game triad:
+#   - game server (exodus-game.json)  → ws://0.0.0.0:8765  (match logic)
+#   - static host (this)              → http://0.0.0.0:8080 (client.html/.js/.wasm/.data)
+#   - wasm client (exodus-client.json) → built into out/client/
+#
+# Pairs with `exodus-client.json`; the WASM build (config name "client", no
+# artifact_in_cwd) emits into out/client/, which this server mounts at "/".
+# Run alongside the game server: game on 8765 (ws), this on 8080 (http).
+#
+# Auto-called by the C entry-point (AIML_STRICT_TOPLEVEL=1).
+
+- import: "sources/models/server_list.aiml"
+
+# Log-Brücke: der WASM-Client (shell.html) POSTet seine console-Ausgaben +
+# Fehler nach /log; wir schreiben sie in stdout (→ logs/static.log via
+# run_web.sh) mit [BROWSER]-Präfix, damit die Runtime-Logs des Browser-Clients
+# hier lesbar sind wie logs/menu.log nativ.  Grep: `grep BROWSER logs/static.log`.
+- def:
+    name: browser_log_handler
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - call: [log.info, "[BROWSER] ${req.body}"]
+      - set: [resp.status, 200]
+      - set: [resp.body, "ok"]
+      - call: [resp.send]
+
+# Discovery-Endpoint: der Client fragt GET /servers.json ab und bekommt die
+# Liste verbindbarer Game-Server (wss://…).  Inhalt aus Env COSMOS_SERVERS
+# (ein fertiges JSON), sonst ein Default, der same-origin wss:// annimmt.  So
+# ist die Serverwahl flexibel, ohne im Client hardcoded zu sein.
+- def:
+    name: servers_handler
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      # Override via Env COSMOS_SERVERS (fertiges sys.serialize-JSON), sonst die
+      # Default-Liste als Models bauen + sys.serialize (yyjson).  map.get → null bei
+      # fehlendem Key → contains-guard (sonst .len-Crash).
+      - decl: [envm, map<string:string>, { call: [sys.env] }]
+      - decl: [list_json, string, ""]
+      - if: { condition: { gt: [{ call: [envm.contains, "COSMOS_SERVERS"] }, 0] }, then: [{ set: [list_json, { call: [envm.get, "COSMOS_SERVERS"] }] }] }
+      - if:
+          condition: { eq: [list_json.len, 0] }
+          then:
+            # Single derived-local entry: game server at the Host-header host, port 8765,
+            # scheme following the static host TLS mode (https page -> wss, else ws).
+            - decl: [lst, ServerList]
+            - decl: [scheme, string, "ws"]
+            - if: { condition: { gt: [{ call: [envm.contains, "COSMOS_TLS_CERT"] }, 0] }, then: [{ set: [scheme, "wss"] }] }
+            - decl: [host_name, string, "127.0.0.1"]
+            - decl: [host_hdr, string, { call: [req.header, "host"] }]
+            - if:
+                condition: { pneq: [host_hdr, null] }
+                then:
+                  - decl: [colon, i32, { call: [host_hdr.index_of, ":"] }]
+                  - if:
+                      condition: { ge: [colon, 0] }
+                      then: [{ set: [host_name, { call: [host_hdr.substr, 0, colon] }] }]
+                      else: [{ set: [host_name, host_hdr] }]
+            - if: { condition: { eq: [host_name.len, 0] }, then: [{ set: [host_name, "127.0.0.1"] }] }
+            # Der PORT kommt aus COSMOS_BIND (`ws://0.0.0.0:8770` → 8770), nicht
+            # aus einer festen Zahl: sonst liefert der Static-Host eine Adresse
+            # aus, an der niemand lauscht, sobald der Stapel auf anderen Ports
+            # laeuft — etwa neben 9rooms, das 8765/8766/8080 belegt.
+            - decl: [ws_port, string, "8765"]
+            - if:
+                condition: { gt: [{ call: [envm.contains, "COSMOS_BIND"] }, 0] }
+                then:
+                  - decl: [bind_txt, string, { call: [envm.get, "COSMOS_BIND"] }]
+                  - decl: [bind_parts, list<string>, { call: [bind_txt.split, ":"] }]
+                  - if:
+                      condition: { gt: [bind_parts.len, 1] }
+                      then:
+                        - decl: [tail_txt, string, { at: [bind_parts, { -: [bind_parts.len, 1] }] }]
+                        - if: { condition: { gt: [{ call: [tail_txt.parse_i32] }, 0] }, then: [{ set: [ws_port, tail_txt] }] }
+            - decl: [srv_local, ServerEntry]
+            - set: [srv_local.name, "Dieser Server (${host_name})"]
+            - set: [srv_local.url,  "${scheme}://${host_name}:${ws_port}"]
+            - set: [srv_local.media_url, ""]
+            - set: [srv_local.status, ServerStatus.up]
+            - call: [lst.servers.push, srv_local]
+            - set: [list_json, { call: [sys.serialize, lst] }]
+      - call: [resp.headers.put, "Content-Type", "application/json"]
+      - set: [resp.status, 200]
+      - set: [resp.body, list_json]
+      - call: [resp.send]
+
+- def:
+    name: main
+    args: []
+    return: i32
+    body:
+      # Port + optionales TLS aus Env (kein Rebuild fürs Deployment):
+      #   COSMOS_STATIC_PORT  Port (Default 8443 mit TLS, sonst 8080)
+      #   COSMOS_TLS_CERT / COSMOS_TLS_KEY  → HTTPS (dasselbe Cert wie der
+      #   Game-Server; eine per HTTPS ausgelieferte Seite lässt den WASM-Client
+      #   automatisch auf wss:// schalten, siehe storage.is_secure).
+      # map.get → null bei fehlendem Key; mit contains guarden (sonst .len-Crash).
+      - decl: [envm, map<string:string>, { call: [sys.env] }]
+      - decl: [cert, string, ""]
+      - if: { condition: { gt: [{ call: [envm.contains, "COSMOS_TLS_CERT"] }, 0] }, then: [{ set: [cert, { call: [envm.get, "COSMOS_TLS_CERT"] }] }] }
+      - decl: [key, string, ""]
+      - if: { condition: { gt: [{ call: [envm.contains, "COSMOS_TLS_KEY"] }, 0] }, then: [{ set: [key, { call: [envm.get, "COSMOS_TLS_KEY"] }] }] }
+      - decl: [is_tls, i32, 0]
+      - if: { condition: { '&&': [{ gt: [cert.len, 0] }, { gt: [key.len, 0] }] }, then: [{ set: [is_tls, 1] }] }
+      - decl: [port, i32, 8080]
+      - if: { condition: { eq: [is_tls, 1] }, then: [{ set: [port, 8443] }] }
+      - if:
+          condition: { gt: [{ call: [envm.contains, "COSMOS_STATIC_PORT"] }, 0] }
+          then:
+            - decl: [port_txt, string, { call: [envm.get, "COSMOS_STATIC_PORT"] }]
+            - set: [port, { call: [port_txt.to_int] }]
+
+      - decl: [srv, http_server_handle]
+      - if:
+          condition: { eq: [is_tls, 1] }
+          then: [{ set: [srv, { call: [http.server_tls, "0.0.0.0", port, cert, key] }] }]
+          else: [{ set: [srv, { call: [http.server, "0.0.0.0", port] }] }]
+
+      # Bind-Fehler (z.B. Port schon belegt) sofort melden, statt "serving …" zu
+      # behaupten und still zu beenden.
+      - if:
+          condition: { eq: [srv, null] }
+          then:
+            - call: [log.error, "cosmos static host: Port ${port} nicht bindbar — belegt? (läuft schon ein static?)"]
+            - return: 1
+
+      # Abuse-/Hardening-Defaults: Slowloris-Timeout, per-IP-Rate, Security-Header.
+      - call: [srv.set_timeout, 20]
+      - call: [srv.set_rate_limit, 240, 60]     # ≤ 240 Verbindungen/Minute je IP
+      - call: [srv.secure_headers, is_tls]       # HSTS nur unter TLS
+
+      # Explizite Routen ZUERST (vor filesystem-Mount).
+      - call: [srv.route, "POST", "/log", browser_log_handler]
+      - call: [srv.route, "GET", "/servers.json", servers_handler]
+
+      - decl: [dirs, list<path>]
+      - decl: [www, path]
+      - set: [www, "out/client"]
+      - call: [dirs.push, www]
+
+      - decl: [opts, fs_options]
+      - set: [opts, { call: [http.fs_options] }]
+      # "/" liefert direkt den Client (https://<domain>/ statt …/client.html).
+      - set: [opts.index, "client.html"]
+
+      - call: [srv.filesystem, "/", dirs, opts]
+
+      - if:
+          condition: { eq: [is_tls, 1] }
+          then:
+            - call: [log.info, "cosmos static host: serving out/client/ on https://0.0.0.0:${port}/ (TLS)"]
+            - call: [log.info, "  open https://<host>:${port}/   → WASM verbindet automatisch per wss://"]
+          else:
+            - call: [log.info, "cosmos static host: serving out/client/ on http://127.0.0.1:${port}/"]
+            - call: [log.info, "  open http://127.0.0.1:${port}/   (browser logs → [BROWSER] in this log)"]
+      - call: [srv.start]
+      # start() kehrt nur zurück, wenn der Server aufgibt — das ist ein Fehler.
+      - call: [log.error, "cosmos static host: beendet (Port ${port} belegt?)"]
+      - return: 1

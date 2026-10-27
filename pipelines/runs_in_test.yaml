@@ -1,0 +1,10 @@
+# Probe fuer `runs_in:` (aiml spec/62 §18.5): die Pipeline SAGT, wie eine
+# Stufe laeuft — und ein Widerspruch faellt VOR dem Start auf.
+- pipeline:
+    name: runs_in_test
+    steps:
+      - stage:
+          name: auf_dem_knoten
+          steplayer: none
+          timeout: 60000
+          run: "echo 'laeuft auf dem Dateisystem des Knotens'; ls /opt/cosmos >/dev/null 2>&1 && echo '(im Container)' || echo '(Knoten)'"

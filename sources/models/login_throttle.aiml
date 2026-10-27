@@ -1,0 +1,13 @@
+# LoginThrottle — per-Account Fehlversuchs-Zustand gegen Online-Bruteforce.
+#
+# fails:         aufeinanderfolgende Fehlversuche seit dem letzten Erfolg/Block.
+# blocked_until: time.now-Millisekunden, bis zu denen Logins abgelehnt werden
+#                (0 = nicht geblockt).  Nach MAX_FAILS Fehlversuchen setzt der
+#                AuthService blocked_until = now + COOLDOWN und fails wieder auf 0.
+# Ein erfolgreicher Login löscht den Eintrag komplett (throttle.delete).
+
+- model:
+    name: LoginThrottle
+    fields:
+      - [fails,         i32]
+      - [blocked_until, i64]

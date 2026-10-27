@@ -1,0 +1,739 @@
+# AgentProvisioner — richtet einen Knoten über SSH ein (doc/spec/94).
+#
+# Zweiteilung mit Absicht:
+#   plan(cfg)  baut die Schrittliste und berührt NICHTS.  Dadurch ist prüfbar,
+#              dass das Token nie in einer Befehlszeile steht (§94.2 Schritt 7)
+#              und dass der Anbindungspfad des Profils dem Installationspfad
+#              des Binaries entspricht (Schritt 6) — ohne einen Knoten.
+#   run(...)   führt die Liste über eine Sitzung aus, fail closed.
+#
+# Das sudo-Passwort kommt als Argument von `run` herein, wird an stdin des
+# jeweiligen Schrittes geschrieben und nirgends festgehalten: kein Member, kein
+# Log, keine Befehlszeile (§94.3 S1–S3).
+
+- import: "sources/models/provision.aiml"
+
+- class:
+    name: AgentProvisioner
+    members:
+      # Nur Diagnose, nie Geheimnisse.
+      - [last_error, string, ""]
+    methods:
+      # ── Der AppArmor-Profiltext ──────────────────────────────────────────
+      # Der Anbindungspfad ist der Installationspfad — kein Muster wie
+      # `{,*/}agent`.  Das Entwickler-Profil braucht das, weil Skripte Kopien
+      # in Arbeitsverzeichnisse legen; auf einem Knoten gibt es genau einen
+      # Pfad, und ein Muster wäre dort unnötig weit.
+      - def:
+          name: profile_text
+          access: public
+          args: [[binary_path, string], [bwrap_path, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - return: "# cosmos-agent — erzeugt von der Einrichtung (doc/spec/94 Schritt 6).\n# Erlaubt das Erzeugen von User-Namespaces; die Einschraenkung des Jobs\n# leistet der Namespace selbst, nicht AppArmor.\n#\n# ZWEI Pfade: der Agent UND die mitgelieferte bwrap-Kopie.  Den Namespace\n# erzeugt bwrap, und AppArmor bindet an den Binaerpfad — ein Profil nur\n# fuer den Agenten haette also genau das falsche Programm berechtigt.\n# Das systemweite /usr/bin/bwrap bleibt bewusst unberechtigt.\nabi <abi/4.0>,\ninclude <tunables/global>\n\nprofile cosmos-agent ${binary_path} flags=(unconfined) {\n    userns,\n    include if exists <local/cosmos-agent>\n}\n\nprofile cosmos-agent-bwrap ${bwrap_path} flags=(unconfined) {\n    userns,\n    include if exists <local/cosmos-agent>\n}\n"
+
+      # ── Die systemd-Einheit ──────────────────────────────────────────────
+      # Das Token kommt über --agent-token-file, nicht als Argument: Argumente
+      # stehen in der Prozessliste des Knotens (§AP1.9, §94.2 Schritt 7).
+      - def:
+          name: unit_text
+          access: public
+          # `cfg` statt Einzelwerten: Name und Etiketten kommen aus derselben
+          # Konfiguration wie alles andere (und der Compiler laesst zu Recht
+          # keine sechs Argumente zu).
+          args: [[cfg, ref<ProvisionConfig>], [binary_path, string],
+                 [token_path, string], [svc_user, string], [exec_url, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            # Name und Etiketten gehoeren in die EINHEIT.  Bis 2026-10-15 stand
+            # dort nur `--exec-url` und `--agent-token-file`: der Agent nahm
+            # seinen Standardnamen und hatte KEINE Etiketten — die Liste zeigte
+            # "(keine)", und ein `label:` im Job traf ihn nie.  Leere Angaben
+            # werden weggelassen, damit die Vorgaben des Agenten gelten.
+            # `KillMode=process`: beim Neustart nimmt systemd sonst die GANZE
+            # Prozessgruppe mit — also auch den laufenden Schritt.  Dann nuetzt
+            # das Wiederaufnehmen nichts, weil es nichts mehr aufzunehmen gibt.
+            # So ueberlebt der Schritt den Agenten, und der holt ihn danach
+            # ueber `sys.process_attach` zurueck (spec/23 §5.4, Jenkins-Muster).
+            - decl: [work_dir, string, cfg.work_dir]
+            - if: { condition: { eq: [work_dir.len, 0] }, then: [{ set: [work_dir, "/var/lib/cosmos-agent"] }] }
+            - decl: [extra, string, ""]
+            - if: { condition: { gt: [cfg.agent_id.len, 0] }, then: [{ set: [extra, " --agent-id ${cfg.agent_id}"] }] }
+            - if: { condition: { gt: [cfg.agent_labels.len, 0] }, then: [{ set: [extra, "${extra} --labels ${cfg.agent_labels}"] }] }
+            - return: "[Unit]\nDescription=cosmos agent\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser=${svc_user}\nWorkingDirectory=${work_dir}\nExecStart=${binary_path} --exec-url ${exec_url} --agent-token-file ${token_path}${extra}\nRestart=always\nRestartSec=5\nKillMode=process\nNoNewPrivileges=false\n\n[Install]\nWantedBy=multi-user.target\n"
+
+      # ── plan: die Schrittliste, ohne Nebenwirkung ────────────────────────
+      - def:
+          name: plan
+          access: public
+          args: [[cfg, ProvisionConfig], [agent_binary, path], [agent_runtime, path],
+                 [token_plain, string], [exec_url, string]]
+          return: { type: list<ProvisionStep>, lifetime: producer }
+          body:
+            - decl: [steps, list<ProvisionStep>]
+            - decl: [svc, string, cfg.service_user]
+            - decl: [bin_path, string, "${cfg.install_dir}/agent"]
+            - decl: [bwrap_path, string, "${cfg.install_dir}/bwrap"]
+            - decl: [tok_path, string, "${cfg.install_dir}/agent.token"]
+            - decl: [prof_path, string, "${cfg.apparmor_dir}/cosmos-agent"]
+            - decl: [unit_path, string, "${cfg.systemd_dir}/cosmos-agent.service"]
+            - decl: [sudo, string, cfg.sudo_prefix]
+
+            # 2. Dienstnutzer — ein einziger sudo-Aufruf, die Prüfung läuft
+            # innen mit.  Zwei sudo-Aufrufe in einer Zeile bräuchten das
+            # Passwort zweimal auf stdin.
+            - decl: [st_user, ProvisionStep]
+            - set: [st_user.name, "service_user"]
+            - set: [st_user.command, "${sudo}sh -c 'id -u ${svc} >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin ${svc}'"]
+            - set: [st_user.stdin_mode, 1]
+            - call: [steps.push, st_user]
+
+            # 3. ID-Bereich in subuid/subgid, idempotent
+            - decl: [st_ids, ProvisionStep]
+            - set: [st_ids.name, "subuid_range"]
+            - set: [st_ids.command, "${sudo}sh -c 'grep -q \"^${svc}:\" ${cfg.subuid_file} 2>/dev/null || echo \"${svc}:${cfg.subuid_base}:${cfg.subuid_count}\" >> ${cfg.subuid_file}; grep -q \"^${svc}:\" ${cfg.subgid_file} 2>/dev/null || echo \"${svc}:${cfg.subuid_base}:${cfg.subuid_count}\" >> ${cfg.subgid_file}'"]
+            - set: [st_ids.stdin_mode, 1]
+            - call: [steps.push, st_ids]
+
+            # 4. uidmap — die eine Abhängigkeit, die NICHT über exodus gehen
+            # kann (newuidmap ist setuid-root, entpackt waere das Bit wirkungslos)
+            - decl: [st_pkg, ProvisionStep]
+            - set: [st_pkg.name, "uidmap_package"]
+            - set: [st_pkg.command, "${sudo}sh -c '${cfg.pkg_install_cmd}'"]
+            - set: [st_pkg.stdin_mode, 1]
+            - call: [steps.push, st_pkg]
+
+            # 5a/5b. Binary: blockweise in die Zwischenablage, dann an den Ort.
+            # Eigentuemer root, damit der Dienstnutzer sein eigenes Programm
+            # nicht ueberschreiben kann.
+            - decl: [st_mkstage, ProvisionStep]
+            # Arbeitsverzeichnis des DIENSTES — ihm gehoerend.  Ohne das startet
+            # systemd ihn in „/", wo er seine Schritt-Verzeichnisse nicht anlegen
+            # kann: der Schritt lief, aber niemand konnte seinen Ausgang melden
+            # (gemessen 2026-10-15, der Lauf blieb ewig „running").
+            - decl: [st_workdir, ProvisionStep]
+            - set: [st_workdir.name, "work_dir"]
+            - decl: [wdir, string, cfg.work_dir]
+            - if: { condition: { eq: [wdir.len, 0] }, then: [{ set: [wdir, "/var/lib/cosmos-agent"] }] }
+            - set: [st_workdir.command, "${sudo}sh -c 'mkdir -p ${wdir} && chown ${svc}:${svc} ${wdir} && chmod 0750 ${wdir}'"]
+            - set: [st_workdir.stdin_mode, 1]
+            - call: [steps.push, st_workdir]
+
+            - set: [st_mkstage.name, "stage_dir"]
+            - set: [st_mkstage.command, "mkdir -p ${cfg.stage_dir}"]
+            - set: [st_mkstage.stdin_mode, 0]
+            - call: [steps.push, st_mkstage]
+
+            - decl: [st_binup, ProvisionStep]
+            - set: [st_binup.name, "stage_binary"]
+            - set: [st_binup.command, "cat > ${cfg.stage_dir}/agent"]
+            - set: [st_binup.payload, agent_binary]
+            - set: [st_binup.stdin_mode, 3]
+            - call: [steps.push, st_binup]
+
+            - decl: [st_bininst, ProvisionStep]
+            - set: [st_bininst.name, "install_binary"]
+            - set: [st_bininst.command, "${sudo}install -D -m 0755 ${cfg.stage_dir}/agent ${bin_path}"]
+            - set: [st_bininst.stdin_mode, 1]
+            - call: [steps.push, st_bininst]
+
+            # Die Laufzeit MUSS mit (User 2026-10-13): auf dem Knoten darf nichts
+            # vorausgesetzt werden.  Ohne sie zeigte das Binary per RUNPATH in den
+            # Entwicklerbaum zurueck — auf einem fremden Knoten nicht vorhanden,
+            # hier fuer den Dienstnutzer nicht einmal durchquerbar.
+            # EIN Archiv (deploy/collect_runtime.sh) statt 44 Einzeldateien, als
+            # `path` gestreamt statt als Zeichenkette: weder 88 SSH-Schritte noch
+            # 91 MB im Speicher.
+            - decl: [st_rtup, ProvisionStep]
+            - set: [st_rtup.name, "stage_runtime"]
+            - set: [st_rtup.command, "cat > ${cfg.stage_dir}/runtime.tar.gz"]
+            - set: [st_rtup.payload, agent_runtime]
+            - set: [st_rtup.stdin_mode, 3]
+            - call: [steps.push, st_rtup]
+
+            - decl: [st_rtinst, ProvisionStep]
+            - set: [st_rtinst.name, "install_runtime"]
+            # --no-same-owner UND chown: ein Archiv darf die Eigentuemer auf dem
+            # Knoten nicht bestimmen (§94.3).  bwrap traegt die userns-Berechtigung
+            # des Profils — gehoerte es einem unprivilegierten Nutzer, waere die
+            # Berechtigung uebertragbar.
+            - decl: [rt_own, string, "root:root"]
+            - if: { condition: { gt: [cfg.runtime_owner.len, 0] }, then: [{ set: [rt_own, cfg.runtime_owner] }] }
+            - set: [st_rtinst.command, "${sudo}sh -c 'mkdir -p ${cfg.install_dir} && tar -xzf ${cfg.stage_dir}/runtime.tar.gz --no-same-owner -C ${cfg.install_dir} && chown -R ${rt_own} ${cfg.install_dir}/lib ${cfg.install_dir}/bwrap && chmod 0755 ${cfg.install_dir} ${cfg.install_dir}/bwrap ${cfg.install_dir}/lib && find ${cfg.install_dir}/lib -type f -exec chmod 0644 {} +'"]
+            - set: [st_rtinst.stdin_mode, 1]
+            - call: [steps.push, st_rtinst]
+
+            # 6. Profil — Anbindungspfad == bin_path
+            - decl: [st_profstage, ProvisionStep]
+            - set: [st_profstage.name, "stage_profile"]
+            - set: [st_profstage.command, "cat > ${cfg.stage_dir}/cosmos-agent"]
+            - set: [st_profstage.payload, { call: [<.profile_text, bin_path, bwrap_path] }]
+            - set: [st_profstage.stdin_mode, 2]
+            - call: [steps.push, st_profstage]
+
+            - decl: [st_profinst, ProvisionStep]
+            - set: [st_profinst.name, "install_profile"]
+            - set: [st_profinst.command, "${sudo}install -D -m 0644 ${cfg.stage_dir}/cosmos-agent ${prof_path}"]
+            - set: [st_profinst.stdin_mode, 1]
+            - call: [steps.push, st_profinst]
+
+            - decl: [st_reload, ProvisionStep]
+            - set: [st_reload.name, "apparmor_reload"]
+            - set: [st_reload.command, "${sudo}${cfg.apparmor_reload_cmd} ${prof_path}"]
+            - set: [st_reload.stdin_mode, 1]
+            - call: [steps.push, st_reload]
+
+            # 7. Token — als PAYLOAD, nie in einer Befehlszeile.  Modus 0600,
+            # Eigentuemer Dienstnutzer.
+            - decl: [st_tokstage, ProvisionStep]
+            - set: [st_tokstage.name, "stage_token"]
+            - set: [st_tokstage.command, "cat > ${cfg.stage_dir}/agent.token"]
+            - set: [st_tokstage.payload, token_plain]
+            - set: [st_tokstage.stdin_mode, 2]
+            - call: [steps.push, st_tokstage]
+
+            - decl: [st_tokinst, ProvisionStep]
+            - set: [st_tokinst.name, "install_token"]
+            - set: [st_tokinst.command, "${sudo}install -D -m 0600 -o ${svc} -g ${svc} ${cfg.stage_dir}/agent.token ${tok_path}"]
+            - set: [st_tokinst.stdin_mode, 1]
+            - call: [steps.push, st_tokinst]
+
+            # 8. Dienst-Einheit und Start
+            - decl: [st_unitstage, ProvisionStep]
+            - set: [st_unitstage.name, "stage_unit"]
+            - set: [st_unitstage.command, "cat > ${cfg.stage_dir}/cosmos-agent.service"]
+            - set: [st_unitstage.payload, { call: [<.unit_text, cfg, bin_path, tok_path, svc, exec_url] }]
+            - set: [st_unitstage.stdin_mode, 2]
+            - call: [steps.push, st_unitstage]
+
+            - decl: [st_unitinst, ProvisionStep]
+            - set: [st_unitinst.name, "install_unit"]
+            - set: [st_unitinst.command, "${sudo}install -D -m 0644 ${cfg.stage_dir}/cosmos-agent.service ${unit_path}"]
+            - set: [st_unitinst.stdin_mode, 1]
+            - call: [steps.push, st_unitinst]
+
+            # 9. Nachweis VOR dem Start (Befund 5a): der Nachweis braucht den
+            # Dienst nicht (er prueft Profil, uidmap und ID-Bereich).  Stand der
+            # Start davor, lief der Agent weiter, obwohl gerade festgestellt
+            # wurde, dass die Isolation NICHT traegt — das Gegenteil von fail
+            # closed.  Also erst beweisen, dann starten.
+            - decl: [st_verify, ProvisionStep]
+            - set: [st_verify.name, "verify_isolation"]
+            - set: [st_verify.command, "${cfg.verify_prefix}${bin_path} --verify-isolation --bwrap-path ${bwrap_path}"]
+            - set: [st_verify.stdin_mode, 1]
+            - call: [steps.push, st_verify]
+
+            # 10. Jetzt starten.
+            - decl: [st_svc, ProvisionStep]
+            - set: [st_svc.name, "service_start"]
+            - set: [st_svc.command, "${sudo}sh -c '${cfg.service_install_cmd}'"]
+            - set: [st_svc.stdin_mode, 1]
+            - call: [steps.push, st_svc]
+
+            # 11. Und nachsehen, dass er wirklich laeuft — "kein Fehler beim
+            # Starten" ist nicht dasselbe wie "laeuft".
+            - decl: [st_live, ProvisionStep]
+            - set: [st_live.name, "service_active"]
+            - set: [st_live.command, "${sudo}sh -c '${cfg.service_check_cmd}'"]
+            - set: [st_live.stdin_mode, 1]
+            - call: [steps.push, st_live]
+
+            - return: steps
+
+      # ── run: die Liste über eine Sitzung ausführen ────────────────────────
+      #
+      # `sudo_password` ist ein Argument und bleibt eines: es wird an stdin des
+      # Schrittes geschrieben und weder gespeichert noch geloggt (§94.3 S1-S3).
+      # `expected_fp` leer = trust on first use; sonst MUSS der Fingerprint
+      # passen, sonst bricht es ab, BEVOR das Passwort das Haus verlässt.
+      - def:
+          name: run
+          access: public
+          static_off: ["str_cmp"]
+          args: [[cfg, ProvisionConfig], [steps, list<ProvisionStep>],
+                 [expected_fp, string], [login_password, string],
+                 [sudo_password, string]]
+          return: { type: ProvisionResult, lifetime: producer }
+          body:
+            - decl: [res, ProvisionResult]
+            - set: [res.success, 0]
+
+            - decl: [sess, ssh_session, { call: [ssh.connect, cfg.host, cfg.port, cfg.login_user, 10000] }]
+            - if:
+                condition: { eq: [sess, null] }
+                then:
+                  - set: [res.failed_step, "connect"]
+                  - set: [res.message, "Verbindung zu ${cfg.host}:${cfg.port} fehlgeschlagen"]
+                  - return: res
+
+            - set: [res.fingerprint, { call: [sess.fingerprint] }]
+            # Kein erwarteter Fingerprint heisst "ich kenne diesen Knoten noch
+            # nicht" — NICHT "vertraue blind" (Befund 5b, §94.3 S4).  Hier wird
+            # abgebrochen, bevor irgendetwas authentifiziert wird; die
+            # Oberfläche zeigt res.fingerprint, der Mensch bestätigt, und der
+            # Aufruf wird mit diesem Wert wiederholt.
+            - if:
+                condition: { eq: [expected_fp.len, 0] }
+                then:
+                  - set: [res.failed_step, "host_key_unconfirmed"]
+                  - set: [res.message, "Fingerprint bestaetigen und erneut aufrufen"]
+                  - call: [sess.close]
+                  - return: res
+            # Host-Prüfung VOR jeder Authentifizierung: über diesen Kanal geht
+            # anschliessend das sudo-Passwort (§94.3 S4).
+            - decl: [host_ok, i32, { call: [sess.accept_host, expected_fp] }]
+            - if:
+                condition: { neq: [host_ok, 1] }
+                then:
+                  - set: [res.failed_step, "host_key"]
+                  - set: [res.message, "Host-Key passt nicht zum erwarteten Fingerprint"]
+                  - call: [sess.close]
+                  - return: res
+
+            # §94.2 Schritt 1: erst Schluessel, dann Passwort.  Ein gesetztes
+            # Passwort darf den Schluesselweg nicht abschalten — sonst scheitert
+            # ein Knoten, der beide Verfahren anbietet, nur weil im Formular ein
+            # Passwort steht.
+            - decl: [authed, i32, { call: [sess.auth_pubkey_auto] }]
+            - decl: [tried, string, "Schluessel"]
+            - if:
+                condition: { '&&': [{ neq: [authed, 1] }, { gt: [login_password.len, 0] }] }
+                then:
+                  - set: [authed, { call: [sess.auth_password, login_password] }]
+                  - set: [tried, "Schluessel und Passwort"]
+            - if:
+                condition: { neq: [authed, 1] }
+                then:
+                  - set: [res.failed_step, "authenticate"]
+                  # libsshs Begruendung mitnennen: ohne sie ist nicht zu sehen, ob
+                  # das Passwort falsch war oder das Verfahren nicht angeboten wird.
+                  # Sie enthaelt kein Geheimnis (§94.3 S1-S3 unberuehrt).
+                  - decl: [why, string, { call: [sess.last_error] }]
+                  - set: [res.message, "Anmeldung als ${cfg.login_user} abgelehnt (${tried}): ${why}"]
+                  - call: [sess.close]
+                  - return: res
+
+            - decl: [six, i32, 0]
+            - while:
+                condition: { lt: [six, steps.len] }
+                body:
+                  - decl: [step, ProvisionStep, { at: [steps, six] }]
+                  - decl: [chan, ssh_channel, { call: [sess.exec, step.command] }]
+                  - if:
+                      condition: { eq: [chan, null] }
+                      then:
+                        - set: [res.failed_step, step.name]
+                        - set: [res.message, "Kanal liess sich nicht oeffnen"]
+                        - call: [sess.close]
+                        - return: res
+
+                  # stdin je Modus — Passwort und Inhalt nie gemeinsam.
+                  - if:
+                      condition: { eq: [step.stdin_mode, 1] }
+                      then: [{ decl: [wrote_pw, i32, { call: [chan.write, "${sudo_password}\n"] }] }]
+                  - if:
+                      condition: { eq: [step.stdin_mode, 2] }
+                      then: [{ decl: [wrote_txt, i32, { call: [chan.write, step.payload] }] }]
+                  - if:
+                      condition: { eq: [step.stdin_mode, 3] }
+                      then:
+                        # Blockweise, damit ein Agent-Binary nicht im
+                        # Arbeitsspeicher landet (spec/32_6 §6).
+                        - decl: [src_path, path, step.payload]
+                        - decl: [total, i64, { call: [io.file_size, src_path] }]
+                        - decl: [src, file_handle, { call: [io.open_binary, src_path] }]
+                        - decl: [done, i64, 0]
+                        - while:
+                            condition: { lt: [done, total] }
+                            body:
+                              - decl: [block, buffer<u8>, { call: [io.read_bytes, src, 1048576] }]
+                              - decl: [sent, i32, { call: [chan.write_buffer, block] }]
+                              - if:
+                                  condition: { lt: [sent, 1] }
+                                  then: [{ set: [done, total] }]
+                                  else: [{ set: [done, { +: [done, { cast: [sent, i64] }] }] }]
+                        - call: [io.close, src]
+
+                  - decl: [eof_rc, i32, { call: [chan.send_eof] }]
+                  - decl: [out_txt, string, { call: [chan.read_out, 65536] }]
+                  - decl: [err_txt, string, { call: [chan.read_err, 65536] }]
+                  - decl: [exit_rc, i32, { call: [chan.exit_code] }]
+                  - call: [chan.close]
+
+                  # Der Befehl selbst wird NICHT geloggt: er kann Geheimnisse
+                  # tragen (§AP1.6), und bei Modus 1 stand gerade ein Passwort
+                  # auf seinem stdin.  Geloggt wird der SCHRITTNAME.
+                  - call: [log.info, "[provision] ${step.name} rc=${exit_rc}"]
+
+                  - if:
+                      condition: { neq: [exit_rc, 0] }
+                      then:
+                        - set: [res.failed_step, step.name]
+                        - set: [res.message, err_txt]
+                        # Ein fehlgeschlagener Lauf darf keinen laufenden Agenten
+                        # zurücklassen (P2).  Bei einem Wiederholungslauf kann er
+                        # aus einem früheren, damals erfolgreichen Lauf noch
+                        # laufen.  Einen nicht laufenden Dienst zu stoppen ist ein
+                        # No-op, also unbedingt anwendbar.
+                        - call: [<.stop_service, sess, cfg, sudo_password]
+                        - call: [sess.close]
+                        - return: res
+
+                  # Schritt 9 entscheidet über "eingerichtet": rc=0 allein
+                  # genügt nicht, der Nachweis muss im Text stehen.
+                  - if:
+                      condition: { eq: [step.name, "verify_isolation"] }
+                      then:
+                        - if:
+                            condition: { lt: [{ call: [out_txt.index_of, "ISOLATION_OK"] }, 0] }
+                            then:
+                              - set: [res.failed_step, step.name]
+                              # Der Selbsttest benennt das fehlende Glied selbst.
+                              # Eine eigene Vermutung daruebersetzen hiesse, die
+                              # Diagnose wegzuwerfen (derselbe Fehler wie zuvor
+                              # bei der Anmeldung).
+                              - decl: [why, string, { call: [err_txt.trim] }]
+                              - if:
+                                  condition: { eq: [why.len, 0] }
+                                  then: [{ set: [why, "keine Marke ISOLATION_OK in der Ausgabe"] }]
+                              - set: [res.message, "Isolation traegt nicht: ${why}"]
+                              - call: [<.stop_service, sess, cfg, sudo_password]
+                              - call: [sess.close]
+                              - return: res
+
+                  - set: [res.steps_done, { +: [res.steps_done, 1] }]
+                  - set: [six, { +: [six, 1] }]
+
+            - call: [sess.close]
+            - set: [res.success, 1]
+            - set: [res.message, "eingerichtet"]
+            - return: res
+
+      # stop_service: bester Versuch, keine Fehlerbehandlung — der Lauf ist
+      # ohnehin schon gescheitert, und ein nicht laufender Dienst macht daraus
+      # ein No-op.  Leerer Befehl = nichts zu tun (Testkonfigurationen).
+      - def:
+          name: stop_service
+          access: public
+          args: [[sess, ssh_session], [cfg, ProvisionConfig], [sudo_password, string]]
+          body:
+            - if: { condition: { eq: [cfg.service_stop_cmd.len, 0] }, then: [{ return: [] }] }
+            - decl: [chan, ssh_channel, { call: [sess.exec, "${cfg.sudo_prefix}sh -c '${cfg.service_stop_cmd}'"] }]
+            - if: { condition: { eq: [chan, null] }, then: [{ return: [] }] }
+            - decl: [wrote, i32, { call: [chan.write, "${sudo_password}\n"] }]
+            - decl: [eof_rc, i32, { call: [chan.send_eof] }]
+            - decl: [rc_stop, i32, { call: [chan.exit_code] }]
+            - call: [chan.close]
+            - call: [log.info, "[provision] Dienst vorsorglich gestoppt (rc=${rc_stop})"]
+
+      # defaults_from_env: die Betriebsvorgaben des Knotens (§94.5a).
+      #
+      # Produktionswerte als Standard, jede über eine Umgebungsvariable
+      # überschreibbar.  Das ist KEINE Testverzweigung: welche Paketverwaltung
+      # und welche Pfade ein Knoten hat, ist offen (§94.7) — und die Abnahme
+      # benutzt dieselben Variablen, um gegen ein Wegwerf-Verzeichnis zu fahren.
+      # Der Produktionscode kennt damit keinen Testfall.
+      - def:
+          name: defaults_from_env
+          access: public
+          static_off: ["str_cmp"]
+          args: [[host, string], [port, i32], [login_user, string]]
+          return: { type: ProvisionConfig, lifetime: producer }
+          body:
+            - decl: [cfg, ProvisionConfig]
+            - set: [cfg.host, host]
+            - set: [cfg.port, port]
+            - set: [cfg.login_user, login_user]
+            - set: [cfg.service_user, "cosmos-agent"]
+            # Wie alle Zielpfade konfigurierbar (§94.5a) — der Abnahme-Lauf
+            # faehrt ohne Privilegien und kann nicht nach /var/lib schreiben.
+            - set: [cfg.work_dir, "/var/lib/cosmos-agent"]
+            - set: [cfg.runtime_owner, "root:root"]
+            - set: [cfg.install_dir, "/opt/cosmos"]
+            - set: [cfg.stage_dir, "/tmp/cosmos-stage"]
+            - set: [cfg.apparmor_dir, "/etc/apparmor.d"]
+            - set: [cfg.systemd_dir, "/etc/systemd/system"]
+            - set: [cfg.subuid_file, "/etc/subuid"]
+            - set: [cfg.subgid_file, "/etc/subgid"]
+            - set: [cfg.sudo_prefix, "sudo -S -p '' "]
+            - set: [cfg.verify_prefix, "sudo -S -p '' -u cosmos-agent "]
+            - set: [cfg.apparmor_reload_cmd, "apparmor_parser -r"]
+            - set: [cfg.apparmor_unload_cmd, "apparmor_parser -R"]
+            - set: [cfg.pkg_install_cmd, "apt-get install -y uidmap"]
+            # `restart`, NICHT `enable --now`: letzteres startet nur einen Dienst,
+            # der noch nicht laeuft.  Beim zweiten Durchlauf wurde das Binary
+            # also ausgetauscht und der ALTE Prozess lief weiter — die
+            # Einrichtung meldete „erfolgreich", und auf dem Knoten aenderte sich
+            # nichts (gemessen 2026-10-15: ein Agent vom 13. Oktober lief nach
+            # einer erfolgreichen Neueinrichtung weiter).  Damit ist derselbe
+            # Ablauf zugleich die ERNEUERUNG eines Agenten.
+            - set: [cfg.service_install_cmd, "systemctl daemon-reload && systemctl enable cosmos-agent && systemctl restart cosmos-agent"]
+            - set: [cfg.service_check_cmd, "systemctl is-active --quiet cosmos-agent"]
+            - set: [cfg.service_stop_cmd, "systemctl disable --now cosmos-agent"]
+            - set: [cfg.service_reload_cmd, "systemctl daemon-reload"]
+            - set: [cfg.subuid_base, 100000]
+            - set: [cfg.subuid_count, 65536]
+            # Jede Vorgabe ueber env_or, das eine EIGENE Kopie liefert — siehe
+            # die Begruendung dort.
+            - set: [cfg.service_user, { call: [<.env_or, "COSMOS_PROV_SERVICE_USER", cfg.service_user] }]
+            - set: [cfg.work_dir, { call: [<.env_or, "COSMOS_PROV_WORK_DIR", cfg.work_dir] }]
+            - set: [cfg.install_dir, { call: [<.env_or, "COSMOS_PROV_INSTALL_DIR", cfg.install_dir] }]
+            - set: [cfg.stage_dir, { call: [<.env_or, "COSMOS_PROV_STAGE_DIR", cfg.stage_dir] }]
+            - set: [cfg.apparmor_dir, { call: [<.env_or, "COSMOS_PROV_APPARMOR_DIR", cfg.apparmor_dir] }]
+            - set: [cfg.systemd_dir, { call: [<.env_or, "COSMOS_PROV_SYSTEMD_DIR", cfg.systemd_dir] }]
+            - set: [cfg.subuid_file, { call: [<.env_or, "COSMOS_PROV_SUBUID_FILE", cfg.subuid_file] }]
+            - set: [cfg.subgid_file, { call: [<.env_or, "COSMOS_PROV_SUBGID_FILE", cfg.subgid_file] }]
+            - set: [cfg.sudo_prefix, { call: [<.env_or, "COSMOS_PROV_SUDO", cfg.sudo_prefix] }]
+            - set: [cfg.verify_prefix, { call: [<.env_or, "COSMOS_PROV_VERIFY_PREFIX", cfg.verify_prefix] }]
+            - set: [cfg.apparmor_reload_cmd, { call: [<.env_or, "COSMOS_PROV_APPARMOR_CMD", cfg.apparmor_reload_cmd] }]
+            - set: [cfg.apparmor_unload_cmd, { call: [<.env_or, "COSMOS_PROV_APPARMOR_UNLOAD", cfg.apparmor_unload_cmd] }]
+            - set: [cfg.pkg_install_cmd, { call: [<.env_or, "COSMOS_PROV_PKG_CMD", cfg.pkg_install_cmd] }]
+            - set: [cfg.service_install_cmd, { call: [<.env_or, "COSMOS_PROV_SERVICE_CMD", cfg.service_install_cmd] }]
+            - set: [cfg.service_check_cmd, { call: [<.env_or, "COSMOS_PROV_CHECK_CMD", cfg.service_check_cmd] }]
+            - set: [cfg.service_stop_cmd, { call: [<.env_or, "COSMOS_PROV_STOP_CMD", cfg.service_stop_cmd] }]
+            - set: [cfg.service_reload_cmd, { call: [<.env_or, "COSMOS_PROV_RELOAD_CMD", cfg.service_reload_cmd] }]
+            # "-" heisst ausdruecklich LEER.  Grund: ein leerer Variablenwert
+            # ist in aiml derzeit nicht verlaesslich auslesbar (sys.env legt
+            # eine dichte Map ohne occupied-Bitmap an, der Lesepfad erwartet
+            # aber eine — gemeldet, siehe aiml-spec/23 §Env).  Eine
+            # ausgeschriebene Konvention ist ohnehin klarer als ein leerer
+            # String, bei dem man "nicht gesetzt" und "absichtlich leer" nicht
+            # unterscheiden kann.
+            - if: { condition: { eq: [cfg.sudo_prefix, "-"] }, then: [{ set: [cfg.sudo_prefix, ""] }] }
+            - if: { condition: { eq: [cfg.verify_prefix, "-"] }, then: [{ set: [cfg.verify_prefix, ""] }] }
+            - if: { condition: { eq: [cfg.service_stop_cmd, "-"] }, then: [{ set: [cfg.service_stop_cmd, ""] }] }
+            - if: { condition: { eq: [cfg.service_reload_cmd, "-"] }, then: [{ set: [cfg.service_reload_cmd, ""] }] }
+            - return: cfg
+
+      # env_or: Umgebungswert als EIGENE Kopie, sonst der Standard.
+      #
+      # Wichtig ist das Kopieren: `envm.get` liefert einen geborgten Zeiger in
+      # die Map.  Wird er direkt in ein Modellfeld gelegt, zeigt das Feld nach
+      # dem Ende der Map auf freigegebenen Speicher — im Lauf vom 2026-10-11
+      # stand dadurch der NAME einer anderen Variablen ("QT_IM_MODULE") im
+      # Befehl statt des Dienstnutzers, und zwar nur bei manchen Schluesseln
+      # (die anderen Slots waren noch nicht ueberschrieben).  Die Interpolation
+      # "${...}" erzwingt eine frische Zeichenkette, `producer` uebergibt sie
+      # dem Aufrufer als Eigentum (spec/61).
+      - def:
+          name: env_or
+          access: public
+          static_off: ["str_cmp"]
+          args: [[key, string], [dflt, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [envm, map<string:string>, { call: [sys.env] }]
+            - if: { condition: { eq: [{ call: [envm.contains, key] }, 0] }, then: [{ return: "${dflt}" }] }
+            - decl: [raw, string, { call: [envm.get, key] }]
+            - return: "${raw}"
+
+      # ── teardown_plan: alles wegnehmen, was die Einrichtung angelegt hat ──
+      #
+      # NICHT die Umkehrung der Installation: der Dienst muss weg, BEVOR seine
+      # Dateien verschwinden, und das Profil muss ENTLADEN werden, bevor die
+      # Datei geht — eine gelöschte Datei entlädt es nicht, es bliebe im Kernel.
+      #
+      # Das Paket `uidmap` wird bewusst NICHT entfernt: es kann auf dem Knoten
+      # von anderem benutzt werden (§94.5b).  Ein Rückbau nimmt nur weg, was
+      # die Einrichtung selbst angelegt hat.
+      #
+      # Jeder Schritt ist idempotent — ein zweiter Rückbau darf nicht daran
+      # scheitern, dass schon nichts mehr da ist.
+      - def:
+          name: teardown_plan
+          access: public
+          static_off: ["str_cmp"]
+          args: [[cfg, ProvisionConfig]]
+          return: { type: list<ProvisionStep>, lifetime: producer }
+          body:
+            - decl: [steps, list<ProvisionStep>]
+            - decl: [svc, string, cfg.service_user]
+            - decl: [sudo, string, cfg.sudo_prefix]
+            - decl: [bin_path, string, "${cfg.install_dir}/agent"]
+            - decl: [tok_path, string, "${cfg.install_dir}/agent.token"]
+            - decl: [prof_path, string, "${cfg.apparmor_dir}/cosmos-agent"]
+            - decl: [unit_path, string, "${cfg.systemd_dir}/cosmos-agent.service"]
+
+            # 2. Dienst anhalten.  `|| true`: ein nicht laufender Dienst ist
+            # kein Fehlschlag, sondern der Zielzustand.
+            # Kein Stopp-Befehl konfiguriert = nichts zu stoppen.  Ohne diese
+            # Abfrage entstand "sh -c ' || true'" — ein Syntaxfehler, der den
+            # Rueckbau mit einem Fehlschlag belastete, obwohl nichts zu tun war.
+            - decl: [stop_inner, string, cfg.service_stop_cmd]
+            - if: { condition: { eq: [stop_inner.len, 0] }, then: [{ set: [stop_inner, "true"] }] }
+            - decl: [st_stop, ProvisionStep]
+            - set: [st_stop.name, "service_stop"]
+            - set: [st_stop.command, "${sudo}sh -c '${stop_inner} || true'"]
+            - set: [st_stop.stdin_mode, 1]
+            - call: [steps.push, st_stop]
+
+            # 3. Einheit weg, dann der Reload — ein sudo-Aufruf.
+            #
+            # Der Reload ist KONFIGURIERBAR, wie der Stopp darueber.  Fest verdrahtet
+            # lief `systemctl daemon-reload` in jedem Rueckbau-Test auf dem Rechner des
+            # Entwicklers, und ohne Rechte fragt polkit nach dem Passwort — mitten im
+            # Testlauf, in einem Fenster, das mit den Tests nichts zu tun hat
+            # (gemessen 18.10.2026 im auth.log).  `2>/dev/null` half nicht: polkit
+            # fragt neben dem Datenstrom, nicht darin.
+            - decl: [reload_inner, string, cfg.service_reload_cmd]
+            - if: { condition: { eq: [reload_inner.len, 0] }, then: [{ set: [reload_inner, "true"] }] }
+            - decl: [st_unit, ProvisionStep]
+            - set: [st_unit.name, "remove_unit"]
+            - set: [st_unit.command, "${sudo}sh -c 'rm -f ${unit_path}; ${reload_inner} 2>/dev/null || true'"]
+            - set: [st_unit.stdin_mode, 1]
+            - call: [steps.push, st_unit]
+
+            # 4. Token-Datei weg (das Token selbst wird am Server widerrufen).
+            - decl: [st_tok, ProvisionStep]
+            - set: [st_tok.name, "remove_token_file"]
+            - set: [st_tok.command, "${sudo}rm -f ${tok_path}"]
+            - set: [st_tok.stdin_mode, 1]
+            - call: [steps.push, st_tok]
+
+            # 5. Binary weg.
+            - decl: [st_bin, ProvisionStep]
+            - set: [st_bin.name, "remove_binary"]
+            - set: [st_bin.command, "${sudo}rm -f ${bin_path}"]
+            - set: [st_bin.stdin_mode, 1]
+            - call: [steps.push, st_bin]
+
+            # 6. Profil ENTLADEN, dann die Datei loeschen — in dieser Reihenfolge.
+            - decl: [st_prof, ProvisionStep]
+            - set: [st_prof.name, "remove_profile"]
+            - set: [st_prof.command, "${sudo}sh -c 'if [ -f ${prof_path} ]; then ${cfg.apparmor_unload_cmd} ${prof_path} 2>/dev/null || true; rm -f ${prof_path}; fi'"]
+            - set: [st_prof.stdin_mode, 1]
+            - call: [steps.push, st_prof]
+
+            # 7. ID-Bereich streichen.  Über eine temporaere Datei + mv, damit
+            # /etc/subuid nie halb geschrieben dasteht.
+            - decl: [st_ids, ProvisionStep]
+            - set: [st_ids.name, "remove_subuid_range"]
+            - set: [st_ids.command, "${sudo}sh -c 'for f in ${cfg.subuid_file} ${cfg.subgid_file}; do [ -f \"$f\" ] || continue; grep -v \"^${svc}:\" \"$f\" > \"$f.cosmos_tmp\" || true; mv \"$f.cosmos_tmp\" \"$f\"; done'"]
+            - set: [st_ids.stdin_mode, 1]
+            - call: [steps.push, st_ids]
+
+            # 8. Dienstnutzer loeschen, nur wenn er existiert.
+            - decl: [st_user, ProvisionStep]
+            - set: [st_user.name, "remove_service_user"]
+            - set: [st_user.command, "${sudo}sh -c 'id -u ${svc} >/dev/null 2>&1 && userdel ${svc} || true'"]
+            - set: [st_user.stdin_mode, 1]
+            - call: [steps.push, st_user]
+
+            # 9. Zwischenablage weg.
+            - decl: [st_stage, ProvisionStep]
+            - set: [st_stage.name, "remove_stage"]
+            - set: [st_stage.command, "rm -rf ${cfg.stage_dir}"]
+            - set: [st_stage.stdin_mode, 0]
+            - call: [steps.push, st_stage]
+
+            - return: steps
+
+      # ── run_teardown: wie run, aber BEST EFFORT ──────────────────────────
+      #
+      # Die Einrichtung bricht beim ersten Fehlschlag ab, weil Weitermachen
+      # gefährlich wäre.  Hier ist es umgekehrt: ein Abbruch in der Mitte
+      # liesse mehr Rückstände zurück als ein Durchlauf mit einem Fehler.
+      # `success` ist nur 1, wenn ALLE Schritte gelungen sind.
+      - def:
+          name: run_teardown
+          access: public
+          static_off: ["str_cmp"]
+          args: [[cfg, ProvisionConfig], [steps, list<ProvisionStep>],
+                 [expected_fp, string], [login_password, string],
+                 [sudo_password, string]]
+          return: { type: ProvisionResult, lifetime: producer }
+          body:
+            - decl: [res, ProvisionResult]
+            - set: [res.success, 0]
+            - decl: [sess, ssh_session, { call: [ssh.connect, cfg.host, cfg.port, cfg.login_user, 10000] }]
+            - if:
+                condition: { eq: [sess, null] }
+                then:
+                  - set: [res.failed_step, "connect"]
+                  - set: [res.message, "Verbindung zu ${cfg.host}:${cfg.port} fehlgeschlagen"]
+                  - return: res
+            - set: [res.fingerprint, { call: [sess.fingerprint] }]
+            - if:
+                condition: { eq: [expected_fp.len, 0] }
+                then:
+                  - set: [res.failed_step, "host_key_unconfirmed"]
+                  - set: [res.message, "Fingerprint bestaetigen und erneut aufrufen"]
+                  - call: [sess.close]
+                  - return: res
+            - if:
+                condition: { neq: [{ call: [sess.accept_host, expected_fp] }, 1] }
+                then:
+                  - set: [res.failed_step, "host_key"]
+                  - set: [res.message, "Host-Key passt nicht zum erwarteten Fingerprint"]
+                  - call: [sess.close]
+                  - return: res
+            # §94.2 Schritt 1: erst Schluessel, dann Passwort.  Ein gesetztes
+            # Passwort darf den Schluesselweg nicht abschalten — sonst scheitert
+            # ein Knoten, der beide Verfahren anbietet, nur weil im Formular ein
+            # Passwort steht.
+            - decl: [authed, i32, { call: [sess.auth_pubkey_auto] }]
+            - decl: [tried, string, "Schluessel"]
+            - if:
+                condition: { '&&': [{ neq: [authed, 1] }, { gt: [login_password.len, 0] }] }
+                then:
+                  - set: [authed, { call: [sess.auth_password, login_password] }]
+                  - set: [tried, "Schluessel und Passwort"]
+            - if:
+                condition: { neq: [authed, 1] }
+                then:
+                  - set: [res.failed_step, "authenticate"]
+                  # libsshs Begruendung mitnennen: ohne sie ist nicht zu sehen, ob
+                  # das Passwort falsch war oder das Verfahren nicht angeboten wird.
+                  # Sie enthaelt kein Geheimnis (§94.3 S1-S3 unberuehrt).
+                  - decl: [why, string, { call: [sess.last_error] }]
+                  - set: [res.message, "Anmeldung als ${cfg.login_user} abgelehnt (${tried}): ${why}"]
+                  - call: [sess.close]
+                  - return: res
+
+            - decl: [bad_num, i32, 0]
+            - decl: [six, i32, 0]
+            - while:
+                condition: { lt: [six, steps.len] }
+                body:
+                  - decl: [step, ProvisionStep, { at: [steps, six] }]
+                  - decl: [chan, ssh_channel, { call: [sess.exec, step.command] }]
+                  # Kein Kanal = dieser Schritt faellt aus, der Abbau geht weiter.
+                  # Hier stand `continue:`, das aiml nicht hat (spec/49 §2a) und
+                  # der Compiler bis 2026-10-15 still verwarf: danach wurde auf
+                  # dem NULL-Kanal geschrieben und gelesen, und `six` zweimal
+                  # erhoeht — ein Abbau-Schritt wurde uebersprungen.
+                  - if:
+                      condition: { eq: [chan, null] }
+                      then:
+                        - set: [bad_num, { +: [bad_num, 1] }]
+                        - if: { condition: { eq: [res.failed_step.len, 0] }, then: [{ set: [res.failed_step, step.name] }] }
+                      else:
+                        - if:
+                            condition: { eq: [step.stdin_mode, 1] }
+                            then: [{ decl: [wrote_pw, i32, { call: [chan.write, "${sudo_password}\n"] }] }]
+                        - decl: [eof_rc, i32, { call: [chan.send_eof] }]
+                        - decl: [out_txt, string, { call: [chan.read_out, 8192] }]
+                        - decl: [err_txt, string, { call: [chan.read_err, 8192] }]
+                        - decl: [exit_rc, i32, { call: [chan.exit_code] }]
+                        - call: [chan.close]
+                        - call: [log.info, "[teardown] ${step.name} rc=${exit_rc}"]
+                        - if:
+                            condition: { neq: [exit_rc, 0] }
+                            then:
+                              # WEITERMACHEN — nur merken.
+                              - set: [bad_num, { +: [bad_num, 1] }]
+                              - if:
+                                  condition: { eq: [res.failed_step.len, 0] }
+                                  then:
+                                    - set: [res.failed_step, step.name]
+                                    - set: [res.message, err_txt]
+                            else: [{ set: [res.steps_done, { +: [res.steps_done, 1] }] }]
+                  - set: [six, { +: [six, 1] }]
+
+            - call: [sess.close]
+            - if:
+                condition: { eq: [bad_num, 0] }
+                then: [{ set: [res.success, 1] }, { set: [res.message, "zurueckgebaut"] }]
+                else: [{ set: [res.message, "${bad_num} Schritt(e) fehlgeschlagen, erster: ${res.failed_step} — ${res.message}"] }]
+            - return: res
+

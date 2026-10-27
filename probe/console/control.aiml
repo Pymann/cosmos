@@ -1,0 +1,7 @@
+# Kontrolle: identischer Lauf OHNE die Angebotsaufrufe.  Differenz = mein Anteil.
+- def:
+    name: main
+    return: i32
+    body:
+      - call: [log.info, "control"]
+      - return: [0]

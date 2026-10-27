@@ -1,0 +1,115 @@
+# Mirror RPC-Handler für Profil-Aktionen eines eingeloggten Spielers.
+#
+#   set_nickname    (SetNicknameReq    → AuthResult)
+#   change_password (ChangePasswordReq → AuthResult)
+#   change_email    (ChangeEmailReq    → AuthResult)
+#
+# auth_handlers.aiml führt bereits 3 Handler (§14 3-cap) → eigene Datei.
+# Token → email/pid via `<.auth.email_for_token` / `<.auth.pid_for_token`;
+# danach die jeweilige Methode auf derselben sees-Kante.
+#
+# Static-Check (spec/49 §14): 3 classes — am Cap.
+
+- import: "sources/models/auth_result.aiml"
+- import: "sources/models/auth_profile_reqs.aiml"
+
+# Stufe 2 (spec/58): diese Handler waren Klassen, die die Dienste über
+# Globals erreichten.  Jetzt sind sie Instanzen der CosmosRuntime und ihr
+# `run` steht hier als Gruppen-Methode — Zugriff nur über die deklarierten
+# sees-Kanten.  KEIN Import aus dem Server: die Gruppen-Datei importiert
+# diese Datei (§1.1), umgekehrt gäbe es einen Zyklus.
+
+- groupmethods:
+    group: CosmosRuntime
+    instances:
+      - instance: set_nickname
+        methods:
+          - def:
+              name: run
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, SetNicknameReq]
+                - decl: [rc_val, i32, { call: [session.decode_rpc, rpc, req] }]
+                - if:
+                    condition: { neq: [rc_val, 0] }
+                    then:
+                      - decl: [bad, AuthResult]
+                      - set: [bad.success, 0]
+                      - set: [bad.message, "malformed set_nickname payload"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, bad]
+                      - return: []
+                # email, nicht player_id: `set_nickname` schlägt den Nutzer im
+                # users-KV nach, und das ist email-keyed (wie change_password
+                # und change_email daneben).  Stand hier vorher pid_for_token,
+                # antwortete der Handler ausnahmslos "unknown user".
+                - decl: [req_eml, string, { call: [<.auth.email_for_token, req.token] }]
+                - if:
+                    condition: { eq: [req_eml.len, 0] }
+                    then:
+                      - decl: [auth_err, AuthResult]
+                      - set: [auth_err.success, 0]
+                      - set: [auth_err.message, "invalid token"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, auth_err]
+                      - return: []
+                - decl: [res, AuthResult, { call: [<.auth.set_nickname, req_eml, req.new_nick] }]
+                - call: [session.reply_rpc, rpc, "set_result", 0, res]
+
+    # change_password (ChangePasswordReq → AuthResult): altes Passwort prüfen,
+    # neues setzen.  email_for_token → email (KV ist email-keyed).
+      - instance: change_password
+        methods:
+          - def:
+              name: run
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, ChangePasswordReq]
+                - decl: [rc_val, i32, { call: [session.decode_rpc, rpc, req] }]
+                - if:
+                    condition: { neq: [rc_val, 0] }
+                    then:
+                      - decl: [bad, AuthResult]
+                      - set: [bad.success, 0]
+                      - set: [bad.message, "malformed change_password payload"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, bad]
+                      - return: []
+                - decl: [req_eml, string, { call: [<.auth.email_for_token, req.token] }]
+                - if:
+                    condition: { eq: [req_eml.len, 0] }
+                    then:
+                      - decl: [auth_err, AuthResult]
+                      - set: [auth_err.success, 0]
+                      - set: [auth_err.message, "invalid token"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, auth_err]
+                      - return: []
+                - decl: [res, AuthResult, { call: [<.auth.change_password, req_eml, req.old_password, req.new_password] }]
+                - call: [session.reply_rpc, rpc, "set_result", 0, res]
+
+    # change_email (ChangeEmailReq → AuthResult): Email umschlüsseln (users+tokens);
+    # Passwort bestätigt.  email_for_token → aktuelle email.
+      - instance: change_email
+        methods:
+          - def:
+              name: run
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, ChangeEmailReq]
+                - decl: [rc_val, i32, { call: [session.decode_rpc, rpc, req] }]
+                - if:
+                    condition: { neq: [rc_val, 0] }
+                    then:
+                      - decl: [bad, AuthResult]
+                      - set: [bad.success, 0]
+                      - set: [bad.message, "malformed change_email payload"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, bad]
+                      - return: []
+                - decl: [req_eml, string, { call: [<.auth.email_for_token, req.token] }]
+                - if:
+                    condition: { eq: [req_eml.len, 0] }
+                    then:
+                      - decl: [auth_err, AuthResult]
+                      - set: [auth_err.success, 0]
+                      - set: [auth_err.message, "invalid token"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, auth_err]
+                      - return: []
+                - decl: [res, AuthResult, { call: [<.auth.change_email, req_eml, req.new_email, req.password] }]
+                - call: [session.reply_rpc, rpc, "set_result", 0, res]

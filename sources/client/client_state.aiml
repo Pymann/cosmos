@@ -1,0 +1,103 @@
+# CosmosClient — die Zustands-Gruppe des Clients (doc/spec/105).
+#
+# Der Client hielt 29 Globals; drei davon besassen Modelle und haben den
+# WASM-Client zweimal zum Absturz gebracht, weil ein Global keinen Eigentuemer
+# hat und jeder es weiterreichen darf (doc/spec/105 §105.0).
+#
+# Jede Instanz deklariert ihre Kollaborateure SELBST als Member
+# (`- [session, ref<SessionState>]` — GELIEHEN, nicht besessen: die Gruppe gibt
+# die Instanz frei, ein `ptr` hier waere die zweite Freigabe, spec/58 §5.1);
+# die Gruppe verdrahtet sie ueber `sees: [session]`.  Dadurch
+# duerfen GEWOEHNLICHE Klassenmethoden `<.session.token` lesen — die Klassen
+# bleiben einzeln prüfbar, und niemand muss einen Parameter durch jede
+# Signatur fädeln.
+
+- import: "sources/client/net/session_state.aiml"
+- import: "sources/client/net/live_state.aiml"
+- import: "sources/client/net/agents_state.aiml"
+- import: "sources/client/net/tokens_state.aiml"
+- import: "sources/client/net/provision_state.aiml"
+- import: "sources/client/net/pipeline_state.aiml"
+- import: "sources/client/net/console_state.aiml"
+- import: "sources/client/console_screen.aiml"
+- import: "sources/client/net/users_state.aiml"
+- import: "sources/client/users_screen.aiml"
+- import: "sources/client/account_screen.aiml"
+- import: "sources/client/net/push_router.aiml"
+- import: "sources/client/login_screen.aiml"
+- import: "sources/client/main_menu_screen.aiml"
+- import: "sources/client/agents_screen.aiml"
+- import: "sources/client/pipeline_screen.aiml"
+
+- classgroup:
+    name: CosmosClient
+    instances:
+      - class: SessionState
+        instance: session
+
+      - class: LiveState
+        instance: live
+        sees: [session]
+
+      - class: AgentsState
+        instance: agents_state
+        sees: [session]
+
+      - class: TokensState
+        instance: tokens_state
+        sees: [session]
+
+      - class: ProvisionState
+        instance: provisioning
+        sees: [session]
+
+      - class: PipelineState
+        instance: pipelines
+        sees: [session]
+
+      # Der Verteiler sieht alles, was einen Push annehmen kann.
+      - class: PushRouter
+        instance: push_router
+        sees: [session, live, agents_state]
+
+      # Bildschirme, die Session-Zustand brauchen, sind ebenfalls Instanzen —
+      # nur so verdrahtet `sees` ihr `session`-Member (spec/58 §5.1).
+      - class: LoginScreen
+        instance: login
+        sees: [session]
+
+      - class: MainMenuScreen
+        instance: menu
+        sees: [session, live]
+
+      - class: AgentsScreen
+        instance: agents
+        sees: [session, provisioning]
+
+      - class: PipelineScreen
+        instance: pipes
+        sees: [pipelines, live]
+
+      # doc/spec/108: die Skript-Konsole.  Netz-Teil und Bildschirm getrennt wie
+      # ueberall sonst — der Bildschirm ruft nie selbst, er merkt den Wunsch.
+      - class: ConsoleState
+        instance: console_state
+        sees: [session]
+
+      - class: ConsoleScreen
+        instance: console
+
+      # doc/spec/108 §2: Rechtevergabe.
+      - class: UsersState
+        instance: users_state
+        sees: [session]
+        constructor: [init]
+
+      - class: UsersScreen
+        instance: users_screen
+
+      # doc/spec/107 F107-3: das Konto-Overlay gehoert dem WIRT, nicht der Jobliste —
+      # der Knopf sitzt im Kopf der Huelle und muss aus jedem Bereich wirken.
+      - class: AccountScreen
+        instance: account
+        sees: [session]

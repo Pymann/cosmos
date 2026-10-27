@@ -1,0 +1,358 @@
+# Einheits-Koerper fuer die raeumliche Pipeline (doc/spec/107 §107.1b).
+#
+# Je Form EIN Mesh, danach viele Instanzen mit eigener Matrix — bei unter
+# hundert Objekten ist das die ehrliche Wahl (F107-13).
+#
+# Kugel und Rohr sind parametrisch: was eine Formel vollstaendig beschreibt,
+# bleibt Formel.  Trommel und Rack sind ebenfalls hier erzeugt, solange sie
+# schlicht sind; sobald sie entworfen werden (Fasen, Einschuebe), kommen sie
+# als ShapeML-Modell und werden hier nur noch geladen.
+#
+# Alle Koerper sind EINHEITSGROSS und im Ursprung zentriert, damit die
+# Instanz-Matrix allein Lage und Groesse bestimmt:
+#   Kugel   Radius 1
+#   Rohr    Radius 1, Hoehe 1 entlang +Y (von -0.5 bis +0.5)
+#   Trommel wie das Rohr, mit Deckel und Boden
+#   Quader  1x1x1
+
+- class:
+    name: MeshShapes
+    members:
+      - [sphere, gl_mesh]
+      - [tube,   gl_mesh]
+      - [drum,   gl_mesh]
+      - [cube,   gl_mesh]
+      # Aus ShapeML geladene Modelle (shapes/*.shaml → assets/shapes/*.glb).  Je
+      # Datei koennen es mehrere Teile sein (ein Material, ein Teil) — sie
+      # werden alle mit derselben Zustandsfarbe gezeichnet, denn die Form
+      # traegt die Art, die Farbe den Zustand (doc/spec/107 F107-13).
+      - [rack_parts, list<gl_mesh>]
+      - [drum_parts, list<gl_mesh>]
+      # Die Flagge eines Haltepunkts (doc/spec/107 §107.1d): Mast, Knauf, Tuch.
+      # Entworfen statt gerechnet, weil ein Tuch Unterteilungen braucht — ein
+      # Quader weht nicht.
+      - [flag_parts, list<gl_mesh>]
+      - [built,  i32]
+    methods:
+      - def:
+          name: build
+          access: public
+          body:
+            - if: { condition: { eq: [<.built, 1] }, then: [{ return: [] }] }
+            - set: [<.sphere, { call: [<.make_sphere, 24, 16] }]
+            - set: [<.tube, { call: [<.make_tube, 20, 0] }]
+            - set: [<.drum, { call: [<.make_tube, 20, 1] }]
+            - set: [<.cube, { call: [<.make_cube] }]
+            # Entworfene Koerper, wo sie sich lohnen (§107.1b): ein Rack sagt
+            # „Maschine", ein Quader sagt nur „Ding".  Fehlt die Datei, bleibt
+            # es beim Grundkoerper — lieber schlicht als leer.
+            - call: [<.load_glb, "cosmos_rack", <.rack_parts]
+            - call: [<.load_glb, "cosmos_drum", <.drum_parts]
+            - call: [<.load_glb, "cosmos_flag", <.flag_parts]
+            - set: [<.built, 1]
+
+      # load_glb: alle Teile eines Modells als Meshes sammeln.  Angegeben wird
+      # der STEM, nicht der Pfad (aiml spec/44_7): ein fester Pfad braucht ein
+      # bestimmtes Arbeitsverzeichnis und findet im WASM-Bündel gar nichts.
+      - def:
+          name: load_glb
+          access: public
+          static_off: ["str_cmp"]
+          args: [[stem, string], [parts, list<gl_mesh>]]
+          body:
+            - decl: [scene, gltf_scene, { call: [gltf.model, stem] }]
+            - if:
+                condition: { eq: [{ call: [scene.valid] }, 0] }
+                then:
+                  - call: [log.warn, "[shapes] ${stem} nicht lesbar: ${{ call: [scene.error] }}"]
+                  - return: []
+            - decl: [meshes, list<gltf_mesh>, { call: [scene.meshes] }]
+            - decl: [mix, i32, 0]
+            - while:
+                condition: { lt: [mix, meshes.len] }
+                body:
+                  - decl: [one_mesh, gltf_mesh, { at: [meshes, mix] }]
+                  - set: [mix, { +: [mix, 1] }]
+                  - decl: [prim_n, i32, { call: [one_mesh.primitive_count] }]
+                  - decl: [pix, i32, 0]
+                  - while:
+                      condition: { lt: [pix, prim_n] }
+                      body:
+                        - decl: [prim, gltf_primitive, { call: [one_mesh.primitive, pix] }]
+                        - set: [pix, { +: [pix, 1] }]
+                        - decl: [made, gl_mesh, { call: [prim.to_gl_mesh] }]
+                        - if: { condition: { neq: [made, null] }, then: [{ call: [parts.push, made] }] }
+            - call: [log.info, "[shapes] ${stem}: ${parts.len} Teil(e)"]
+
+      # ── Kugel: Laengen- x Breitengrade ─────────────────────────────────
+      # Normale == Position (Einheitskugel) — das spart den halben Aufbau und
+      # ist exakt, nicht genaehert.
+      - def:
+          name: make_sphere
+          access: public
+          args: [[segs, i32], [rings, i32]]
+          return: gl_mesh
+          body:
+            - decl: [vcount, i32, { '*': [{ +: [segs, 1] }, { +: [rings, 1] }] }]
+            - decl: [pos, buffer<f32>]
+            - call: [pos.alloc, { '*': [vcount, 12] }]
+            - decl: [nrm, buffer<f32>]
+            - call: [nrm.alloc, { '*': [vcount, 12] }]
+            - decl: [uvs, buffer<f32>]
+            - call: [uvs.alloc, { '*': [vcount, 8] }]
+            - decl: [pi_val, f32, 3.14159265]
+            - decl: [ring, i32, 0]
+            - while:
+                condition: { le: [ring, rings] }
+                body:
+                  - decl: [vfrac, f32, { '/': [{ cast: [ring, f32] }, { cast: [rings, f32] }] }]
+                  - decl: [phi, f32, { '*': [vfrac, pi_val] }]
+                  - decl: [sin_p, f32, { call: [math.sin, phi] }]
+                  - decl: [cos_p, f32, { call: [math.cos, phi] }]
+                  - decl: [seg, i32, 0]
+                  - while:
+                      condition: { le: [seg, segs] }
+                      body:
+                        - decl: [ufrac, f32, { '/': [{ cast: [seg, f32] }, { cast: [segs, f32] }] }]
+                        - decl: [theta, f32, { '*': [ufrac, { '*': [pi_val, 2.0] }] }]
+                        - decl: [pos_x, f32, { '*': [sin_p, { call: [math.cos, theta] }] }]
+                        - decl: [pos_y, f32, cos_p]
+                        - decl: [pos_z, f32, { '*': [sin_p, { call: [math.sin, theta] }] }]
+                        - call: [pos.write, pos_x, f32]
+                        - call: [pos.write, pos_y, f32]
+                        - call: [pos.write, pos_z, f32]
+                        - call: [nrm.write, pos_x, f32]
+                        - call: [nrm.write, pos_y, f32]
+                        - call: [nrm.write, pos_z, f32]
+                        - call: [uvs.write, ufrac, f32]
+                        - call: [uvs.write, vfrac, f32]
+                        - set: [seg, { +: [seg, 1] }]
+                  - set: [ring, { +: [ring, 1] }]
+            - decl: [idx, buffer<u32>]
+            - call: [idx.alloc, { '*': [{ '*': [segs, rings] }, 24] }]
+            - decl: [quad_row, i32, 0]
+            - while:
+                condition: { lt: [quad_row, rings] }
+                body:
+                  - decl: [quad_col, i32, 0]
+                  - while:
+                      condition: { lt: [quad_col, segs] }
+                      body:
+                        - decl: [base, i32, { +: [{ '*': [quad_row, { +: [segs, 1] }] }, quad_col] }]
+                        - decl: [next_row, i32, { +: [base, { +: [segs, 1] }] }]
+                        - call: [idx.write, base, u32]
+                        - call: [idx.write, next_row, u32]
+                        - call: [idx.write, { +: [base, 1] }, u32]
+                        - call: [idx.write, { +: [base, 1] }, u32]
+                        - call: [idx.write, next_row, u32]
+                        - call: [idx.write, { +: [next_row, 1] }, u32]
+                        - set: [quad_col, { +: [quad_col, 1] }]
+                  - set: [quad_row, { +: [quad_row, 1] }]
+            - return: { call: [gl.create_mesh, pos, uvs, nrm, idx] }
+
+      # ── Rohr: Mantel entlang +Y, wahlweise mit Deckeln (Trommel) ───────
+      # Die UV-Koordinate v laeuft von 0 (unten) nach 1 (oben) — daran
+      # entlang wandert spaeter das Fluss-Band (F107-14).
+      - def:
+          name: make_tube
+          access: public
+          args: [[segs, i32], [capped, i32]]
+          return: gl_mesh
+          body:
+            - decl: [rim, i32, { +: [segs, 1] }]
+            - decl: [vcount, i32, { '*': [rim, 2] }]
+            - if: { condition: { eq: [capped, 1] }, then: [{ set: [vcount, { +: [vcount, { +: [{ '*': [rim, 2] }, 2] }] }] }] }
+            - decl: [pos, buffer<f32>]
+            - call: [pos.alloc, { '*': [vcount, 12] }]
+            - decl: [nrm, buffer<f32>]
+            - call: [nrm.alloc, { '*': [vcount, 12] }]
+            - decl: [uvs, buffer<f32>]
+            - call: [uvs.alloc, { '*': [vcount, 8] }]
+            - decl: [pi2, f32, 6.28318531]
+            - decl: [half, f32, 0.5]
+            # Mantel: zwei Ringe
+            - decl: [side, i32, 0]
+            - while:
+                condition: { lt: [side, 2] }
+                body:
+                  - decl: [ypos, f32, { -: [{ cast: [side, f32] }, half] }]
+                  - decl: [seg, i32, 0]
+                  - while:
+                      condition: { le: [seg, segs] }
+                      body:
+                        - decl: [ufrac, f32, { '/': [{ cast: [seg, f32] }, { cast: [segs, f32] }] }]
+                        - decl: [ang, f32, { '*': [ufrac, pi2] }]
+                        - decl: [cos_a, f32, { call: [math.cos, ang] }]
+                        - decl: [sin_a, f32, { call: [math.sin, ang] }]
+                        - call: [pos.write, cos_a, f32]
+                        - call: [pos.write, ypos, f32]
+                        - call: [pos.write, sin_a, f32]
+                        - call: [nrm.write, cos_a, f32]
+                        - call: [nrm.write, 0.0, f32]
+                        - call: [nrm.write, sin_a, f32]
+                        - call: [uvs.write, ufrac, f32]
+                        - call: [uvs.write, { cast: [side, f32] }, f32]
+                        - set: [seg, { +: [seg, 1] }]
+                  - set: [side, { +: [side, 1] }]
+            - decl: [idx, buffer<u32>]
+            - call: [idx.alloc, { '*': [{ +: [segs, 2] }, 48] }]
+            - decl: [quad_col, i32, 0]
+            - while:
+                condition: { lt: [quad_col, segs] }
+                body:
+                  - decl: [low, i32, quad_col]
+                  - decl: [high, i32, { +: [quad_col, rim] }]
+                  - call: [idx.write, low, u32]
+                  - call: [idx.write, high, u32]
+                  - call: [idx.write, { +: [low, 1] }, u32]
+                  - call: [idx.write, { +: [low, 1] }, u32]
+                  - call: [idx.write, high, u32]
+                  - call: [idx.write, { +: [high, 1] }, u32]
+                  - set: [quad_col, { +: [quad_col, 1] }]
+            - if:
+                condition: { eq: [capped, 1] }
+                then: [{ call: [<.add_caps, pos, nrm, uvs, idx, segs] }]
+            - return: { call: [gl.create_mesh, pos, uvs, nrm, idx] }
+
+      # add_caps: Deckel und Boden als Faecher um je einen Mittelpunkt.
+      - def:
+          name: add_caps
+          args: [[pos, buffer<f32>], [nrm, buffer<f32>], [uvs, buffer<f32>], [idx, buffer<u32>], [segs, i32]]
+          body:
+            - decl: [rim, i32, { +: [segs, 1] }]
+            - decl: [pi2, f32, 6.28318531]
+            - decl: [half, f32, 0.5]
+            - decl: [cap, i32, 0]
+            - while:
+                condition: { lt: [cap, 2] }
+                body:
+                  - decl: [ypos, f32, { -: [{ cast: [cap, f32] }, half] }]
+                  - decl: [ydir, f32, { -: [{ '*': [{ cast: [cap, f32] }, 2.0] }, 1.0] }]
+                  # Mittelpunkt zuerst, danach der Rand.
+                  - decl: [centre_at, i32, { +: [{ '*': [rim, 2] }, { '*': [cap, { +: [rim, 1] }] }] }]
+                  - call: [pos.write, 0.0, f32]
+                  - call: [pos.write, ypos, f32]
+                  - call: [pos.write, 0.0, f32]
+                  - call: [nrm.write, 0.0, f32]
+                  - call: [nrm.write, ydir, f32]
+                  - call: [nrm.write, 0.0, f32]
+                  - call: [uvs.write, 0.5, f32]
+                  - call: [uvs.write, 0.5, f32]
+                  - decl: [seg, i32, 0]
+                  - while:
+                      condition: { le: [seg, segs] }
+                      body:
+                        - decl: [ufrac, f32, { '/': [{ cast: [seg, f32] }, { cast: [segs, f32] }] }]
+                        - decl: [ang, f32, { '*': [ufrac, pi2] }]
+                        - decl: [cos_a, f32, { call: [math.cos, ang] }]
+                        - decl: [sin_a, f32, { call: [math.sin, ang] }]
+                        - call: [pos.write, cos_a, f32]
+                        - call: [pos.write, ypos, f32]
+                        - call: [pos.write, sin_a, f32]
+                        - call: [nrm.write, 0.0, f32]
+                        - call: [nrm.write, ydir, f32]
+                        - call: [nrm.write, 0.0, f32]
+                        - call: [uvs.write, ufrac, f32]
+                        - call: [uvs.write, { cast: [cap, f32] }, f32]
+                        - set: [seg, { +: [seg, 1] }]
+                  - decl: [fan, i32, 0]
+                  - while:
+                      condition: { lt: [fan, segs] }
+                      body:
+                        - decl: [one, i32, { +: [{ +: [centre_at, 1] }, fan] }]
+                        - call: [idx.write, centre_at, u32]
+                        - if:
+                            condition: { eq: [cap, 1] }
+                            then:
+                              - call: [idx.write, one, u32]
+                              - call: [idx.write, { +: [one, 1] }, u32]
+                            else:
+                              - call: [idx.write, { +: [one, 1] }, u32]
+                              - call: [idx.write, one, u32]
+                        - set: [fan, { +: [fan, 1] }]
+                  - set: [cap, { +: [cap, 1] }]
+
+      # ── Quader: 24 Vertices, damit jede Seite ihre eigene Normale hat ──
+      - def:
+          name: make_cube
+          access: public
+          return: gl_mesh
+          body:
+            - decl: [pos, buffer<f32>]
+            - call: [pos.alloc, 288]
+            - decl: [nrm, buffer<f32>]
+            - call: [nrm.alloc, 288]
+            - decl: [uvs, buffer<f32>]
+            - call: [uvs.alloc, 192]
+            - decl: [idx, buffer<u32>]
+            - call: [idx.alloc, 144]
+            - decl: [face, i32, 0]
+            - while:
+                condition: { lt: [face, 6] }
+                body:
+                  - call: [<.cube_face, pos, nrm, uvs, idx, face]
+                  - set: [face, { +: [face, 1] }]
+            - return: { call: [gl.create_mesh, pos, uvs, nrm, idx] }
+
+      - def:
+          name: cube_face
+          args: [[pos, buffer<f32>], [nrm, buffer<f32>], [uvs, buffer<f32>], [idx, buffer<u32>], [face, i32]]
+          body:
+            # Achse und Vorzeichen aus der Flaechennummer: 0/1 = +X/-X,
+            # 2/3 = +Y/-Y, 4/5 = +Z/-Z.
+            - decl: [axis, i32, { '/': [face, 2] }]
+            - decl: [sign, f32, 1.0]
+            - if: { condition: { eq: [{ '%': [face, 2] }, 1] }, then: [{ set: [sign, -1.0] }] }
+            - decl: [half, f32, 0.5]
+            - decl: [corner, i32, 0]
+            - while:
+                condition: { lt: [corner, 4] }
+                body:
+                  # Zwei Bits der Ecke werden zu den beiden Flaechen-Achsen.
+                  - decl: [bit_low, i32, { '%': [corner, 2] }]
+                  - decl: [bit_high, i32, { '/': [corner, 2] }]
+                  - decl: [uval, f32, { -: [{ cast: [bit_low, f32] }, half] }]
+                  - decl: [vval, f32, { -: [{ cast: [bit_high, f32] }, half] }]
+                  - decl: [pos_x, f32, 0.0]
+                  - decl: [pos_y, f32, 0.0]
+                  - decl: [pos_z, f32, 0.0]
+                  - decl: [nrm_x, f32, 0.0]
+                  - decl: [nrm_y, f32, 0.0]
+                  - decl: [nrm_z, f32, 0.0]
+                  - if:
+                      condition: { eq: [axis, 0] }
+                      then: [{ set: [pos_x, { '*': [sign, half] }] }, { set: [pos_y, uval] }, { set: [pos_z, vval] }, { set: [nrm_x, sign] }]
+                  - if:
+                      condition: { eq: [axis, 1] }
+                      then: [{ set: [pos_y, { '*': [sign, half] }] }, { set: [pos_x, uval] }, { set: [pos_z, vval] }, { set: [nrm_y, sign] }]
+                  - if:
+                      condition: { eq: [axis, 2] }
+                      then: [{ set: [pos_z, { '*': [sign, half] }] }, { set: [pos_x, uval] }, { set: [pos_y, vval] }, { set: [nrm_z, sign] }]
+                  - call: [pos.write, pos_x, f32]
+                  - call: [pos.write, pos_y, f32]
+                  - call: [pos.write, pos_z, f32]
+                  - call: [nrm.write, nrm_x, f32]
+                  - call: [nrm.write, nrm_y, f32]
+                  - call: [nrm.write, nrm_z, f32]
+                  - call: [uvs.write, { +: [uval, half] }, f32]
+                  - call: [uvs.write, { +: [vval, half] }, f32]
+                  - set: [corner, { +: [corner, 1] }]
+            # Die NEGATIVEN Flaechen laufen andersherum, sonst zeigen ihre
+            # Dreiecke nach innen und der Quader waere von aussen halb offen.
+            - decl: [base, i32, { '*': [face, 4] }]
+            - if:
+                condition: { lt: [sign, 0.0] }
+                then:
+                  - call: [idx.write, base, u32]
+                  - call: [idx.write, { +: [base, 2] }, u32]
+                  - call: [idx.write, { +: [base, 1] }, u32]
+                  - call: [idx.write, { +: [base, 1] }, u32]
+                  - call: [idx.write, { +: [base, 2] }, u32]
+                  - call: [idx.write, { +: [base, 3] }, u32]
+                else:
+                  - call: [idx.write, base, u32]
+                  - call: [idx.write, { +: [base, 1] }, u32]
+                  - call: [idx.write, { +: [base, 2] }, u32]
+                  - call: [idx.write, { +: [base, 2] }, u32]
+                  - call: [idx.write, { +: [base, 1] }, u32]
+                  - call: [idx.write, { +: [base, 3] }, u32]

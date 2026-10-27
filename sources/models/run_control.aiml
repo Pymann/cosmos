@@ -1,0 +1,48 @@
+# Was der Bediener einem Lauf sagt (aiml spec/62 §5.9, doc/spec/101 §101.6).
+#
+# Getrennt vom Lauf selbst, aus zwei Gruenden: es ist die ABSICHT eines
+# Menschen und nicht die Aufzeichnung des Laufs — und ein neues Feld an
+# PipelineRun aendert dessen Layout, womit jeder gespeicherte Lauf unlesbar
+# waere (doc/spec/108 F108-2).
+#
+# Static-Check (aiml spec/49 §14): 3 models.
+
+# 0 = laeuft frei, 1 = angehalten, 2 = Einzelschritt (jede Stufe einzeln
+# freigeben).  Als Enum, damit die Zahl nicht an zehn Stellen auftaucht.
+- enum:
+    name: RunMode
+    values:
+      - free
+      - halted
+      - stepping
+
+- model:
+    name: RunControl
+    fields:
+      - [run_id,  string]
+      - [mode,    i32]
+      # Im Einzelschritt: wie viele Stufen noch starten duerfen.  Jede
+      # Zuteilung verbraucht eine.  0 heisst: der naechste wartet.
+      - [release, i32]
+      - [actor,   string]       # wer es gesagt hat
+      - [at_ms,   i64]
+
+- model:
+    name: RunCtrlReq
+    fields:
+      - [token,  string]
+      - [run_id, string]
+      # Fuer `set_break` / `clear_break` / `rewind_run`: WELCHE Stufe.  Leer
+      # heisst: der ganze Lauf (pause_run, resume_run, step_run).
+      - [stage_id, string]
+      # Fuer `step_run`: wie viele Stufen freigegeben werden.  0 wird als 1
+      # gelesen — wer „einen Schritt" sagt, meint nicht „keinen".
+      - [steps,  i32]
+
+- model:
+    name: RunCtrlResp
+    fields:
+      - [accepted, i32]
+      - [mode,    i32]
+      - [release, i32]
+      - [message, string]

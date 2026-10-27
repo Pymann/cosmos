@@ -1,0 +1,817 @@
+# RpcSurface — Testclient für die RPC-Handler, die keine andere Abnahme anfasst.
+#
+# Hintergrund: die E2E-Abnahme (e2e_agent_exec/e2e_enroll) übt nur den
+# Agenten-Pfad aus — Login, Agentenliste, Kommando, Ausgabe, Tokens.  Profil,
+# Logout, validate_token und die Cluster-Leser liefen bisher ausschliesslich
+# im Browser.  Genau die wurden bei der Umstellung auf Gruppen-Instanzen
+# (spec/58) umgehängt: ihr Dienst-Zugriff läuft jetzt über `sees`-Kanten statt
+# über `g_runtime`.  Eine falsch gesetzte Kante fällt erst beim Dispatch auf,
+# nicht beim Übersetzen — darum diese Probe.
+#
+# Ein Test für alle neun Handler, nicht neun Tests: jeder eigene Test würde
+# den Server neu bauen und starten.
+
+- import: "sources/models/run_control.aiml"
+- import: "sources/models/run_window.aiml"
+- import: "sources/models/auth_reqs.aiml"
+- import: "sources/models/agent_list.aiml"
+- import: "sources/models/level_reqs.aiml"
+- import: "sources/models/console_reqs.aiml"
+- import: "sources/models/auth_result.aiml"
+- import: "sources/models/auth_profile_reqs.aiml"
+- import: "sources/models/cluster_reqs.aiml"
+- import: "sources/models/provision_reqs.aiml"
+- import: "sources/models/job_reqs.aiml"
+- import: "sources/models/agent_token.aiml"
+- import: "sources/models/agent_token_reqs.aiml"
+- import: "sources/models/pipeline_reqs.aiml"
+- import: "sources/shared/cluster_view.aiml"
+
+- class:
+    name: RpcSurface
+    members:
+      - [stage_arg, string]
+      - [sess,  mirror_session]
+      - [token, string, ""]
+      - [email, string, ""]
+      - [fails, i32, 0]
+    methods:
+      - def:
+          name: connect
+          access: public
+          args: [[url, string]]
+          return: i32
+          body:
+            - set: [<.sess, { call: [mirror.connect_timeout, url, 4000] }]
+            - if: { condition: { eq: [<.sess, null] }, then: [{ print: ["SURFACE: connect ${url} fehlgeschlagen"] }, { return: 0 }] }
+            - call: [time.sleep_ms, 150]
+            - call: [<.sess.update]
+            - return: 1
+
+      # Jede Prüfung meldet sich selbst; `fails` zählt, damit ein Lauf ALLE
+      # Befunde zeigt statt beim ersten abzubrechen.
+      - def:
+          name: check
+          access: public
+          args: [[what, string], [got, i32], [want, i32]]
+          body:
+            - if:
+                condition: { neq: [got, want] }
+                then:
+                  - set: [<.fails, { +: [<.fails, 1] }]
+                  - print: ["  FAIL ${what}: success=${got}, erwartet ${want}"]
+                else:
+                  - print: ["  ok   ${what}"]
+
+      # submit_register + submit_login: Konto anlegen und anmelden.
+      - def:
+          name: register_and_login
+          access: public
+          args: [[email, string], [pass, string]]
+          return: i32
+          body:
+            - decl: [rreq, RegisterReq]
+            - set: [rreq.email, email]
+            - set: [rreq.password, pass]
+            # Der Nickname ist serverweit EINDEUTIG (auth_service: "nickname
+            # already taken").  Ein fester Name konnte sich darum genau EINMAL
+            # je Server anmelden; der zweite Aufruf scheiterte, und weil unten
+            # nur geprueft wurde, ob eine ANTWORT kam, meldete das Werkzeug
+            # „ok" und brach erst bei der Anmeldung ab — mit einer Begruendung,
+            # die nichts mit der Ursache zu tun hatte.  Aus der Adresse
+            # abgeleitet, damit zwei Laeufe nicht kollidieren.
+            - decl: [cut, i32, { call: [email.index_of, "@"] }]
+            - decl: [nick, string, email]
+            - if: { condition: { gt: [cut, 2] }, then: [{ set: [nick, { call: [email.substr, 0, cut] }] }] }
+            - set: [rreq.display_name, nick]
+            - decl: [rres, ptr<AuthResult>, { new: AuthResult }]
+            - decl: [rgot, i32, { call: [<.sess.send_and_await, 0, "submit_register", rreq, rres, 4000] }]
+            - call: [<.check, "submit_register", rgot, 1]
+            # Und: eine Antwort ist noch kein Ja.  Ein bereits vorhandenes Konto
+            # ist dabei KEIN Fehler — dann zaehlt nur, ob die Anmeldung klappt.
+            - if:
+                condition: { neq: [rres.success, 1] }
+                then: [{ call: [log.info, "  (Register: ${rres.message} — versuche Anmeldung)"] }]
+
+            - decl: [lreq, LoginReq]
+            - set: [lreq.email, email]
+            - set: [lreq.password, pass]
+            - decl: [lres, ptr<AuthResult>, { new: AuthResult }]
+            - decl: [lgot, i32, { call: [<.sess.send_and_await, 0, "submit_login", lreq, lres, 4000] }]
+            - if:
+                condition: { neq: [lgot, 1] }
+                then:
+                  - set: [<.fails, { +: [<.fails, 1] }]
+                  - print: ["  FAIL submit_login: keine Antwort"]
+                  - return: 0
+            - call: [<.check, "submit_login", lres.success, 1]
+            - set: [<.token, lres.token]
+            - set: [<.email, email]
+            - return: <.token.len
+
+      # Welche Stufe die naechste Steuerung meint (Flagge, „ab hier").  Als
+      # Feld statt als sechstes Argument: `run_ctrl` haette sonst mehr
+      # Argumente, als aiml zulaesst (spec/49 §15).
+      - def:
+          name: aim_at
+          access: public
+          args: [[stage, string]]
+          body: [{ set: [<.stage_arg, stage] }]
+
+      # run_ctrl: anhalten / weiterlaufen / einen Schritt (doc/spec/101 §101.7).
+      # Ein Weg fuer alle drei: sie unterscheiden sich nur im Wort.
+      - def:
+          name: run_ctrl
+          access: public
+          static_off: ["str_cmp"]
+          args: [[verb, string], [run_id, string], [steps, i32]]
+          return: i32
+          body:
+            - decl: [creq, RunCtrlReq]
+            - set: [creq.token, <.token]
+            - set: [creq.run_id, run_id]
+            - set: [creq.steps, steps]
+            - set: [creq.stage_id, <.stage_arg]
+            - decl: [cres, ptr<RunCtrlResp>, { new: RunCtrlResp }]
+            - decl: [cgot, i32, { call: [<.sess.send_and_await, 0, verb, creq, cres, 4000] }]
+            - if:
+                condition: { neq: [cgot, 1] }
+                then:
+                  - set: [<.fails, { +: [<.fails, 1] }]
+                  - print: ["  FAIL ${verb}: keine Antwort"]
+                  - return: 0
+            - print: ["  ${verb}: ${cres.message}"]
+            - return: cres.accepted
+
+      # validate_token: gültiges Token muss durchkommen, Unsinn muss scheitern.
+      # Prüft die sees-Kante `auth` UND dass die Ablehnung weiterhin greift.
+      - def:
+          name: validate
+          access: public
+          args: [[token, string], [want, i32]]
+          body:
+            - decl: [req, TokenReq]
+            - set: [req.token, token]
+            - decl: [res, ptr<AuthResult>, { new: AuthResult }]
+            - decl: [got, i32, { call: [<.sess.send_and_await, 0, "validate_token", req, res, 4000] }]
+            - if:
+                condition: { neq: [got, 1] }
+                then:
+                  - set: [<.fails, { +: [<.fails, 1] }]
+                  - print: ["  FAIL validate_token: keine Antwort"]
+                  - return: []
+            - if:
+                condition: { eq: [want, 1] }
+                then: [{ call: [<.check, "validate_token (gültig)", res.success, 1] }]
+                else: [{ call: [<.check, "validate_token (Unsinn abgelehnt)", res.success, 0] }]
+
+      # set_nickname: Profil-Handler, sees-Kante `auth`, Token → email-Lookup.
+      - def:
+          name: set_nick
+          access: public
+          args: [[nick, string]]
+          body:
+            - decl: [req, SetNicknameReq]
+            - set: [req.token, <.token]
+            - set: [req.new_nick, nick]
+            - decl: [res, ptr<AuthResult>, { new: AuthResult }]
+            - decl: [got, i32, { call: [<.sess.send_and_await, 0, "set_nickname", req, res, 4000] }]
+            - if:
+                condition: { neq: [got, 1] }
+                then:
+                  - set: [<.fails, { +: [<.fails, 1] }]
+                  - print: ["  FAIL set_nickname: keine Antwort"]
+                  - return: []
+            - call: [<.check, "set_nickname", res.success, 1]
+            # Der Handler soll den neuen Nick zurückmelden — sonst hat er den
+            # Lookup über `<.auth.email_for_token` nicht gemacht.
+            - if:
+                condition: { neq: [res.display_name, nick] }
+                then:
+                  - set: [<.fails, { +: [<.fails, 1] }]
+                  - print: ["  FAIL set_nickname: display_name='${res.display_name}', erwartet '${nick}'"]
+
+      # change_password: altes Passwort muss stimmen; danach gilt das neue.
+      - def:
+          name: change_pass
+          access: public
+          args: [[old_pass, string], [new_pass, string], [want, i32]]
+          body:
+            - decl: [req, ChangePasswordReq]
+            - set: [req.token, <.token]
+            - set: [req.old_password, old_pass]
+            - set: [req.new_password, new_pass]
+            - decl: [res, ptr<AuthResult>, { new: AuthResult }]
+            - decl: [got, i32, { call: [<.sess.send_and_await, 0, "change_password", req, res, 4000] }]
+            - if:
+                condition: { neq: [got, 1] }
+                then:
+                  - set: [<.fails, { +: [<.fails, 1] }]
+                  - print: ["  FAIL change_password: keine Antwort"]
+                  - return: []
+            - if:
+                condition: { eq: [want, 1] }
+                then: [{ call: [<.check, "change_password", res.success, 1] }]
+                else: [{ call: [<.check, "change_password (falsches alt abgelehnt)", res.success, 0] }]
+
+      # change_email: schlüsselt users+tokens um; Passwort bestätigt.
+      - def:
+          name: change_mail
+          access: public
+          args: [[new_email, string], [pass, string]]
+          body:
+            - decl: [req, ChangeEmailReq]
+            - set: [req.token, <.token]
+            - set: [req.new_email, new_email]
+            - set: [req.password, pass]
+            - decl: [res, ptr<AuthResult>, { new: AuthResult }]
+            - decl: [got, i32, { call: [<.sess.send_and_await, 0, "change_email", req, res, 4000] }]
+            - if:
+                condition: { neq: [got, 1] }
+                then:
+                  - set: [<.fails, { +: [<.fails, 1] }]
+                  - print: ["  FAIL change_email: keine Antwort"]
+                  - return: []
+            - call: [<.check, "change_email", res.success, 1]
+            - set: [<.email, new_email]
+
+      # logout: danach MUSS dasselbe Token abgelehnt werden — das ist der
+      # eigentliche Beweis, dass der Handler serverseitig invalidiert hat.
+      - def:
+          name: logout_and_verify
+          access: public
+          body:
+            - decl: [req, TokenReq]
+            - set: [req.token, <.token]
+            - decl: [res, ptr<AuthResult>, { new: AuthResult }]
+            - decl: [got, i32, { call: [<.sess.send_and_await, 0, "logout", req, res, 4000] }]
+            - if:
+                condition: { neq: [got, 1] }
+                then:
+                  - set: [<.fails, { +: [<.fails, 1] }]
+                  - print: ["  FAIL logout: keine Antwort"]
+                  - return: []
+            - call: [<.check, "logout", res.success, 1]
+            - call: [<.validate, <.token, 0]
+
+      # get_cluster / subscribe_cluster: sees-Kanten `cluster` (+ `cluster_subs`).
+      # Ein gültiges Token muss den Schnappschuss liefern, ein ungültiges die
+      # leere Sicht — der Handler antwortet in BEIDEN Fällen, nur mit leerem
+      # Inhalt (§AP1.6: keine Daten ohne Authentifizierung).
+      - def:
+          name: cluster_read
+          access: public
+          args: [[rpc_name, string], [token, string], [want_nodes, i32]]
+          body:
+            - decl: [req, ClusterReq]
+            - set: [req.token, token]
+            - decl: [view, ptr<ClusterView>, { new: ClusterView }]
+            - decl: [got, i32, { call: [<.sess.send_and_await, 0, rpc_name, req, view, 4000] }]
+            - if:
+                condition: { neq: [got, 1] }
+                then:
+                  - set: [<.fails, { +: [<.fails, 1] }]
+                  - print: ["  FAIL ${rpc_name}: keine Antwort"]
+                  - return: []
+            - call: [<.list_jobs, view]
+            - decl: [node_num, i32, view.nodes.len]
+            - if:
+                condition: { eq: [want_nodes, 1] }
+                then:
+                  - if:
+                      condition: { eq: [node_num, 0] }
+                      then:
+                        - set: [<.fails, { +: [<.fails, 1] }]
+                        # Auch im Fehlerfall sagen, WAS drin war: „0 nodes" ohne
+                        # den Rest laesst offen, ob der Schnappschuss leer ist
+                        # oder nur gerade kein Agent laeuft.
+                        - print: ["  FAIL ${rpc_name}: 0 nodes trotz gültigem Token (Jobs=${view.job_defs.len}, Laeufe=${view.pipelines.len}, Schichten=${view.layers.len})"]
+                      # Die SCHICHTEN mitzaehlen (doc/spec/107 §107.1c): sie
+                      # reisen im selben Schnappschuss, und eine Probe, die
+                      # den Schnappschuss liest, soll sagen, was drin war.
+                      else: [{ print: ["  ok   ${rpc_name} (nodes=${node_num}, Jobs=${view.job_defs.len}, Laeufe=${view.pipelines.len}, Schichten=${view.layers.len})"] }]
+                else:
+                  - if:
+                      condition: { neq: [node_num, 0] }
+                      then:
+                        - set: [<.fails, { +: [<.fails, 1] }]
+                        - print: ["  FAIL ${rpc_name}: ${node_num} nodes OHNE gültiges Token"]
+                      else: [{ print: ["  ok   ${rpc_name} (ungültiges Token → leere Sicht)"] }]
+
+      # list_jobs: die angelegten Jobs beim NAMEN nennen.  „Jobs=4" beantwortet
+      # nicht die Frage, ob der eigene dabei ist.
+      - def:
+          name: list_jobs
+          access: public
+          static_off: ["str_cmp"]
+          args: [[snap, ref<ClusterView>]]
+          body:
+            - decl: [jix, i32, 0]
+            - while:
+                condition: { lt: [jix, snap.job_defs.len] }
+                body:
+                  - decl: [one, JobDef, { at: [snap.job_defs, jix] }]
+                  - set: [jix, { +: [jix, 1] }]
+                  - print: ["  job   ${one.name}  (${one.job_id})"]
+
+      # log_read: die Ausgabe einer Stufe FENSTERWEISE lesen — genau der Weg,
+      # den die Oberflaeche nimmt (`read_run_output`).  Fuer die Frage „liegt
+      # es am Server oder an der Ansicht?" gibt es sonst keine Antwort ausser
+      # Raten.  Gibt die Zahl der gelesenen Bytes zurueck.
+      - def:
+          name: log_read
+          access: public
+          static_off: ["str_cmp"]
+          args: [[ref, string], [stream, i32]]
+          return: i64
+          body:
+            - decl: [off, i64, 0]
+            - decl: [runden, i32, 0]
+            - decl: [total, i64, 0]
+            - while:
+                condition: { lt: [runden, 512] }
+                body:
+                  - set: [runden, { +: [runden, 1] }]
+                  - decl: [req, RunWindowReq]
+                  - set: [req.token, <.token]
+                  - set: [req.run_ref, ref]
+                  - set: [req.stream, stream]
+                  - set: [req.offset, off]
+                  - set: [req.len, 16384]
+                  - decl: [win, ptr<RunWindow>, { new: RunWindow }]
+                  - decl: [got, i32, { call: [<.sess.send_and_await, 0, "read_run_output", req, win, 4000] }]
+                  - if:
+                      condition: { neq: [got, 1] }
+                      then: [{ print: ["  FAIL read_run_output: keine Antwort bei Versatz ${off}"] }, { return: total }]
+                  - if:
+                      condition: { eq: [win.data.len, 0] }
+                      then:
+                        - print: ["  ok   Strom ${stream}: ${total} B in ${runden} Fenster(n) (Datei meldet ${win.total} B)"]
+                        - return: total
+                  - set: [total, { +: [total, win.data.len] }]
+                  - set: [off, win.next_offset]
+            - return: total
+
+      # provision: der Knopfdruck aus der App (doc/spec/94 §94.5a).
+      # Nimmt den Request als MODELL — sechs Skalare waeren ein Argument zu
+      # viel (aiml begrenzt auf 5, spec/49) und der Compiler schlaegt dafuer
+      # genau das vor: zusammengehoeriges Zeug in ein Modell.
+      - def:
+          name: provision
+          access: public
+          args: [[req_in, ProvisionReq]]
+          return: { type: ProvisionResp, lifetime: producer }
+          body:
+            - decl: [req, ProvisionReq, req_in]
+            - set: [req.token, <.token]
+            - decl: [res, ptr<ProvisionResp>, { new: ProvisionResp }]
+            - decl: [got, i32, { call: [<.sess.send_and_await, 0, "provision_agent", req, res, 60000] }]
+            - decl: [out, ProvisionResp]
+            - if:
+                condition: { neq: [got, 1] }
+                then:
+                  - set: [<.fails, { +: [<.fails, 1] }]
+                  - print: ["  FAIL provision_agent: keine Antwort"]
+                  - return: out
+            - set: [out.success, res.success]
+            - set: [out.failed_step, res.failed_step]
+            - set: [out.message, res.message]
+            - set: [out.fingerprint, res.fingerprint]
+            - set: [out.steps_done, res.steps_done]
+            - set: [out.token_id, res.token_id]
+            - return: out
+
+      # agent_token_still_valid: steht das Token noch als NICHT widerrufen in
+      # der Liste?  Geprueft wird ueber list_agent_tokens, also ueber dieselbe
+      # Sicht, die auch die Oberflaeche zeigt.
+      - def:
+          name: agent_token_still_valid
+          access: public
+          static_off: ["str_cmp"]
+          args: [[token_id, string]]
+          return: i32
+          body:
+            - decl: [req, TokenReq]
+            - set: [req.token, <.token]
+            - decl: [lst, ptr<AgentTokenList>, { new: AgentTokenList }]
+            - decl: [got, i32, { call: [<.sess.send_and_await, 0, "list_agent_tokens", req, lst, 4000] }]
+            - if: { condition: { neq: [got, 1] }, then: [{ return: -1 }] }
+            - decl: [tix, i32, 0]
+            - while:
+                condition: { lt: [tix, lst.tokens.len] }
+                body:
+                  # Elementtyp ist AgentTokenInfo, nicht AgentToken — mit dem
+                  # falschen Modell liegen die String-Felder an anderen Offsets
+                  # und incref greift auf Muell zu (SIGSEGV, selbst erlebt).
+                  - decl: [row, AgentTokenInfo, { at: [lst.tokens, tix] }]
+                  - if:
+                      condition: { eq: [row.token_id, token_id] }
+                      then:
+                        - if: { condition: { eq: [row.revoked, 0] }, then: [{ return: 1 }] }
+                        - return: 0
+                  - set: [tix, { +: [tix, 1] }]
+            - return: 0
+
+      - def:
+          name: deprovision
+          access: public
+          args: [[req_in, ProvisionReq]]
+          return: { type: ProvisionResp, lifetime: producer }
+          body:
+            - decl: [req, ProvisionReq, req_in]
+            - set: [req.token, <.token]
+            - decl: [res, ptr<ProvisionResp>, { new: ProvisionResp }]
+            - decl: [got, i32, { call: [<.sess.send_and_await, 0, "deprovision_agent", req, res, 60000] }]
+            - decl: [out, ProvisionResp]
+            - if:
+                condition: { neq: [got, 1] }
+                then:
+                  - set: [<.fails, { +: [<.fails, 1] }]
+                  - print: ["  FAIL deprovision_agent: keine Antwort"]
+                  - return: out
+            - set: [out.success, res.success]
+            - set: [out.failed_step, res.failed_step]
+            - set: [out.message, res.message]
+            - set: [out.steps_done, res.steps_done]
+            - set: [out.token_id, res.token_id]
+            - return: out
+
+      # save_job: eine Quelle als JOB ablegen (doc/spec/106 G4).  Gestartet wird
+      # danach der Job — aus der Oberflaeche oder per `run_job`.  Ohne das hier
+      # gaebe es die Pipeline nur als Lauf, den niemand wiederfindet.
+      - def:
+          name: save_job
+          access: public
+          static_off: ["str_cmp"]
+          args: [[token, string], [job_id, string], [name, string], [source, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [req, SaveJobReq]
+            - set: [req.token, token]
+            - set: [req.job_id, job_id]
+            - set: [req.name, name]
+            - set: [req.source, source]
+            - set: [req.enabled, 1]
+            - set: [req.interval_s, 0]
+            - decl: [ack, ptr<JobAck>, { new: JobAck }]
+            - decl: [got, i32, { call: [<.sess.send_and_await, 0, "save_job", req, ack, 6000] }]
+            - if:
+                condition: { neq: [got, 1] }
+                then: [{ set: [<.fails, { +: [<.fails, 1] }] }, { print: ["  FAIL save_job: keine Antwort"] }, { return: "" }]
+            - call: [<.check, "save_job", ack.accepted, 1]
+            - print: ["  ok   save_job: ${ack.job_id} — ${ack.message}"]
+            - return: ack.job_id
+
+      # doc/spec/96 §96.13: Pipeline einreichen.  Geprueft wird die ganze
+      # Kette — Token, Strukturpruefung, Ausfaltung, Lauf angelegt.
+      - def:
+          name: submit_pipeline
+          access: public
+          static_off: ["str_cmp"]
+          args: [[token, string], [source, string], [want_lanes, i32]]
+          body:
+            - decl: [req, PipelineSubmitReq]
+            - set: [req.token, token]
+            - set: [req.source, source]
+            - decl: [res, ptr<PipelineSubmitResp>, { new: PipelineSubmitResp }]
+            - decl: [got, i32, { call: [<.sess.send_and_await, 0, "run_pipeline", req, res, 8000] }]
+            - if:
+                condition: { neq: [got, 1] }
+                then:
+                  - set: [<.fails, { +: [<.fails, 1] }]
+                  - print: ["  FAIL run_pipeline: keine Antwort"]
+                  - return: []
+            # want_lanes = 0 heisst: muss ABGELEHNT werden.
+            - if:
+                condition: { eq: [want_lanes, 0] }
+                then:
+                  - if:
+                      condition: { eq: [res.accepted, 1] }
+                      then:
+                        - set: [<.fails, { +: [<.fails, 1] }]
+                        - print: ["  FAIL run_pipeline: angenommen, obwohl Ablehnung erwartet"]
+                        - return: []
+                  - print: ["  ok   run_pipeline abgelehnt: ${res.message}"]
+                  - return: []
+            - if:
+                condition: { eq: [res.accepted, 0] }
+                then:
+                  - set: [<.fails, { +: [<.fails, 1] }]
+                  - print: ["  FAIL run_pipeline: abgelehnt — ${res.message}"]
+                  - return: []
+            - if:
+                condition: { neq: [res.lane_count, want_lanes] }
+                then:
+                  - set: [<.fails, { +: [<.fails, 1] }]
+                  - print: ["  FAIL run_pipeline: ${res.lane_count} Lanes, erwartet ${want_lanes}"]
+                  - return: []
+            - if:
+                condition: { eq: [res.run_id.len, 0] }
+                then:
+                  - set: [<.fails, { +: [<.fails, 1] }]
+                  - print: ["  FAIL run_pipeline: kein run_id"]
+                  - return: []
+            - print: ["  ok   run_pipeline: ${res.run_id} mit ${res.lane_count} Lanes"]
+
+      - def:
+          name: fail_count
+          access: public
+          return: i32
+          body: [{ return: <.fails }]
+
+      - def:
+          name: tok
+          access: public
+          return: string
+          body: [{ return: <.token }]
+
+      - def:
+          name: close
+          access: public
+          body:
+            - if: { condition: { pneq: [<.sess, null] }, then: [{ call: [<.sess.close] }] }
+
+      # ── doc/spec/108: Freigabe und Konsole ueber den ECHTEN RPC-Weg ─────────
+      # Ein frisch registriertes Konto hat KEINEN Eintrag im levels-KV, also
+      # Freigabe 255 (F108-2a: die Vorgabe entsteht aus Abwesenheit, nicht aus 0).
+      - def:
+          name: clearance_is
+          access: public
+          args: [[want, i32]]
+          body:
+            - decl: [req, SetUserLevelReq]
+            - set: [req.token, <.token]
+            - decl: [res, ptr<UserLevelResult>, { new: UserLevelResult }]
+            - decl: [got, i32, { call: [<.sess.send_and_await, 0, "my_clearance", req, res, 4000] }]
+            - if:
+                condition: { neq: [got, 1] }
+                then:
+                  - set: [<.fails, { +: [<.fails, 1] }]
+                  - print: ["  FAIL my_clearance: keine Antwort"]
+                  - return: []
+            - call: [<.check, "my_clearance success", res.success, 1]
+            - call: [<.check, "my_clearance Freigabe ${res.my_level}", res.my_level, want]
+
+      # list_users lehnt ein Nicht-Admin-Konto ab — eine Kontenliste ist selbst
+      # eine Auskunft (wer existiert ueberhaupt).
+      - def:
+          name: list_users_denied
+          access: public
+          body:
+            - decl: [req, SetUserLevelReq]
+            - set: [req.token, <.token]
+            - decl: [res, ptr<UserLevelResult>, { new: UserLevelResult }]
+            - decl: [got, i32, { call: [<.sess.send_and_await, 0, "list_users", req, res, 4000] }]
+            - if:
+                condition: { neq: [got, 1] }
+                then:
+                  - set: [<.fails, { +: [<.fails, 1] }]
+                  - print: ["  FAIL list_users: keine Antwort"]
+                  - return: []
+            - call: [<.check, "list_users ohne Admin abgelehnt", res.success, 0]
+
+      # Und die Konsole selbst: F108-15, das Admin-Tor steht VOR allem anderen.
+      # Dass ein Nicht-Admin hier NICHT durchkommt, ist die Pruefung, auf die es
+      # ankommt — der Admin-Pfad ist in test_console gemessen.
+      - def:
+          name: console_denied
+          access: public
+          body:
+            - decl: [req, ConsoleExecReq]
+            - set: [req.token, <.token]
+            - set: [req.source, "- def:\n    name: main\n    return: i32\n    body:\n      - return: [0]"]
+            - decl: [res, ptr<ConsoleExecResult>, { new: ConsoleExecResult }]
+            - decl: [got, i32, { call: [<.sess.send_and_await, 0, "console_exec", req, res, 15000] }]
+            - if:
+                condition: { neq: [got, 1] }
+                then:
+                  - set: [<.fails, { +: [<.fails, 1] }]
+                  - print: ["  FAIL console_exec: keine Antwort"]
+                  - return: []
+            - call: [<.check, "console_exec ohne Admin abgelehnt", res.success, 0]
+            - print: ["  Grund: ${res.message}"]
+
+      # login_only: anmelden OHNE zu registrieren.  Fuer die zweite Phase des
+      # Admin-Nachweises: das Konto existiert dann schon, und `submit_register`
+      # wuerde es ablehnen.
+      - def:
+          name: login_only
+          access: public
+          args: [[email, string], [pass, string]]
+          return: i32
+          body:
+            - decl: [lreq, LoginReq]
+            - set: [lreq.email, email]
+            - set: [lreq.password, pass]
+            - decl: [lres, ptr<AuthResult>, { new: AuthResult }]
+            - decl: [lgot, i32, { call: [<.sess.send_and_await, 0, "submit_login", lreq, lres, 4000] }]
+            - if:
+                condition: { neq: [lgot, 1] }
+                then:
+                  - set: [<.fails, { +: [<.fails, 1] }]
+                  - print: ["  FAIL submit_login: keine Antwort"]
+                  - return: 0
+            - call: [<.check, "submit_login", lres.success, 1]
+            - set: [<.token, lres.token]
+            - set: [<.email, email]
+            - return: <.token.len
+
+      # console_runs: der ADMIN-Pfad (doc/spec/108 C1).  Das Skript ruft eine
+      # angebotene Funktion und muss durchkommen — das ist die Haelfte, die der
+      # Ablehnungs-Test nicht zeigen kann.
+      - def:
+          name: console_runs
+          access: public
+          body:
+            - decl: [req, ConsoleExecReq]
+            - set: [req.token, <.token]
+            # KEIN ${...} in diesem Quelltext: aiml interpoliert schon beim
+            # Uebersetzen DIESER Datei.
+            - set: [req.source, "- def:\n    name: main\n    return: i32\n    body:\n      - decl: [who, string, { call: [cosmos_whoami] }]\n      - call: [log.info, who]\n      - return: [0]"]
+            - decl: [res, ptr<ConsoleExecResult>, { new: ConsoleExecResult }]
+            - decl: [got, i32, { call: [<.sess.send_and_await, 0, "console_exec", req, res, 20000] }]
+            - if:
+                condition: { neq: [got, 1] }
+                then:
+                  - set: [<.fails, { +: [<.fails, 1] }]
+                  - print: ["  FAIL console_exec (Admin): keine Antwort"]
+                  - return: []
+            - call: [<.check, "console_exec als Admin angenommen", res.success, 1]
+            # doc/spec/108 F108-18: der Lauf ist asynchron — die erste Antwort sagt nur
+            # „angenommen".  Also nachfragen, bis das Ergebnis gilt.  Dass der Server
+            # waehrenddessen ANTWORTET, ist der eigentliche Gewinn: frueher stand er.
+            - decl: [run_no, i32, res.run_id]
+            # `check` nimmt i32-WERTE; ein Vergleich gehoert in ein `if`, nicht in das
+            # Argument — sonst steht dort -1 und die Meldung erklaert nichts.
+            - decl: [has_id, i32, 0]
+            - if: { condition: { gt: [run_no, 0] }, then: [{ set: [has_id, 1] }] }
+            - call: [<.check, "Lauf hat eine Kennung", has_id, 1]
+            - decl: [fin_res, ptr<ConsoleExecResult>, { new: ConsoleExecResult }]
+            - decl: [waits, i32, 0]
+            - decl: [have, i32, 0]
+            - while:
+                condition: { '&&': [{ lt: [waits, 40] }, { eq: [have, 0] }] }
+                body:
+                  - decl: [preq, ConsoleExecReq]
+                  - set: [preq.token, <.token]
+                  - set: [preq.poll_id, run_no]
+                  - decl: [pgot, i32, { call: [<.sess.send_and_await, 0, "console_exec", preq, fin_res, 4000] }]
+                  - if:
+                      condition: { '&&': [{ eq: [pgot, 1] }, { eq: [fin_res.finished, 1] }] }
+                      then: [{ set: [have, 1] }]
+                      else: [{ call: [time.sleep_ms, 250] }]
+                  - set: [waits, { +: [waits, 1] }]
+            - call: [<.check, "Ergebnis kommt an", have, 1]
+            - set: [res, fin_res]
+            - call: [<.check, "Skript endet mit 0", res.exit_code, 0]
+            # Der Wirt hat `cosmos_whoami` beantwortet — also ist die ganze Kette
+            # gelaufen: Praeambel, vorgeladene Bibliothek, Tabelle, Freigabe.
+            - decl: [saw, i32, 0]
+            - if: { condition: { ge: [{ call: [res.output.index_of, "u_"] }, 0] }, then: [{ set: [saw, 1] }] }
+            - call: [<.check, "Ausgabe traegt die Kennung des Aufrufers", saw, 1]
+            - print: ["  Ausgabe: ${res.output}"]
+
+      # list_users_ok: als Admin MUSS die Liste kommen, und das eigene Konto drin sein.
+      - def:
+          name: list_users_ok
+          access: public
+          body:
+            - decl: [req, SetUserLevelReq]
+            - set: [req.token, <.token]
+            - decl: [res, ptr<UserLevelResult>, { new: UserLevelResult }]
+            - decl: [got, i32, { call: [<.sess.send_and_await, 0, "list_users", req, res, 4000] }]
+            - if:
+                condition: { neq: [got, 1] }
+                then:
+                  - set: [<.fails, { +: [<.fails, 1] }]
+                  - print: ["  FAIL list_users (Admin): keine Antwort"]
+                  - return: []
+            - call: [<.check, "list_users als Admin", res.success, 1]
+            - decl: [has_rows, i32, 0]
+            - if: { condition: { gt: [res.users.len, 0] }, then: [{ set: [has_rows, 1] }] }
+            - call: [<.check, "Liste ist nicht leer", has_rows, 1]
+
+      # ── doc/spec/109 R4: meldet ein ECHTER Agent seine Last? ────────────────
+      # Bis hierher war das nur baulich belegt: der Agent misst, der Heartbeat traegt
+      # die Zahlen, die Registry uebernimmt sie.  Ob die Kette WIRKLICH laeuft, zeigt
+      # erst ein laufender Agent — und genau das ist hier die Pruefung.
+      #
+      # `res_seen` trennt „noch nichts gemeldet" von „null Last": ein Agent, der gerade
+      # erst verbunden ist, hat noch keinen Heartbeat geschickt, und das ist KEIN Fehler.
+      # Darum wird gewartet, nicht einmal geschaut.
+      - def:
+          name: agent_reports_load
+          access: public
+          args: [[tries, i32]]
+          body:
+            - decl: [found, i32, 0]
+            - decl: [saw_rss, i64, 0]
+            - decl: [try_i, i32, 0]
+            - while:
+                condition: { '&&': [{ lt: [try_i, tries] }, { eq: [found, 0] }] }
+                body:
+                  - decl: [req, TokenReq]
+                  - set: [req.token, <.token]
+                  - decl: [lst, ptr<AgentList>, { new: AgentList }]
+                  - decl: [got, i32, { call: [<.sess.send_and_await, 0, "subscribe_agents", req, lst, 4000] }]
+                  - if:
+                      condition: { eq: [got, 1] }
+                      then:
+                        - decl: [aix, i32, 0]
+                        - while:
+                            condition: { lt: [aix, lst.agents.len] }
+                            body:
+                              - decl: [arow, AgentInfo, { at: [lst.agents, aix] }]
+                              - if:
+                                  condition: { neq: [arow.res_seen, 0] }
+                                  then:
+                                    - set: [found, 1]
+                                    - set: [saw_rss, arow.rss_kb]
+                              - set: [aix, { +: [aix, 1] }]
+                  - if: { condition: { eq: [found, 0] }, then: [{ call: [time.sleep_ms, 1000] }] }
+                  - set: [try_i, { +: [try_i, 1] }]
+            - call: [<.check, "Agent meldet seine Last (doc/spec/109 R4)", found, 1]
+            - decl: [plausible, i32, 0]
+            - if: { condition: { '&&': [{ gt: [saw_rss, 0] }, { lt: [saw_rss, 16000000] }] }, then: [{ set: [plausible, 1] }] }
+            - call: [<.check, "gemeldeter RSS ist plausibel (${saw_rss} kB)", plausible, 1]
+
+      # ── doc/spec/108 F108-18: ANTWORTET der Server waehrend eines Laufs? ────
+      # Das ist die Behauptung, fuer die der Faden gebaut wurde — und sie laesst sich
+      # nur mit einem LANGSAMEN Skript pruefen.  Mit einem 40-ms-Skript saehe ein
+      # blockierender Server genauso aus wie ein nebenlaeufiger.
+      - def:
+          name: server_stays_responsive
+          access: public
+          body:
+            # Ein Skript, das rechnet statt zu schlafen: eine Schlafpause koennte der
+            # Uebersetzer wegoptimieren, Arbeit nicht.
+            - decl: [req, ConsoleExecReq]
+            - set: [req.token, <.token]
+            # `hash.sha256` statt einer Zaehlschleife: die kann der Uebersetzer
+            # wegoptimieren (gemessen — 90 Mio. Runden brauchten 241 ms, womit die
+            # Messung NICHTS zeigte), echte Hashes nicht.  `time.*` steht Skripten
+            # nicht offen (spec/65 F65-35), schlafen geht also nicht.
+            - set: [req.source, "- def:\n    name: main\n    return: i32\n    body:\n      - decl: [acc, string, \"seed\"]\n      - decl: [bix, i32, 0]\n      - while:\n          condition: { lt: [bix, 1500000] }\n          body:\n            - set: [acc, { call: [hash.sha256, acc] }]\n            - set: [bix, { +: [bix, 1] }]\n      - if: { condition: { eq: [acc.len, 0] }, then: [{ return: [1] }] }\n      - return: [0]"]
+            - decl: [acc_res, ptr<ConsoleExecResult>, { new: ConsoleExecResult }]
+            - decl: [agot, i32, { call: [<.sess.send_and_await, 0, "console_exec", req, acc_res, 6000] }]
+            - if:
+                condition: { neq: [agot, 1] }
+                then:
+                  - set: [<.fails, { +: [<.fails, 1] }]
+                  - print: ["  FAIL langer Lauf: nicht angenommen"]
+                  - return: []
+            - decl: [long_id, i32, acc_res.run_id]
+            - call: [<.check, "langer Lauf angenommen", acc_res.success, 1]
+
+            # WAEHREND er laeuft: eine ganz andere Frage stellen.  Kommt sie zuegig
+            # zurueck, dann steht der Server nicht.
+            - decl: [answered, i32, 0]
+            - decl: [slowest, i64, 0]
+            - decl: [qix, i32, 0]
+            - while:
+                condition: { lt: [qix, 5] }
+                body:
+                  - decl: [t_before, i64, { call: [time.mono_ms] }]
+                  - decl: [creq, SetUserLevelReq]
+                  - set: [creq.token, <.token]
+                  - decl: [cres, ptr<UserLevelResult>, { new: UserLevelResult }]
+                  - decl: [cgot, i32, { call: [<.sess.send_and_await, 0, "my_clearance", creq, cres, 4000] }]
+                  - decl: [took, i64, { -: [{ call: [time.mono_ms] }, t_before] }]
+                  - if: { condition: { eq: [cgot, 1] }, then: [{ set: [answered, { +: [answered, 1] }] }] }
+                  - if: { condition: { gt: [took, slowest] }, then: [{ set: [slowest, took] }] }
+                  - call: [time.sleep_ms, 120]
+                  - set: [qix, { +: [qix, 1] }]
+            - call: [<.check, "5 Anfragen waehrend des Laufs beantwortet", answered, 5]
+            - print: ["  langsamste Antwort waehrend des Laufs: ${slowest} ms"]
+            - decl: [quick, i32, 0]
+            # 1500 ms ist grosszuegig und trotzdem aussagekraeftig: ein blockierender
+            # Server braeuchte die VOLLE Laufzeit des Skripts (mehrere Sekunden).
+            - if: { condition: { lt: [slowest, 1500] }, then: [{ set: [quick, 1] }] }
+            - call: [<.check, "Antwort kam zuegig (Server stand nicht)", quick, 1]
+
+            # Und der lange Lauf kommt trotzdem an.
+            - decl: [done_now, i32, 0]
+            - decl: [long_ms, i64, 0]
+            - decl: [wix, i32, 0]
+            - while:
+                condition: { '&&': [{ lt: [wix, 60] }, { eq: [done_now, 0] }] }
+                body:
+                  - decl: [preq, ConsoleExecReq]
+                  - set: [preq.token, <.token]
+                  - set: [preq.poll_id, long_id]
+                  - decl: [pres, ptr<ConsoleExecResult>, { new: ConsoleExecResult }]
+                  - decl: [pgot, i32, { call: [<.sess.send_and_await, 0, "console_exec", preq, pres, 4000] }]
+                  - if:
+                      condition: { '&&': [{ eq: [pgot, 1] }, { eq: [pres.finished, 1] }] }
+                      then: [{ set: [done_now, 1] }, { set: [long_ms, pres.duration_ms] }]
+                      else: [{ call: [time.sleep_ms, 250] }]
+                  - set: [wix, { +: [wix, 1] }]
+            - call: [<.check, "langer Lauf kommt an", done_now, 1]
+            # Die VORAUSSETZUNG der Messung mitpruefen: war das Skript ueberhaupt
+            # langsam genug, dass ein blockierender Server aufgefallen waere?
+            # Zweimal war es das NICHT (241 ms, 184 ms) und die Messung zeigte
+            # trotzdem gruen — eine Probe, die ihre eigene Voraussetzung nicht
+            # prueft, kann stillschweigend bedeutungslos werden.
+            - decl: [slow_enough, i32, 0]
+            - if: { condition: { gt: [long_ms, 1000] }, then: [{ set: [slow_enough, 1] }] }
+            - call: [<.check, "Skript war lang genug (${long_ms} ms > 1000)", slow_enough, 1]

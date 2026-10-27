@@ -1,0 +1,21 @@
+# Kausalitaet (aiml spec/62 §18.3, F62-129): die zweite Stufe laeuft in dem
+# Abbild, das die erste erst herstellt.  Niemand schreibt eine Reihenfolge hin —
+# sie ergibt sich daraus, dass `image:` auf ein `push:`-Ziel desselben Laufs
+# zeigt.  Ohne diese Herleitung liefe Stufe zwei gegen das Abbild des VORIGEN
+# Laufs: gruen, falsch, und beim naechsten Mal wieder anders.
+- pipeline:
+    name: kausal_probe
+    image: ubuntu-base
+    push:
+      - { from: erste, to: "oci:deploy/oci/zwischenstand" }
+    steps:
+      - stage:
+          name: erste
+          timeout: 120000
+          run: "set -e; echo 'spur der ersten stufe' > /spur.txt; echo erste fertig"
+
+      - stage:
+          name: zweite
+          image: "oci:deploy/oci/zwischenstand"
+          timeout: 300000
+          run: "set -e; echo '== was die erste hinterliess =='; cat /spur.txt; echo 'und die zweite' >> /spur.txt; cat /spur.txt"

@@ -1,0 +1,36 @@
+# Das OCI-IMAGE-Format (nicht die Runtime-Spec): Deskriptoren.
+#
+# Ein Image-Layout ist ein Verzeichnis aus `oci-layout`, `index.json` und
+# `blobs/sha256/<hex>`.  Alles darin zeigt per DESKRIPTOR aufeinander —
+# Medientyp, Digest, Groesse.  Genau dieselbe Idee wie der CAS aus
+# doc/spec/96: der Inhalt ist die Adresse.  Darum ist die Wandlung moeglich
+# (doc/spec/110 §110.25).
+#
+# `os` hat zwei Zeichen und ist als aiml-Name unzulaessig (spec/15) — dafuer
+# gibt es den Alias.  Ohne ihn liesse sich das Format nicht modellieren.
+
+- model:
+    name: OciPlatform
+    fields:
+      - [architecture, string, "amd64"]
+      - [osname,       string, "linux", { alias: "os" }]
+      - [variant,      string, ""]
+
+# Zeigt auf einen Blob: Konfiguration oder eine Schicht.
+- model:
+    name: OciDesc
+    fields:
+      - [mediaType, string]
+      - [digest,    string]
+      - [size,      i64]
+
+# Zeigt auf ein Manifest im Index — mit Plattform, denn ein Index kann
+# dasselbe Image fuer x86_64 UND aarch64 fuehren (das Zielbild: Pi und x86).
+- model:
+    name: OciRef
+    fields:
+      - [mediaType,   string]
+      - [digest,      string]
+      - [size,        i64]
+      - [platform,    OciPlatform]
+      - [annotations, map<string:string>]

@@ -1,0 +1,82 @@
+# 9rooms bauen — AUF DEN SCHICHTEN, die `aiml_vom_base` hinterlassen hat.
+#
+# KEIN `image:` und kein Umweg ueber ein OCI-Abbild: die Schichten des anderen
+# Laufs liegen schon auf dieser Platte, fertig gestapelt.  `base:` legt sie als
+# UNTERBAU unter diesen Lauf (aiml spec/62 §18.4, doc/spec/110 F110-114) —
+# gelesen wird aus ihnen, geschrieben immer in die eigene Schicht.  Das spart
+# das Schneiden (2,7 GB durch tar+gzip) und das Auslegen auf der anderen Seite.
+#
+# Was der Unterbau mitbringt: die apt-Pakete, /opt/venv mit exodus — und, wenn
+# der andere Lauf die Stufe `aiml_ablegen` hatte, den Compiler unter /opt/aiml.
+# Der GEBAUTE Compiler liegt sonst im Arbeitsplatz jenes Laufs; der ist von
+# hier aus sichtbar, weil der Arbeitsbereich des Wirts in jedem Container
+# unter /work haengt (doc/spec/110 F110-110).  Beide Faelle sind unten
+# abgedeckt — ohne Raten, mit einer Meldung, welcher es war.
+#
+# Zwei Voraussetzungen, die `base:` NICHT pruefen kann und die darum hier
+# stehen: beide Laeufe muessen auf demselben Grundabbild stehen, und die
+# Schichten muessen auf demselben Wirt liegen.
+- pipeline:
+    name: 9rooms_vom_stapel
+    # Der juengste ERFOLGREICHE Lauf dieses Jobs (aiml F62-144).  Ein fester
+    # `run:`-Verweis veraltete mit dem naechsten aiml-Bau; so zieht die
+    # Pipeline von selbst nach.  Aufgeloest wird bei der Anlage des Laufs,
+    # danach steht die Lauf-Kennung fest im Datensatz (F62-145).
+    base: "job:aiml-vom-Base-Image"
+    steps:
+
+      - stage:
+          name: unterbau_zeigen
+          timeout: 120000
+          run: "set -e; echo '== Wurzel =='; cat /etc/os-release | head -2; echo '== aus dem Unterbau =='; ls -d /opt/venv /opt/aiml 2>/dev/null || true; git --version; gcc --version | head -1; /opt/venv/bin/exodus --help | head -3; echo '== Arbeitsbereich des Wirts =='; ls /work | head -5"
+
+      # Den Compiler FINDEN, nicht vermuten: erst in der Wurzel (dort liegt er,
+      # wenn `aiml_ablegen` lief), sonst im Arbeitsplatz des anderen Laufs.
+      # Der Symlink auf den Wirtspfad ist noetig, weil die exodus-*.json von
+      # 9rooms ihn 51× fest eintragen — eine Kopie dieser Dateien zu pflegen
+      # waere die Aenderung, die man spaeter nicht mehr findet.
+      - stage:
+          name: compiler_verdrahten
+          timeout: 300000
+          run: "set -e; SRC=/opt/aiml; [ -x $SRC/out/aiml/aiml ] || SRC=/work/aiml-vom-Base-Image-5/ws/aiml; [ -x $SRC/out/aiml/aiml ] || { echo \"kein gebauter Compiler gefunden (weder /opt/aiml noch /work/<lauf>/ws/aiml)\" >&2; exit 1; }; echo \"Compiler: $SRC\"; HOSTDIR=/media/nikolai/95a208ef-ffa2-478b-abdd-ff394baa6a76/projects/python/test; mkdir -p $HOSTDIR; ln -sfn $SRC $HOSTDIR/aiml; ls -lh $HOSTDIR/aiml/out/aiml/aiml $HOSTDIR/aiml/out/libaiml/libaiml.so; echo $SRC/out/libaiml > /etc/ld.so.conf.d/aiml.conf; ldconfig; $HOSTDIR/aiml/out/aiml/aiml --version 2>&1 | head -2 || true"
+
+      # Der Unterbau kann eine venv mit EDITIERBAREM exodus tragen (`pip -e`):
+      # dann steht in ihr nur ein Verweis auf /ws/exodus — und /ws gehoert dem
+      # Lauf, nicht dem Stapel (doc/spec/110 F110-111).  Hier wird der Verweis
+      # wieder gueltig gemacht, indem der Arbeitsplatz des anderen Laufs an
+      # dieselbe Stelle gelegt wird.  Seit `aiml_vom_base` fest einbaut
+      # (`pip install .`) ist das fuer neue Stapel nicht mehr noetig.
+      - stage:
+          name: exodus_pruefen
+          timeout: 300000
+          run: "set -e; if ! /opt/venv/bin/exodus --help >/dev/null 2>&1; then echo 'venv traegt einen EDITIERBAREN Einbau — Arbeitsplatz des Unterbaus wird eingehaengt'; ln -sfn /work/aiml-vom-Base-Image-5/ws/exodus /ws/exodus; fi; /opt/venv/bin/exodus --help | head -3"
+
+      - stage:
+          name: 9rooms_klonen
+          timeout: 900000
+          requires: [git]
+          # 9rooms hat kein entferntes Repo — geklont wird aus dem lokalen
+          # Spiegel unter /src (COSMOS_RT_SRC).  Das ist der ZULETZT
+          # EINGECHECKTE Stand; der Arbeitsstand steht in der Stufe darunter.
+          run: "set -e; rm -rf /ws/9rooms; git clone file:///src/test/9rooms_v2 /ws/9rooms; git -C /ws/9rooms log -1 --format='9rooms %h %s'; du -sh /ws/9rooms"
+
+      # Der ARBEITSSTAND statt des Commits (am 22.10.2026: 118 geaenderte
+      # Dateien).  Ohne die Ausschluesse kaemen 3 GB Bauartefakte, Datenbanken
+      # und Caches mit — das ist kein Quelltext.
+      # - stage:
+      #     name: 9rooms_uebernehmen
+      #     timeout: 900000
+      #     run: "set -e; rm -rf /ws/9rooms; mkdir -p /ws/9rooms; tar -C /src/test/9rooms_v2 --exclude=out --exclude=__aiml_cache --exclude='aiondb*' --exclude='aion_db*' --exclude=.git -cf - . | tar -C /ws/9rooms -xf -; du -sh /ws/9rooms"
+
+      - stage:
+          name: werkzeug_bauen
+          timeout: 1800000
+          # Ein kleines Ziel zuerst: es beweist die Kette (exodus findet den
+          # Compiler, der Compiler seine Bibliothek) in Minuten statt in einer
+          # Stunde.
+          run: "set -e; cd /ws/9rooms; export PATH=/opt/venv/bin:$PATH AIML_MEM_V3=1; exodus build -c exodus-cardexport.json 2>&1 | grep --line-buffered -E 'compiling |linking |ERROR|error:' || true; ls -lh card_export 2>/dev/null || ls -lh out/*/ 2>/dev/null | head -5"
+
+      - stage:
+          name: spiel_bauen
+          timeout: 5400000
+          run: "set -e; cd /ws/9rooms; export PATH=/opt/venv/bin:$PATH AIML_MEM_V3=1; exodus build -c exodus-game.json 2>&1 | tee /ws/9rooms_build.log | grep --line-buffered -E 'compiling |linking |ERROR|error:' || true; echo '== gebaut =='; grep -E 'linking' /ws/9rooms_build.log | sed -E 's/.*linking //' | tr '\n' ' '; echo"

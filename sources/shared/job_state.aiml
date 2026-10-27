@@ -1,0 +1,10 @@
+# Cosmos job lifecycle (JobRecord.state / JobUpdate.state).
+
+- enum:
+    name: JobState
+    wire: true          # JobRecord.state geht in die KV und ueber die Leitung
+    values:
+      - queued
+      - running
+      - agent_lost
+      - finished

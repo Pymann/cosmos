@@ -1,0 +1,333 @@
+# Prüfungen für cosmos-rt ohne root (doc/spec/110 M1-Vorarbeit).
+#
+# Gebündelt in EINER Datei: die aiml-Projekte hier übersetzen je Testziel, und
+# eine Datei je Behauptung kostet mehr Bauzeit als sie an Klarheit bringt.
+#
+# Expected exit code: 0
+
+- import: "sources/runtime/rt_bundle.aiml"
+- import: "sources/runtime/rt_state.aiml"
+- import: "sources/runtime/rt_exec.aiml"
+- import: "sources/runtime/rt_mounts.aiml"
+
+# Kleinste Form des Verdachts: eine KLASSE mit einer Liste von Modellen.
+- model:
+    name: RtNote
+    fields:
+      - [name, string]
+      - [path, string]
+      - [when, i64]
+
+- class:
+    name: RtKeeper
+    members:
+      - [notes, list<RtNote>]
+    methods:
+      - def:
+          name: put
+          access: public
+          static_off: ["str_cmp"]
+          args: [[name, string], [path, string]]
+          body:
+            - decl: [one, RtNote]
+            - set: [one.name, name]
+            - set: [one.path, path]
+            - set: [one.when, { call: [time.now] }]
+            - call: [<.notes.push, one]
+
+      - def:
+          name: size
+          access: public
+          return: i32
+          body: [{ return: <.notes.len }]
+
+      # Dieselbe FORM wie reap_idle: in einer Schleife lesen, in einem
+      # if-Zweig benutzen — und dabei die Liste veraendern.
+      - def:
+          name: sweep_like_reap
+          access: public
+          static_off: ["str_cmp"]
+          args: [[older_than, i64]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [seen, string, "(nichts)"]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, <.notes.len] }
+                body:
+                  - decl: [one, RtNote, { at: [<.notes, idx] }]
+                  - if:
+                      condition: { gt: [{ -: [{ call: [time.now] }, one.when] }, older_than] }
+                      then:
+                        - set: [seen, "${one.name}"]
+                        - call: [<.notes.remove, idx]
+                      else: [{ set: [idx, { +: [idx, 1] }] }]
+            - return: seen
+
+      # Genau wie `spawn`: dasselbe Modell in die Liste PUSHEN und zugleich
+      # ZURUECKGEBEN.  Wenn die Rueckgabe die Strings herausbewegt, steht in
+      # der Liste danach nichts mehr.
+      - def:
+          name: put_and_return
+          access: public
+          static_off: ["str_cmp"]
+          args: [[name, string], [path, string]]
+          return: RtNote
+          body:
+            - decl: [one, RtNote]
+            - set: [one.name, "${name}"]
+            - set: [one.path, "${path}"]
+            - set: [one.when, { call: [time.now] }]
+            - call: [<.notes.push, one]
+            - return: one
+
+      - def:
+          name: name_at
+          access: public
+          args: [[idx, i32]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [one, RtNote, { at: [<.notes, idx] }]
+            - return: "${one.name}"
+
+      - def:
+          name: path_at
+          access: public
+          args: [[idx, i32]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [one, RtNote, { at: [<.notes, idx] }]
+            - return: "${one.path}"
+
+
+- def:
+    name: expect
+    static_off: ["str_cmp"]
+    args: [[what, string], [cond, i32]]
+    return: i32
+    body:
+      - if:
+          condition: { eq: [cond, 1] }
+          then: [{ call: [log.info, "  ok   ${what}"] }, { return: 0 }]
+      - call: [log.info, "  FAIL ${what}"]
+      - return: 1
+
+- def:
+    name: str_is
+    static_off: ["str_cmp"]
+    args: [[got, string], [want, string]]
+    return: i32
+    body:
+      - if: { condition: { eq: [got, want] }, then: [{ return: 1 }] }
+      - call: [log.info, "       (gelesen: '${got}', erwartet: '${want}')"]
+      - return: 0
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      - decl: [envm, map<string:string>, { call: [sys.env] }]
+      - decl: [base, string, "runtime/testdata"]
+      - if:
+          condition: { gt: [{ call: [envm.contains, "RT_TESTDATA"] }, 0] }
+          then: [{ set: [base, { call: [envm.get, "RT_TESTDATA"] }] }]
+
+      # ── 1. Ein echtes OCI-Bundle lesen ──────────────────────────────────
+      # Die eigentliche Frage dieses Tests: nimmt `sys.deserialize` FREMDES
+      # JSON an?  Das Format des Projekts trägt ein `__type`-Feld, eine
+      # OCI-config.json hat keines (doc/spec/110 §110.1).
+      - call: [log.info, "[rt] Bundle lesen"]
+      - decl: [bund, ptr<RtBundle>, { new: RtBundle }]
+      - decl: [got, RtVerdict, { call: [bund.load, "${base}/minimal"] }]
+      - set: [fails, { +: [fails, { call: [expect, "config.json gelesen (${got.field} ${got.detail})", got.holds] }] }]
+
+      - if:
+          condition: { eq: [got.holds, 1] }
+          then:
+            - decl: [conf, ref<RtConfig>, bund.conf]
+            - set: [fails, { +: [fails, { call: [expect, "ociVersion", { call: [str_is, conf.ociVersion, "1.0.2"] }] }] }]
+            - set: [fails, { +: [fails, { call: [expect, "hostname", { call: [str_is, conf.hostname, "cosmos-rt"] }] }] }]
+            - set: [fails, { +: [fails, { call: [expect, "root.path", { call: [str_is, conf.root.path, "rootfs"] }] }] }]
+            - set: [fails, { +: [fails, { call: [expect, "root.readonly", { eq: [conf.root.readonly, true] }] }] }]
+            # Listen und verschachtelte Modelle sind der Teil, an dem ein
+            # Fremdformat typischerweise scheitert.
+            - set: [fails, { +: [fails, { call: [expect, "drei Argumente (${conf.process.args.len})", { eq: [conf.process.args.len, 3] }] }] }]
+            - if:
+                condition: { gt: [conf.process.args.len, 0] }
+                then:
+                  - decl: [arg0, string, { at: [conf.process.args, 0] }]
+                  - set: [fails, { +: [fails, { call: [expect, "erstes Argument", { call: [str_is, arg0, "/bin/sh"] }] }] }]
+            - set: [fails, { +: [fails, { call: [expect, "zwei Umgebungsvariablen (${conf.process.env.len})", { eq: [conf.process.env.len, 2] }] }] }]
+            - set: [fails, { +: [fails, { call: [expect, "user.uid = 0", { eq: [conf.process.user.uid, 0] }] }] }]
+            - set: [fails, { +: [fails, { call: [expect, "noNewPrivileges", { eq: [conf.process.noNewPrivileges, true] }] }] }]
+            - set: [fails, { +: [fails, { call: [expect, "zwei Mounts (${conf.mounts.len})", { eq: [conf.mounts.len, 2] }] }] }]
+            - if:
+                condition: { gt: [conf.mounts.len, 0] }
+                then:
+                  - decl: [mnt0, RtMount, { at: [conf.mounts, 0] }]
+                  - set: [fails, { +: [fails, { call: [expect, "erster Mount nach /proc", { call: [str_is, mnt0.destination, "/proc"] }] }] }]
+                  - set: [fails, { +: [fails, { call: [expect, "dessen Optionen (${mnt0.options.len})", { eq: [mnt0.options.len, 3] }] }] }]
+            - set: [fails, { +: [fails, { call: [expect, "fünf Namespaces (${conf.linux.namespaces.len})", { eq: [conf.linux.namespaces.len, 5] }] }] }]
+            - set: [fails, { +: [fails, { call: [expect, "user-Namespace verlangt", { call: [bund.wants_namespace, "user"] }] }] }]
+            - set: [fails, { +: [fails, { call: [expect, "kein network-Namespace verlangt", { eq: [{ call: [bund.wants_namespace, "network"] }, 0] }] }] }]
+            - set: [fails, { +: [fails, { call: [expect, "zwei maskierte Pfade (${conf.linux.maskedPaths.len})", { eq: [conf.linux.maskedPaths.len, 2] }] }] }]
+
+      # ── 2. Ein fehlendes Bundle wird benannt, nicht verschwiegen ────────
+      - call: [log.info, "[rt] Fehlerbilder"]
+      - decl: [gone, ptr<RtBundle>, { new: RtBundle }]
+      - decl: [miss, RtVerdict, { call: [gone.load, "${base}/gibt_es_nicht"] }]
+      - set: [fails, { +: [fails, { call: [expect, "fehlendes Bundle wird abgelehnt", { eq: [miss.holds, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und benennt das Feld", { call: [str_is, miss.field, "config.json"] }] }] }]
+
+      # ── 3. check(): ohne rootfs kein Start ──────────────────────────────
+      # Die Fixture hat bewusst KEIN rootfs-Verzeichnis: ein Bundle, das
+      # gelesen werden kann, ist noch lange nicht startbar.
+      - if:
+          condition: { eq: [got.holds, 1] }
+          then:
+            - decl: [ready, RtVerdict, { call: [bund.check] }]
+            - set: [fails, { +: [fails, { call: [expect, "ohne rootfs nicht startbar", { eq: [ready.holds, 0] }] }] }]
+            - set: [fails, { +: [fails, { call: [expect, "und zwar wegen root.path", { call: [str_is, ready.field, "root.path"] }] }] }]
+            # Der rootfs-Pfad ist RELATIV zum Bundle aufzulösen.
+            - decl: [rootfs_at, string, { call: [bund.rootfs_path] }]
+            - set: [fails, { +: [fails, { call: [expect, "rootfs relativ zum Bundle", { call: [str_is, rootfs_at, "${base}/minimal/rootfs"] }] }] }]
+
+      # ── 4. Lebenszyklus: die erlaubten Kanten ───────────────────────────
+      - call: [log.info, "[rt] Lebenszyklus"]
+      - decl: [life, ptr<RtLifecycle>, { new: RtLifecycle }]
+      - decl: [v_begin, RtVerdict, { call: [life.begin, "rt-1", "${base}/minimal"] }]
+      - set: [fails, { +: [fails, { call: [expect, "begin → creating", { '&&': [v_begin.holds, { call: [str_is, { call: [life.status] }, "creating"] }] }] }] }]
+      - decl: [v_ready, RtVerdict, { call: [life.ready, 4711] }]
+      - set: [fails, { +: [fails, { call: [expect, "ready → created", { '&&': [v_ready.holds, { call: [str_is, { call: [life.status] }, "created"] }] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "pid gemerkt", { eq: [{ call: [life.pid_now] }, 4711] }] }] }]
+      - decl: [v_start, RtVerdict, { call: [life.start] }]
+      - set: [fails, { +: [fails, { call: [expect, "start → running", { '&&': [v_start.holds, { call: [str_is, { call: [life.status] }, "running"] }] }] }] }]
+
+      # ── 5. Lebenszyklus: die VERBOTENEN Kanten ──────────────────────────
+      # Das ist der eigentliche Zweck des Automaten: hier entstehen Waisen.
+      - decl: [v_twice, RtVerdict, { call: [life.begin, "rt-2", "${base}/minimal"] }]
+      - set: [fails, { +: [fails, { call: [expect, "zweites begin wird abgelehnt", { eq: [v_twice.holds, 0] }] }] }]
+      - decl: [v_del, RtVerdict, { call: [life.removable] }]
+      - set: [fails, { +: [fails, { call: [expect, "löschen während running verweigert", { eq: [v_del.holds, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und nennt den Grund", { gt: [v_del.detail.len, 0] }] }] }]
+      - decl: [v_restart, RtVerdict, { call: [life.start] }]
+      - set: [fails, { +: [fails, { call: [expect, "start auf running verweigert", { eq: [v_restart.holds, 0] }] }] }]
+
+      - decl: [v_exit, RtVerdict, { call: [life.exited] }]
+      - set: [fails, { +: [fails, { call: [expect, "exited → stopped", { '&&': [v_exit.holds, { call: [str_is, { call: [life.status] }, "stopped"] }] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "pid ist weg", { eq: [{ call: [life.pid_now] }, 0] }] }] }]
+      - decl: [v_undead, RtVerdict, { call: [life.start] }]
+      - set: [fails, { +: [fails, { call: [expect, "ein beendeter Container wird nicht wieder lebendig", { eq: [v_undead.holds, 0] }] }] }]
+      - decl: [v_now, RtVerdict, { call: [life.removable] }]
+      - set: [fails, { +: [fails, { call: [expect, "beendet darf gelöscht werden", v_now.holds] }] }]
+
+      # ── 6. state.json ist eine SCHNITTSTELLE, kein internes Abbild ──────
+      - decl: [as_json, string, { call: [life.to_json] }]
+      - set: [fails, { +: [fails, { call: [expect, "state.json trägt kein __type", { eq: [{ call: [as_json.index_of, "__type"] }, -1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und nennt den Status", { gt: [{ call: [as_json.index_of, "\"status\":\"stopped\""] }, -1] }] }] }]
+      # Und sie ist wieder lesbar — mit demselben Mittel wie die config.json.
+      - set: [fails, { +: [fails, { call: [expect, "und die Kennung unter dem OCI-Schlüssel", { gt: [{ call: [as_json.index_of, '"id":"rt-1"'] }, -1] }] }] }]
+      # Zurücklesen: alles bis auf `id` ordnet sich über den Feldnamen zu —
+      # `id` kann es nicht, weil aiml zwei Zeichen nicht zulässt (F110-15).
+      - decl: [back, RtState, { call: [sys.deserialize, as_json, "RtState"] }]
+      - set: [fails, { +: [fails, { call: [expect, "state.json liest sich zurück", { call: [str_is, back.status, "stopped"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "mit Bundle-Pfad", { call: [str_is, back.bundle, "${base}/minimal"] }] }] }]
+      # Und die Kennung ebenfalls — über den Alias (aiml spec/15).  Vorher ging
+      # genau dieses eine Feld verloren (doc/spec/110 F110-15).
+      - set: [fails, { +: [fails, { call: [expect, "samt Kennung über den Alias", { call: [str_is, back.ident, "rt-1"] }] }] }]
+      # Ein FREMDES state.json (von runc geschrieben) liest sich damit ebenso.
+      - decl: [foreign_state, string, '{"ociVersion":"1.0.2","id":"fremd-1","status":"running","pid":7,"bundle":"/anderswo"}']
+      - decl: [alien, RtState, { call: [sys.deserialize, foreign_state, "RtState"] }]
+      - set: [fails, { +: [fails, { call: [expect, "fremdes state.json wird gelesen", { call: [str_is, alien.ident, "fremd-1"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "mit pid", { eq: [alien.pid, 7] }] }] }]
+
+      # ── 7. Namespaces aus dem Bundle rechnen (doc/spec/110 M1) ──────────
+      # Nur die RECHNUNG — ob der Kernel sie ausfuehrt, misst `rt_probe` auf dem
+      # jeweiligen Host (dort greift auch das AppArmor-Profil).  Diese Trennung
+      # haelt den Test rechtefrei.
+      - call: [log.info, "[rt] Namespace-Bits"]
+      - decl: [runner, ptr<RtRunner>, { new: RtRunner }]
+      - decl: [user_bit, i32, { call: [runner.bit_for, "user"] }]
+      - decl: [mount_bit, i32, { call: [runner.bit_for, "mount"] }]
+      - set: [fails, { +: [fails, { call: [expect, "user-Bit ist bekannt", { gt: [user_bit, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "mount-Bit ist bekannt", { gt: [mount_bit, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und sie sind verschieden", { neq: [user_bit, mount_bit] }] }] }]
+      # Ein unbekannter Typ liefert 0 und wird uebergangen: die OCI-Spec waechst,
+      # ein neues Schluesselwort darf den Leser nicht umwerfen.
+      - set: [fails, { +: [fails, { call: [expect, "unbekannter Namespace-Typ ist 0", { eq: [{ call: [runner.bit_for, "quantum"] }, 0] }] }] }]
+
+      - if:
+          condition: { eq: [got.holds, 1] }
+          then:
+            - decl: [bits, i32, { call: [runner.ns_flags, bund.conf] }]
+            - set: [fails, { +: [fails, { call: [expect, "das Bundle verlangt user", { eq: [{ band: [bits, user_bit] }, user_bit] }] }] }]
+            - set: [fails, { +: [fails, { call: [expect, "und mount", { eq: [{ band: [bits, mount_bit] }, mount_bit] }] }] }]
+            - set: [fails, { +: [fails, { call: [expect, "aber NICHT network", { eq: [{ band: [bits, { call: [runner.bit_for, "network"] }] }, 0] }] }] }]
+            # Argumente und Umgebung in die C-Schicht schieben, ohne zu starten.
+            - set: [fails, { +: [fails, { call: [expect, "Argumentliste wird aufgebaut", { call: [runner.prepare, bund.conf] }] }] }]
+            - set: [fails, { +: [fails, { call: [expect, "mit drei Argumenten", { eq: [runner.argc_now, 3] }] }] }]
+
+      # ── 8. Mount-Optionen uebersetzen (doc/spec/110 M2) ─────────────────
+      - call: [log.info, "[rt] Mount-Optionen"]
+      - decl: [mounts, ptr<RtMounts>, { new: RtMounts }]
+      - decl: [opts, list<string>]
+      - call: [opts.push, "nosuid"]
+      - call: [opts.push, "noexec"]
+      - call: [opts.push, "nodev"]
+      - call: [opts.push, "mode=1777"]
+      - call: [opts.push, "size=64k"]
+      - decl: [bits_opt, i64, { call: [mounts.ms_flags, opts] }]
+      - decl: [data_opt, string, { call: [mounts.ms_data, opts] }]
+      - set: [fails, { +: [fails, { call: [expect, "drei Bits gesetzt", { gt: [bits_opt, 0] }] }] }]
+      # `mode=1777` ist KEIN Bit — es darf die Flags nicht veraendern.
+      - decl: [opts_bits_only, list<string>]
+      - call: [opts_bits_only.push, "nosuid"]
+      - call: [opts_bits_only.push, "noexec"]
+      - call: [opts_bits_only.push, "nodev"]
+      - set: [fails, { +: [fails, { call: [expect, "Daten-Woerter aendern die Bits nicht", { eq: [bits_opt, { call: [mounts.ms_flags, opts_bits_only] }] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und werden eingesammelt", { call: [str_is, data_opt, "mode=1777,size=64k"] }] }] }]
+      - decl: [leer, list<string>]
+      - set: [fails, { +: [fails, { call: [expect, "ohne Optionen keine Bits", { eq: [{ call: [mounts.ms_flags, leer] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und keine Daten", { call: [str_is, { call: [mounts.ms_data, leer] }, ""] }] }] }]
+
+      # ── 9. Der Plan aus dem Bundle ──────────────────────────────────────
+      - if:
+          condition: { eq: [got.holds, 1] }
+          then:
+            # Fixture: 2 Mounts + 2 maskierte + 2 schreibgeschuetzte Pfade.
+            - decl: [steps, i32, { call: [mounts.build, bund.conf, { call: [bund.rootfs_path] }] }]
+            - set: [fails, { +: [fails, { call: [expect, "sechs Schritte im Plan (${steps})", { eq: [steps, 6] }] }] }]
+            # Ein zweiter Aufbau darf nicht anhaengen, sondern muss ersetzen —
+            # sonst waechst der Plan bei jedem Lauf.
+            - decl: [again, i32, { call: [mounts.build, bund.conf, { call: [bund.rootfs_path] }] }]
+            - set: [fails, { +: [fails, { call: [expect, "ein zweiter Aufbau ersetzt den ersten", { eq: [again, 6] }] }] }]
+
+      # ── 10. Modelle in einer Klassen-Liste (Befund 18.10.2026) ─────────
+      # Der Container-Starter meldete beim Abraeumen einen LEEREN Namen und
+      # loeschte das Bundle nicht — obwohl beim Start derselbe Wert korrekt
+      # gedruckt wurde.  Verdacht: ein Modell mit String-Feldern verliert sie,
+      # wenn es in einer Liste liegt, die MEMBER EINER KLASSE ist.
+      - call: [log.info, "[rt] Modelle in einer Klassen-Liste"]
+      - decl: [keeper, ptr<RtKeeper>, { new: RtKeeper }]
+      - call: [keeper.put, "rt-auto-1", "bundle/pfad"]
+      - set: [fails, { +: [fails, { call: [expect, "Liste hat einen Eintrag", { eq: [{ call: [keeper.size] }, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Kennung ueberlebt die Liste", { call: [str_is, { call: [keeper.name_at, 0] }, "rt-auto-1"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und der zweite String auch", { call: [str_is, { call: [keeper.path_at, 0] }, "bundle/pfad"] }] }] }]
+      # Und jetzt in der Form, die der Starter benutzt (Schleife + if + remove).
+      # Pushen UND zurueckgeben — die Form, die der Starter benutzt.
+      - decl: [twin, ptr<RtKeeper>, { new: RtKeeper }]
+      - decl: [given, RtNote, { call: [twin.put_and_return, "rt-auto-9", "bundle/neun"] }]
+      - set: [fails, { +: [fails, { call: [expect, "Rueckgabe traegt die Kennung (${given.name})", { call: [str_is, given.name, "rt-auto-9"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und die LISTE auch (${{ call: [twin.name_at, 0] }})", { call: [str_is, { call: [twin.name_at, 0] }, "rt-auto-9"] }] }] }]
+
+      - decl: [swept, string, { call: [keeper.sweep_like_reap, -1] }]
+      - set: [fails, { +: [fails, { call: [expect, "Kennung auch in der Schleifen-Form (${swept})", { call: [str_is, swept, "rt-auto-1"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und der Eintrag ist weg", { eq: [{ call: [keeper.size] }, 0] }] }] }]
+
+      - if:
+          condition: { neq: [fails, 0] }
+          then: [{ call: [log.info, "test_rt FAIL (${fails})"] }, { return: 1 }]
+      - call: [log.info, "test_rt PASS"]
+      - return: 0

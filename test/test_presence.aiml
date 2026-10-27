@@ -1,0 +1,75 @@
+# Die Anwesenheits-Regel (doc/spec/104 §104.3) — netzlos geprueft.
+#
+# Sie ist geteilter Code zwischen Server und Client (F104-8): teilt der Server
+# einem Agenten Schritte zu, den der Client als "weg" zeigt, ist eine der
+# beiden Aussagen falsch.  Darum wird die REGEL geprueft, nicht die Anzeige.
+# Expected exit code: 0
+
+- import: "sources/shared/presence.aiml"
+
+- def:
+    name: expect
+    args: [[what, string], [cond, i32]]
+    return: i32
+    body:
+      - if:
+          condition: { eq: [cond, 1] }
+          then: [{ call: [log.info, "  ok   ${what}"] }, { return: 0 }]
+      - call: [log.info, "  FAIL ${what}"]
+      - return: 1
+
+- def:
+    name: make_node
+    args: [[agent_id, string], [last_seen, i64]]
+    return: { type: Node, lifetime: producer }
+    body:
+      - decl: [node, Node]
+      - set: [node.node_id, "n1"]
+      - set: [node.name, "builder-1"]
+      - set: [node.agent_id, agent_id]
+      - set: [node.last_seen_ms, last_seen]
+      - return: node
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      - decl: [pres, ptr<Presence>, { new: Presence }]
+      - decl: [now, i64, 1760000000000]
+
+      # Frischer Schlag = anwesend.
+      - decl: [fresh, Node, { call: [make_node, "builder-1", { -: [now, 3000] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "frischer Schlag ist anwesend", { call: [pres.is_online, fresh, now] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Zeichen fuer anwesend", { eq: [{ call: [pres.mark, fresh, now] }, "* "] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Wort fuer anwesend", { eq: [{ call: [pres.phrase, fresh, now] }, "verbunden"] }] }] }]
+
+      # Jenseits der Frist = weg, mit Dauer.
+      - decl: [old_node, Node, { call: [make_node, "builder-1", { -: [now, 200000] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "alter Schlag ist weg", { eq: [{ call: [pres.is_online, old_node, now] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Wort nennt die Dauer", { eq: [{ call: [pres.phrase, old_node, now] }, "weg seit 3 min"] }] }] }]
+
+      # Knoten OHNE Agent ist eine Aussage, kein Fehlen (F104-2).
+      - decl: [bare, Node, { call: [make_node, "", 0] }]
+      - set: [fails, { +: [fails, { call: [expect, "Knoten ohne Agent", { eq: [{ call: [pres.phrase, bare, now] }, "kein Agent"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "kein Zeichen ohne Agent", { eq: [{ call: [pres.mark, bare, now] }, "  "] }] }] }]
+
+      # Registriert, aber nie gesehen — nicht dasselbe wie "kein Agent".
+      - decl: [never, Node, { call: [make_node, "builder-2", 0] }]
+      - set: [fails, { +: [fails, { call: [expect, "nie gesehen", { eq: [{ call: [pres.phrase, never, now] }, "nie gesehen"] }] }] }]
+
+      # Eine rueckwaerts laufende Uhr heisst NICHT anwesend.
+      - decl: [future, Node, { call: [make_node, "builder-3", { +: [now, 60000] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Uhr aus der Zukunft ist nicht anwesend", { eq: [{ call: [pres.is_online, future, now] }, 0] }] }] }]
+
+      # Alter des Schnappschusses (F104-6).
+      - set: [fails, { +: [fails, { call: [expect, "frischer Schnappschuss", { eq: [{ call: [pres.snapshot_line, { -: [now, 2000] }, now] }, "Stand: vor 2 s"] }] }] }]
+      - decl: [stale_line, string, { call: [pres.snapshot_line, { -: [now, 60000] }, now] }]
+      - set: [fails, { +: [fails, { call: [expect, "veralteter Schnappschuss sagt es", { gt: [{ call: [stale_line.index_of, "VERALTET"] }, -1] }] }] }]
+
+      - if:
+          condition: { eq: [fails, 0] }
+          then: [{ call: [log.info, "test_presence PASS"] }, { return: 0 }]
+      - call: [log.info, "test_presence FAIL (${fails})"]
+      - return: 1

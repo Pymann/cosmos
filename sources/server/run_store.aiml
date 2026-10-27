@@ -1,0 +1,243 @@
+# RunStore — Ausgabe-Ablage je Lauf (doc/spec/90 §AP1.5a, Layout A).
+#
+# Verbindliche Eigenschaft: der Server hält die Ausgabe NICHT im RAM.  Jeder
+# eintreffende Chunk wird sofort an die Datei des Stroms angehängt
+# (buffer.write_string + buffer.write_to → flusht je Chunk, spec/11), gelesen
+# wird ausschliesslich fensterweise (io.open "r" + io.seek + io.read).  Im
+# Speicher bleiben nur: zwei offene Schreib-Handles des aktuellen Laufs und das
+# kleine RunInfo im KV.
+#
+# Layout:  <root>/<run_ref>.out  und  <root>/<run_ref>.err   (getrennte Ströme,
+#          eigene Byte-Offsets);  KV "runs": run_ref → RunInfo.
+
+- import: "sources/models/agent_exec.aiml"
+
+- class:
+    name: RunStore
+    members:
+      - [root,    string, "run_logs"]
+      - [infos,   Kv<string:RunInfo>]
+      - [cur_ref, string, ""]
+      - [cur_out, file_handle]
+      - [cur_err, file_handle]
+    methods:
+      - def:
+          name: init
+          access: public
+          args: [[root_dir, string]]
+          body:
+            - if: { condition: { gt: [root_dir.len, 0] }, then: [{ set: [<.root, root_dir] }] }
+            - call: [io.mkdir_all, <.root]
+            - set: [<.infos, { call: [db.open_kv, "runs", {persist: true}] }]
+            - call: [log.info, "[run_store] root=${<.root}"]
+
+      # valid_ref: taugt dieser Bezeichner als Dateiname?
+      #
+      # Gültig ist `run-` gefolgt ausschliesslich von Ziffern und `-`, mit
+      # mindestens einer Ziffer.  Damit sind `/`, `.`, `..` und alles andere
+      # ausgeschlossen, was einen Pfad verlassen könnte (§AP1.6a-1, Befund 2).
+      #
+      # Eine Positivliste, keine Suche nach "../": letztere übersieht
+      # Schreibweisen (Kodierung, Symlinks, "a/../../b"), eine Formprüfung nicht.
+      #
+      # Bewusst NICHT die exakte Form `run-<ziffern>-<ziffern>`, die
+      # run_on_agent heute erzeugt: sicherheitsrelevant ist der ZEICHENSATZ,
+      # und die engere Regel würde den Store an das heutige Format koppeln —
+      # sie bräche, sobald dort ein Feld hinzukommt.  (Sie liess zudem `run-1`
+      # durchfallen, das test_agent_exec seit je verwendet.)
+      - def:
+          name: valid_ref
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run_ref, string]]
+          return: i32
+          body:
+            # POSITIVLISTE ueber den Zeichensatz (doc/spec/90 §AP1.6a-1).
+            # Sicherheitsrelevant ist genau er: `/`, `.` und `..` sind damit
+            # ausgeschlossen, und eine Formpruefung uebersieht keine
+            # Schreibweise, wie es eine Suche nach "../" tut.
+            #
+            # Bis 2026-10-15 war zusaetzlich das Praefix `run-` und NUR Ziffern
+            # danach verlangt.  Das koppelte den Store an die Kennungen des
+            # AP1-Einzelbefehls — eine STUFEN-Kennung (F103-19:
+            # `<job>-<nummer>-<lane>-<idx>`) fiel durch, und ihr Protokoll
+            # landete nirgends.  Das Praefix schuetzte nichts; es beschrieb nur,
+            # wer damals Protokolle anlegte.
+            - if: { condition: { lt: [run_ref.len, 3] }, then: [{ return: 0 }] }
+            # Obergrenze, weil daraus ein Dateiname wird.
+            - if: { condition: { gt: [run_ref.len, 120] }, then: [{ return: 0 }] }
+            # Ein Bezeichner sieht aus wie ein Slug (doc/spec/106 F106-9):
+            # kein Trenner am Rand, keine doppelten.  Das ist nicht
+            # sicherheitsrelevant (dafuer sorgt der Zeichensatz), sondern haelt
+            # Kennung und Erzeuger deckungsgleich — „run---" ist keine Kennung.
+            - decl: [first, string, { call: [run_ref.substr, 0, 1] }]
+            - if: { condition: { eq: [first, "-"] }, then: [{ return: 0 }] }
+            - decl: [last, string, { call: [run_ref.substr, { -: [run_ref.len, 1] }, 1] }]
+            - if: { condition: { eq: [last, "-"] }, then: [{ return: 0 }] }
+            - if: { condition: { ge: [{ call: [run_ref.index_of, "--"] }, 0] }, then: [{ return: 0 }] }
+            - decl: [ok_chars, string, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"]
+            - decl: [pos, i32, 0]
+            - while:
+                condition: { lt: [pos, run_ref.len] }
+                body:
+                  - decl: [chv, string, { call: [run_ref.substr, pos, 1] }]
+                  - if: { condition: { lt: [{ call: [ok_chars.index_of, chv] }, 0] }, then: [{ return: 0 }] }
+                  - set: [pos, { +: [pos, 1] }]
+            - return: 1
+
+      # stream_path: "" für einen ungültigen Bezeichner.  Die Prüfung sitzt
+      # HIER, wo der Pfad entsteht, nicht nur im Handler — sonst schützt sie
+      # bloss den einen Aufrufer, der sie hat (§AP1.6a-1).
+      - def:
+          name: stream_path
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run_ref, string], [stream, i32]]
+          return: string
+          body:
+            - if: { condition: { neq: [{ call: [<.valid_ref, run_ref] }, 1] }, then: [{ return: "" }] }
+            - if: { condition: { eq: [stream, OutStream.err] }, then: [{ return: "${<.root}/${run_ref}.err" }] }
+            - return: "${<.root}/${run_ref}.out"
+
+      # close_cur: offene Schreib-Handles schliessen (fd-Zahl bleibt beschränkt).
+      - def:
+          name: close_cur
+          access: public
+          body:
+            - if: { condition: { neq: [<.cur_out, null] }, then: [{ call: [io.close, <.cur_out] }, { set: [<.cur_out, null] }] }
+            - if: { condition: { neq: [<.cur_err, null] }, then: [{ call: [io.close, <.cur_err] }, { set: [<.cur_err, null] }] }
+            - set: [<.cur_ref, ""]
+
+      # open_for: Append-Handles des Laufs öffnen (ein Lauf gleichzeitig; Wechsel = reopen).
+      - def:
+          name: open_for
+          access: public
+          args: [[run_ref, string]]
+          body:
+            - call: [<.close_cur]
+            - decl: [out_path, string, { call: [<.stream_path, run_ref, OutStream.out] }]
+            - decl: [err_path, string, { call: [<.stream_path, run_ref, OutStream.err] }]
+            - set: [<.cur_out, { call: [io.open, out_path, "a"] }]
+            - set: [<.cur_err, { call: [io.open, err_path, "a"] }]
+            - set: [<.cur_ref, run_ref]
+
+      # begin: Ströme leeren und RunInfo anlegen (state=running).
+      - def:
+          name: begin
+          access: public
+          args: [[run_ref, string], [agent_id, string], [command, string], [cwd, string]]
+          body:
+            - call: [<.close_cur]
+            - decl: [out_path, string, { call: [<.stream_path, run_ref, OutStream.out] }]
+            - decl: [err_path, string, { call: [<.stream_path, run_ref, OutStream.err] }]
+            - decl: [fresh_out, file_handle, { call: [io.open, out_path, "w"] }]
+            - if: { condition: { neq: [fresh_out, null] }, then: [{ call: [io.close, fresh_out] }] }
+            - decl: [fresh_err, file_handle, { call: [io.open, err_path, "w"] }]
+            - if: { condition: { neq: [fresh_err, null] }, then: [{ call: [io.close, fresh_err] }] }
+            - decl: [nowm, i64, { call: [time.now] }]
+            - decl: [nfo, RunInfo]
+            - set: [nfo.run_ref, run_ref]
+            - set: [nfo.agent_id, agent_id]
+            - set: [nfo.command, command]
+            - set: [nfo.cwd, cwd]
+            - set: [nfo.state, RunState.running]
+            - set: [nfo.exit_code, -1]
+            - set: [nfo.out_bytes, 0]
+            - set: [nfo.err_bytes, 0]
+            - set: [nfo.started_ms, nowm]
+            - set: [nfo.updated_ms, nowm]
+            - call: [<.infos.set, run_ref, nfo]
+
+      # append: Chunk SOFORT anhängen; Rückgabe = Gesamtgrösse des Stroms danach (-1 = Fehler).
+      - def:
+          name: append
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run_ref, string], [stream, i32], [chunk, string]]
+          return: i64
+          body:
+            # Ungueltiger Bezeichner → nichts anhaengen (§AP1.6a-1).
+            - if: { condition: { neq: [{ call: [<.valid_ref, run_ref] }, 1] }, then: [{ return: -1 }] }
+            - if: { condition: { eq: [chunk.len, 0] }, then: [{ return: 0 }] }
+            - if: { condition: { neq: [run_ref, <.cur_ref] }, then: [{ call: [<.open_for, run_ref] }] }
+            - decl: [sink, file_handle, <.cur_out]
+            - if: { condition: { eq: [stream, OutStream.err] }, then: [{ set: [sink, <.cur_err] }] }
+            - if: { condition: { eq: [sink, null] }, then: [{ return: -1 }] }
+            - decl: [bytes, buffer]
+            - call: [bytes.alloc, chunk.len]
+            - decl: [filled, i32, { call: [bytes.write_string, chunk] }]
+            - if: { condition: { lt: [filled, 0] }, then: [{ return: -1 }] }
+            - decl: [wrote, i32, { call: [bytes.write_to, sink] }]
+            - if: { condition: { lt: [wrote, 0] }, then: [{ return: -1 }] }
+            - decl: [spath, string, { call: [<.stream_path, run_ref, stream] }]
+            - return: { call: [io.file_size, spath] }
+
+      # finish: Lauf abschliessen (Exit-Code festhalten, Handles freigeben).
+      - def:
+          name: finish
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run_ref, string], [exit_code, i32]]
+          body:
+            - if: { condition: { eq: [run_ref, <.cur_ref] }, then: [{ call: [<.close_cur] }] }
+            - if: { condition: { eq: [{ call: [<.infos.has, run_ref] }, 0] }, then: [{ return: [] }] }
+            - decl: [nfo, RunInfo, { call: [<.infos.get_copy, run_ref] }]
+            - set: [nfo.state, RunState.finished]
+            - set: [nfo.exit_code, exit_code]
+            - set: [nfo.updated_ms, { call: [time.now] }]
+            - call: [<.infos.set, run_ref, nfo]
+
+      # info: kleine Metadaten; Byte-Zähler kommen aus der Dateigrösse (immer wahr).
+      - def:
+          name: info
+          access: public
+          args: [[run_ref, string]]
+          return: RunInfo
+          body:
+            - decl: [nfo, RunInfo]
+            - if: { condition: { eq: [{ call: [<.infos.has, run_ref] }, 0] }, then: [{ return: nfo }] }
+            - set: [nfo, { call: [<.infos.get_copy, run_ref] }]
+            - decl: [out_path, string, { call: [<.stream_path, run_ref, OutStream.out] }]
+            - decl: [err_path, string, { call: [<.stream_path, run_ref, OutStream.err] }]
+            - set: [nfo.out_bytes, { call: [io.file_size, out_path] }]
+            - set: [nfo.err_bytes, { call: [io.file_size, err_path] }]
+            - return: nfo
+
+      # window: NUR das angefragte Byte-Fenster lesen (§AP1.5a Schritt 4).
+      # Kurzlebiger Lese-Handle — ein dauerhafter könnte durch stdio-Pufferung
+      # veraltete Bytes einer wachsenden Datei liefern.
+      - def:
+          name: window
+          access: public
+          args: [[run_ref, string], [stream, i32], [offset, i64], [len, i32]]
+          return: RunWindow
+          body:
+            # Ungueltiger Bezeichner → leeres Fenster, kein Pfad, keine Datei
+            # (§AP1.6a-1).  Ausdruecklich hier, statt sich darauf zu verlassen,
+            # dass io.file_size("") schon -1 liefert.
+            - decl: [res_empty, RunWindow]
+            - if: { condition: { neq: [{ call: [<.valid_ref, run_ref] }, 1] }, then: [{ return: res_empty }] }
+            - decl: [res, RunWindow]
+            - set: [res.run_ref, run_ref]
+            - set: [res.stream, stream]
+            - set: [res.offset, offset]
+            - set: [res.next_offset, offset]
+            - decl: [spath, string, { call: [<.stream_path, run_ref, stream] }]
+            - decl: [total, i64, { call: [io.file_size, spath] }]
+            - if: { condition: { lt: [total, 0] }, then: [{ set: [total, 0] }] }
+            - set: [res.total, total]
+            - if: { condition: { eq: [{ call: [<.infos.has, run_ref] }, 1] }, then: [{ decl: [nfo, RunInfo, { call: [<.infos.get_copy, run_ref] }] }, { if: { condition: { eq: [nfo.state, RunState.finished] }, then: [{ set: [res.done, 1] }] } }] }
+            - if: { condition: { lt: [offset, 0] }, then: [{ return: res }] }
+            - if: { condition: { ge: [offset, total] }, then: [{ return: res }] }
+            - decl: [want, i64, 65536]
+            - if: { condition: { gt: [len, 0] }, then: [{ set: [want, len] }] }
+            - decl: [avail, i64, { -: [total, offset] }]
+            - if: { condition: { lt: [avail, want] }, then: [{ set: [want, avail] }] }
+            - decl: [src, file_handle, { call: [io.open, spath, "r"] }]
+            - if: { condition: { eq: [src, null] }, then: [{ return: res }] }
+            - call: [io.seek, src, offset]
+            - decl: [text, string, { call: [io.read, src, want] }]
+            - call: [io.close, src]
+            - set: [res.data, text]
+            - set: [res.next_offset, { +: [offset, text.len] }]
+            - return: res

@@ -1,0 +1,142 @@
+# LiveTable — die Betriebssicht als Tabelle (doc/spec/99 §99.1).
+#
+# Ein Mechanismus, nicht sechs Widgets: Festbreitenschrift plus Farb-Laeufe,
+# genau wie das Lane-Gitter (97 §97.7) und die Syntax-Hervorhebung.  cosmos hat
+# keine Prefab-Container (Listen sind ueberall Text), und eine Tabelle waechst
+# mit den Zeilen, waehrend vorgezeichnete Kaestchen eine unsichtbare Obergrenze
+# einbauen.
+#
+# Gerechnet wird hier, gezeichnet woanders — deshalb ohne Display pruefbar.
+
+- import: "sources/models/agent_list.aiml"
+- import: "sources/models/agent_proto.aiml"
+- import: "sources/shared/live_view.aiml"
+
+- class:
+    name: LiveTable
+    methods:
+      # ── Agenten ─────────────────────────────────────────────────────────
+      # F99-4: ein Agent ohne Takt ist nicht sofort "weg", sondern erst "still".
+      # Zwei Zustaende, weil ein Netz-Schluckauf und ein abgestuerzter Knoten
+      # verschieden behandelt werden — und weil "weg" Schritte umverteilt.
+      - def:
+          name: agents
+          access: public
+          static_off: ["str_cmp"]
+          # ref<>, nicht ptr<>: die Tabelle LIEST nur.  Ein ptr<>-Argument
+          # verschiebt den Besitz (spec/61 §8), und der Aufrufer liest danach
+          # einen verschobenen Zeiger — genau so ist der erste Versuch
+          # abgestuerzt (use-after-move).
+          args: [[lst, ref<AgentList>], [now_ms, i64], [runs, list<i32>]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [out, string, ""]
+            - decl: [head_a, string, { call: [<.pad, "agent", 20] }]
+            - decl: [head_b, string, { call: [<.pad, "zustand", 12] }]
+            - decl: [head_c, string, { call: [<.pad, "takt", 8] }]
+            - set: [out, "${head_a}${head_b}${head_c}schritt\n"]
+            - if: { condition: { eq: [lst.agents.len, 0] }, then: [{ return: "${out}(kein Agent verbunden)\n" }] }
+            - decl: [adx, i32, 0]
+            - while:
+                condition: { lt: [adx, lst.agents.len] }
+                body:
+                  - decl: [row, AgentInfo, { at: [lst.agents, adx] }]
+                  - decl: [age_s, i64, 0]
+                  - if:
+                      condition: { gt: [row.last_seen_ms, 0] }
+                      then: [{ set: [age_s, { /: [{ -: [now_ms, row.last_seen_ms] }, 1000] }] }]
+                  - decl: [state_txt, string, { call: [<.agent_state, row, age_s] }]
+                  - decl: [name_pad, string, { call: [<.pad, row.agent_id, 20] }]
+                  - set: [out, "${out}${name_pad}"]
+                  # Farbe NUR auf dem Zustandswort, und der Text nennt ihn
+                  # trotzdem (F99-2).
+                  - call: [runs.push, out.len]
+                  - call: [runs.push, state_txt.len]
+                  - call: [runs.push, { call: [<.state_color, state_txt] }]
+                  - decl: [state_pad, string, { call: [<.pad, state_txt, 12] }]
+                  - decl: [age_pad, string, { call: [<.pad, "${age_s}s", 8] }]
+                  - decl: [busy, string, "—"]
+                  - if: { condition: { gt: [row.current_run.len, 0] }, then: [{ set: [busy, row.current_run] }] }
+                  - set: [out, "${out}${state_pad}${age_pad}${busy}\n"]
+                  - set: [adx, { +: [adx, 1] }]
+            - return: out
+
+      # ── Geoeffnete Speicher ─────────────────────────────────────────────
+      # F99-5: die WAL-Groesse gehoert in die Sicht.  In 9rooms sah eine WAL,
+      # die fest bei 16 MB stand, gesund aus und war es nicht — ohne Checkpoint.
+      - def:
+          name: stores
+          access: public
+          static_off: ["str_cmp"]
+          args: [[live, LiveView], [runs, list<i32>]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [out, string, ""]
+            - decl: [head_a, string, { call: [<.pad, "speicher", 26] }]
+            - decl: [head_b, string, { call: [<.pad, "eintraege", 12] }]
+            - decl: [head_c, string, { call: [<.pad, "wal", 12] }]
+            - set: [out, "${head_a}${head_b}${head_c}schreibvorgaenge\n"]
+            - if: { condition: { eq: [live.stores.len, 0] }, then: [{ return: "${out}(kein Speicher geoeffnet)\n" }] }
+            - decl: [sdx, i32, 0]
+            - while:
+                condition: { lt: [sdx, live.stores.len] }
+                body:
+                  - decl: [row, KvStoreInfo, { at: [live.stores, sdx] }]
+                  - decl: [name_pad, string, { call: [<.pad, row.name, 26] }]
+                  - decl: [ent_pad, string, { call: [<.pad, "${row.entries}", 12] }]
+                  - decl: [wal_kb, i64, { /: [row.wal_used, 1024] }]
+                  - decl: [wal_pad, string, { call: [<.pad, "${wal_kb} KB", 12] }]
+                  - set: [out, "${out}${name_pad}${ent_pad}${wal_pad}${row.writes}\n"]
+                  - set: [sdx, { +: [sdx, 1] }]
+            - return: out
+
+      # ── Alter des Schnappschusses (F99-3) ───────────────────────────────
+      # Ohne diese Zeile sieht eine eingefrorene Sicht aus wie eine gesunde.
+      - def:
+          name: age_line
+          access: public
+          static_off: ["str_cmp"]
+          args: [[live, LiveView], [now_ms, i64]]
+          return: { type: string, lifetime: producer }
+          body:
+            - if: { condition: { le: [live.taken_ms, 0] }, then: [{ return: "Stand: unbekannt" }] }
+            - decl: [age_s, i64, { /: [{ -: [now_ms, live.taken_ms] }, 1000] }]
+            - if: { condition: { lt: [age_s, 0] }, then: [{ set: [age_s, 0] }] }
+            - return: "Stand vor ${age_s} s"
+
+      - def:
+          name: agent_state
+          access: public
+          static_off: ["str_cmp"]
+          args: [[row, AgentInfo], [age_s, i64]]
+          return: { type: string, lifetime: producer }
+          body:
+            - if: { condition: { neq: [row.status, AgentStatus.connected] }, then: [{ return: "weg" }] }
+            - if: { condition: { gt: [age_s, 120] }, then: [{ return: "weg" }] }
+            - if: { condition: { gt: [age_s, 30] },  then: [{ return: "still" }] }
+            - return: "verbunden"
+
+      - def:
+          name: state_color
+          access: public
+          static_off: ["str_cmp"]
+          args: [[state_txt, string]]
+          return: i32
+          body:
+            - if: { condition: { eq: [state_txt, "verbunden"] }, then: [{ return: 0xC8E6A0FF }] }
+            - if: { condition: { eq: [state_txt, "still"] },     then: [{ return: 0xE0C97AFF }] }
+            - if: { condition: { eq: [state_txt, "weg"] },       then: [{ return: 0xE08A8AFF }] }
+            - return: 0xDDE6F0FF
+
+      - def:
+          name: pad
+          access: public
+          static_off: ["str_cmp"]
+          args: [[text, string], [width, i32]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [out, string, text]
+            - while:
+                condition: { lt: [out.len, width] }
+                body: [{ set: [out, "${out} "] }]
+            - return: out

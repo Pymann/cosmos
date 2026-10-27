@@ -1,0 +1,20 @@
+# Wie ein Job ZUGETEILT wird (doc/spec/101 §101.9).
+#
+# Eigener Datensatz und kein Feld am JobDef: ein Feld mehr aendert den
+# Schema-Fingerprint, und jeder gespeicherte Job waere unlesbar (doc/spec/108
+# F108-2) — dieselbe Lage wie bei den Parametern (doc/spec/106 F106-24).
+#
+# Dieselbe Form haelt den Vorrang EINES LAUFS: beim Start festgeschrieben
+# (F101-30), damit ein verstellter Regler die Reihenfolge laufender Laeufe
+# nicht rueckwirkend aendert.
+#
+# Static-Check (aiml spec/49 §14): 1 model.
+- model:
+    name: JobPolicy
+    fields:
+      # Job ODER Lauf — zwei Speicher, ein Datensatz.
+      - [owner_id, string]
+      # F101-31: 0 ist normal, groesser ist frueher, kleiner ist spaeter.
+      # Eine Zahl und kein Namensschema: Namen brauchen eine Tabelle, die
+      # irgendwann drei Eintraege zu wenig hat.
+      - [priority, i32]

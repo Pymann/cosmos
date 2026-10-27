@@ -1,0 +1,7 @@
+2026-10-18 12:35:59 [INFO      ] [probe] Netz statt Pipeline: 12 Koerper  (/media/nikolai/95a208ef-ffa2-478b-abdd-ff394baa6a76/projects/python/test/cosmos/test/pipe3d_shot.aiml:?)
+2026-10-18 12:35:59 [INFO      ] [probe] 12 Koerper, 5 Rohre, davon flieszend: 0  (/media/nikolai/95a208ef-ffa2-478b-abdd-ff394baa6a76/projects/python/test/cosmos/test/pipe3d_shot.aiml:?)
+2026-10-18 12:35:59 [INFO      ] [shapes] assets/shapes/cosmos_rack.glb: 3 Teil(e)  (client/gfx/mesh_shapes.aiml:?)
+2026-10-18 12:35:59 [INFO      ] [shapes] assets/shapes/cosmos_drum.glb: 2 Teil(e)  (client/gfx/mesh_shapes.aiml:?)
+2026-10-18 12:35:59 [INFO      ] [probe] Phase 0 ms → 0 s  (/media/nikolai/95a208ef-ffa2-478b-abdd-ff394baa6a76/projects/python/test/cosmos/test/pipe3d_shot.aiml:?)
+2026-10-18 12:36:01 [INFO      ] [probe] Pixelsumme: 255562  (/media/nikolai/95a208ef-ffa2-478b-abdd-ff394baa6a76/projects/python/test/cosmos/test/pipe3d_shot.aiml:?)
+pipe3d_shot done

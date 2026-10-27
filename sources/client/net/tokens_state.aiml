@@ -1,0 +1,108 @@
+# TokensState — Agent-Tokens als Member statt als Globals
+# (doc/spec/105 Schritt 3, Muster des 9rooms-Clients).
+#
+# `<.session.token_list` war der dritte besitzende Zeiger des Clients.  Er wurde an
+# einen ptr<T>-Parameter weitergereicht und damit freigegeben — gefunden vom
+# Compiler, bevor es jemand im Browser gemerkt hat (doc/spec/105 §105.0).
+#
+# `new_secret` haelt das gerade erzeugte Klartext-Token — nur im Speicher,
+# bis der Dialog geschlossen wird.  Es wird NICHT persistiert: der Server kennt
+# es nach dem Erzeugen nicht mehr, und ein im localStorage liegendes
+# Agent-Token waere ein unnoetiges Risiko.
+
+- import: "sources/client/net/session_state.aiml"
+- import: "sources/models/agent_exec.aiml"
+- import: "sources/models/auth_reqs.aiml"
+
+- class:
+    name: TokensState
+    members:
+      # Kollaborateur; von der Gruppe ueber `sees: [session]` verdrahtet
+      # (spec/58 §5.1) — darum duerfen gewoehnliche Methoden ihn benutzen.
+      - [session,      ref<SessionState>]
+      - [list,          ptr<AgentTokenList>]
+      - [list_seq,      i32]
+      - [new_secret,    string]
+      - [new_token_id,  string]
+    methods:
+      - def:
+          name: has
+          access: public
+          return: i32
+          body:
+            - if: { condition: { peq: [<.list, null] }, then: [{ return: 0 }] }
+            - return: 1
+
+      - def:
+          name: revision
+          access: public
+          return: i32
+          body: [{ return: <.list_seq }]
+
+      - def:
+          name: refresh
+          access: public
+          return: i32
+          body:
+            - if: { condition: { eq: [<.session.connected, 0] }, then: [{ return: 0 }] }
+            - decl: [req, TokenReq]
+            - set: [req.token, <.session.token]
+            - decl: [fresh, ptr<AgentTokenList>, { new: AgentTokenList }]
+            - decl: [got, i32, { call: [<.session.conn.send_and_await, 0, "list_agent_tokens", req, fresh, 4000] }]
+            - if:
+                condition: { eq: [got, 1] }
+                then:
+                  - set: [<.list, fresh]
+                  - set: [<.list_seq, { +: [<.list_seq, 1] }]
+            - return: got
+
+      - def:
+          name: create
+          access: public
+          args: [[label, string]]
+          return: { type: AgentTokenNew, lifetime: producer }
+          body:
+            - decl: [res, AgentTokenNew]
+            - if: { condition: { eq: [<.session.connected, 0] }, then: [{ set: [res.reason, "keine Verbindung"] }, { return: res }] }
+            - decl: [req, AgentTokenReq]
+            - set: [req.token, <.session.token]
+            - set: [req.label, label]
+            - decl: [out, ptr<AgentTokenNew>, { new: AgentTokenNew }]
+            - decl: [got, i32, { call: [<.session.conn.send_and_await, 0, "create_agent_token", req, out, 4000] }]
+            - if: { condition: { neq: [got, 1] }, then: [{ set: [res.reason, "Server antwortet nicht"] }, { return: res }] }
+            - set: [res.accepted, out.accepted]
+            - set: [res.reason, out.reason]
+            - set: [res.token_id, out.token_id]
+            - set: [res.secret, out.secret]
+            - if:
+                condition: { eq: [res.accepted, 1] }
+                then:
+                  - set: [<.new_secret, res.secret]
+                  - set: [<.new_token_id, res.token_id]
+                  - decl: [refreshed, i32, { call: [<.refresh] }]
+            - return: res
+
+      - def:
+          name: revoke
+          access: public
+          args: [[token_id, string]]
+          return: i32
+          body:
+            - if: { condition: { eq: [<.session.connected, 0] }, then: [{ return: 0 }] }
+            - decl: [req, AgentTokenRevoke]
+            - set: [req.token, <.session.token]
+            - set: [req.token_id, token_id]
+            - decl: [out, ptr<AgentAck>, { new: AgentAck }]
+            - decl: [got, i32, { call: [<.session.conn.send_and_await, 0, "revoke_agent_token", req, out, 4000] }]
+            - if: { condition: { neq: [got, 1] }, then: [{ return: 0 }] }
+            - if: { condition: { eq: [out.accepted, 1] }, then: [{ decl: [refreshed, i32, { call: [<.refresh] }] }] }
+            - return: out.accepted
+
+      # net_forget_new_secret: das Klartext-Token aus dem Client-Speicher nehmen
+      # (beim Schliessen des Dialogs) — es bleibt nirgends liegen.
+      - def:
+          name: forget_secret
+          access: public
+          body:
+            - set: [<.new_secret, ""]
+            - set: [<.new_token_id, ""]

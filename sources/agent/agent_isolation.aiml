@@ -1,0 +1,103 @@
+# Isolations-Selbsttest des Agenten (doc/spec/91 §AP2.A, Abnahme A5).
+#
+# Warum im AGENTEN und nicht als Prüfbefehl der Einrichtung: AppArmor bindet
+# an den BINÄRPFAD.  Das Profil `cosmos-agent` erlaubt `userns` genau diesem
+# Binary; ein blankes `unshare` ist unconfined und wird beim Erzeugen des
+# Namespace nach `unprivileged_userns` überführt, das das Schreiben der
+# ID-Abbildung verweigert.  Ein Prüfbefehl, der `unshare` startet, misst also
+# zwangsläufig das falsche Programm und scheitert auch auf einem korrekt
+# eingerichteten Knoten.
+#
+# Gepruefte wird der SANDKASTEN (bubblewrap), nicht ein blankes `unshare`:
+# das ist dasselbe Mittel, mit dem die Jobs spaeter laufen, also misst die
+# Probe das Richtige.  Der Rueckgabewert benennt das fehlende Glied.
+
+- model:
+    name: IsolationResult
+    fields:
+      - [holds,  i32]
+      - [step,   string]   # welches Glied fehlt ("" = traegt)
+      - [detail, string]   # Meldung des Kindprozesses
+
+- class:
+    name: IsolationProbe
+    methods:
+      # Namen der Glieder, passend zu den Rueckgabewerten des Skripts.
+      - def:
+          name: step_name
+          access: public
+          static_off: ["str_cmp"]
+          args: [[code, i32]]
+          return: { type: string, lifetime: producer }
+          body:
+            - if: { condition: { eq: [code, 11] }, then: [{ return: "ID-Abbildung im Namespace (innen nicht uid 0)" }] }
+            - if: { condition: { eq: [code, 12] }, then: [{ return: "eigenes /tmp im Sandkasten" }] }
+            - if: { condition: { eq: [code, 13] }, then: [{ return: "Wurzel ist NICHT schreibgeschuetzt — keine Isolation" }] }
+            # bwrap selbst: Namespace liess sich nicht erzeugen (AppArmor-Profil).
+            - if: { condition: { eq: [code, 1] }, then: [{ return: "User-Namespace erzeugen (AppArmor-Profil fuer bwrap?)" }] }
+            - return: "unbekannt (Rueckgabewert ${code})"
+
+      - def:
+          name: run
+          access: public
+          static_off: ["str_cmp"]
+          args: [[bwrap_path, string]]
+          return: { type: IsolationResult, lifetime: producer }
+          body:
+            - decl: [res, IsolationResult]
+            - if:
+                condition: { eq: [{ call: [io.is_file, bwrap_path] }, false] }
+                then:
+                  - set: [res.holds, 0]
+                  - set: [res.step, "bwrap vorhanden"]
+                  - set: [res.detail, "${bwrap_path} fehlt — gehoert ins Buendel (deploy/collect_runtime.sh)"]
+                  - return: res
+            # Geprueft wird, was die Jobs spaeter WIRKLICH benutzen: der
+            # Sandkasten, nicht ein blankes unshare.  Drei Aussagen: die
+            # ID-Abbildung traegt, der Job hat ein eigenes /tmp, und die Wurzel
+            # des Knotens ist fuer ihn schreibgeschuetzt.
+            - decl: [script, string, "set -e\ntest \"$(id -u)\" = 0 || exit 11\necho probe > /tmp/cosmos_probe || exit 12\nif touch /cosmos_probe_write 2>/dev/null; then exit 13; fi\necho ISOLATION_OK\n"]
+            - decl: [argv, list<string>]
+            - call: [argv.push, bwrap_path]
+            - call: [argv.push, "--unshare-user"]
+            - call: [argv.push, "--unshare-pid"]
+            - call: [argv.push, "--unshare-ipc"]
+            - call: [argv.push, "--unshare-uts"]
+            - call: [argv.push, "--unshare-cgroup"]
+            - call: [argv.push, "--die-with-parent"]
+            - call: [argv.push, "--uid"]
+            - call: [argv.push, "0"]
+            - call: [argv.push, "--gid"]
+            - call: [argv.push, "0"]
+            - call: [argv.push, "--ro-bind"]
+            - call: [argv.push, "/"]
+            - call: [argv.push, "/"]
+            - call: [argv.push, "--proc"]
+            - call: [argv.push, "/proc"]
+            - call: [argv.push, "--dev"]
+            - call: [argv.push, "/dev"]
+            - call: [argv.push, "--tmpfs"]
+            - call: [argv.push, "/tmp"]
+            - call: [argv.push, "sh"]
+            - call: [argv.push, "-c"]
+            - call: [argv.push, script]
+            - decl: [proc, process, { call: [sys.exe, argv, {capture: true, timeout: 20000}] }]
+            - if:
+                condition: { eq: [proc, null] }
+                then:
+                  - set: [res.holds, 0]
+                  - set: [res.step, "bwrap starten"]
+                  - set: [res.detail, "Prozess liess sich nicht starten"]
+                  - return: res
+            - decl: [code, i32, { call: [proc.wait] }]
+            - decl: [out_txt, string, { call: [proc.stdout_buffer] }]
+            - decl: [err_txt, string, { call: [proc.stderr_buffer] }]
+            - if:
+                condition: { '&&': [{ eq: [code, 0] }, { ge: [{ call: [out_txt.index_of, "ISOLATION_OK"] }, 0] }] }
+                then:
+                  - set: [res.holds, 1]
+                  - return: res
+            - set: [res.holds, 0]
+            - set: [res.step, { call: [<.step_name, code] }]
+            - set: [res.detail, { call: [err_txt.trim] }]
+            - return: res

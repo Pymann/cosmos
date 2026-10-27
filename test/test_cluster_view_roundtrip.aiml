@@ -1,0 +1,120 @@
+# Eine ClusterView ueber den Serialisierer und zurueck — so, wie sie beim
+# Client ankommt — und danach das Lane-Gitter darauf rechnen.
+#
+# Anlass: der WASM-Client stuerzte in RunsScreen_draw_grid mit "memory access
+# out of bounds" ab.  Nativ gebaute Laeufe sind unauffaellig (mehrere Tests,
+# valgrind sauber).  Der ungeprüfte Unterschied ist die HERKUNFT der Daten:
+# beim Client kommen sie DEKODIERT an, mit verschachtelten Modellen, Listen von
+# Modellen und i64-Feldern (`live.taken_ms`, `lease_until`).
+# Expected exit code: 0
+
+- import: "sources/shared/cluster_view.aiml"
+- import: "sources/shared/matrix_view.aiml"
+- import: "sources/server/pipeline_submit.aiml"
+
+- def:
+    name: expect
+    args: [[what, string], [cond, i32]]
+    return: i32
+    body:
+      - if:
+          condition: { eq: [cond, 1] }
+          then: [{ print: ["  ok   ${what}"] }, { return: 0 }]
+      - print: ["  FAIL ${what}"]
+      - return: 1
+
+- def:
+    name: pipeline_src
+    return: { type: string, lifetime: producer }
+    body:
+      - return: "- pipeline:\n    name: wire_demo\n    params:\n      - [arch, string, [x86_64, arm64]]\n      - [mode, string, [debug, release]]\n    steps:\n      - stage:\n          name: compile\n          steps:\n            - step: { name: build, cache: pure, args: [arch, mode], return: i32, body: [{ return: 0 }] }\n      - stage:\n          name: test\n          steps:\n            - step: { name: check, cache: pure, args: [arch], return: i32, body: [{ return: 0 }] }\n"
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      - decl: [submit, ptr<PipelineSubmit>, { new: PipelineSubmit }]
+      - decl: [view_obj, ptr<MatrixView>, { new: MatrixView }]
+
+      # Eine Sicht bauen, wie der Server sie schickt.
+      - decl: [sent, ClusterView]
+      - decl: [run_one, PipelineRun, { call: [submit.expand, { call: [pipeline_src] }, "run-wire-1", ""] }]
+      - call: [sent.pipelines.push, run_one]
+      - decl: [run_two, PipelineRun, { call: [submit.expand, { call: [pipeline_src] }, "run-wire-2", ""] }]
+      - call: [sent.pipelines.push, run_two]
+      - decl: [live_part, LiveView]
+      - set: [live_part.taken_ms, 1760000000000]
+      - decl: [store_row, KvStoreInfo]
+      - set: [store_row.name, "cas_actions"]
+      - set: [store_row.wal_used, 16777216]
+      - set: [store_row.entries, 4211]
+      - set: [store_row.writes, 90210]
+      - call: [live_part.stores.push, store_row]
+      - set: [sent.live, live_part]
+
+      # ── Der BINAERE Weg (ser_encode/ser_decode), den auch Mirror-RPC nimmt.
+      # Die heikle Form ist `PipelineRun.axes`: eine Liste von MODELLEN in einem
+      # Modell, das selbst Element einer Liste ist.
+      - decl: [db_path, path, "/tmp/cosmos_wire_test/"]
+      - decl: [store, Kv<string:ClusterView>]
+      - set: [store, { call: [db.open_kv, "wire_view", { persist: true, path: db_path }] }]
+      - call: [store.clear]
+      - call: [store.set, "aktuell", sent]
+      - decl: [bin_back, ClusterView, { call: [store.get_copy, "aktuell"] }]
+      - set: [fails, { +: [fails, { call: [expect, "binaer: zwei Laeufe", { eq: [bin_back.pipelines.len, 2] }] }] }]
+      - decl: [bin_run, PipelineRun, { at: [bin_back.pipelines, 0] }]
+      - set: [fails, { +: [fails, { call: [expect, "binaer: Achsen im Lauf", { eq: [bin_run.axes.len, 2] }] }] }]
+      - decl: [bin_axis, PipelineAxis, { at: [bin_run.axes, 0] }]
+      - set: [fails, { +: [fails, { call: [expect, "binaer: Achse traegt ihren Namen", { gt: [bin_axis.name.len, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "binaer: Achse traegt ihre Werte", { eq: [bin_axis.values.len, 2] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "binaer: Eintraege im Lauf", { eq: [bin_run.stages.len, 8] }] }] }]
+      - decl: [bin_stage, PipelineStage, { at: [bin_run.stages, 0] }]
+      - set: [fails, { +: [fails, { call: [expect, "binaer: Eintrag traegt seine Bindungen", { gt: [bin_stage.bindings.len, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "binaer: i64 im Eintrag", { eq: [bin_stage.lease_until, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "binaer: der Zeitpunkt der Sicht", { eq: [bin_back.live.taken_ms, 1760000000000] }] }] }]
+
+      # Ueber die Leitung: serialisieren und zurueck.
+      - decl: [wire, string, { call: [sys.serialize, sent] }]
+      - set: [fails, { +: [fails, { call: [expect, "die Sicht laesst sich serialisieren", { gt: [wire.len, 100] }] }] }]
+      - decl: [got, ClusterView, { call: [sys.deserialize, wire, "ClusterView"] }]
+
+      - set: [fails, { +: [fails, { call: [expect, "zwei Laeufe kommen an", { eq: [got.pipelines.len, 2] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "der Zeitpunkt kommt an (i64)", { eq: [got.live.taken_ms, 1760000000000] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "der Speicher kommt an", { eq: [got.live.stores.len, 1] }] }] }]
+
+      # Und jetzt genau das, was draw_grid tut: Element greifen, Liste
+      # durchlaufen, danach das Gitter rechnen.
+      - decl: [picked, PipelineRun, { at: [got.pipelines, 0] }]
+      - set: [fails, { +: [fails, { call: [expect, "der gewaehlte Lauf traegt seine Achsen", { eq: [picked.axes.len, 2] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und seine Eintraege", { eq: [picked.stages.len, 8] }] }] }]
+
+      - decl: [list_txt, string, ""]
+      - decl: [list_ix, i32, 0]
+      - while:
+          condition: { lt: [list_ix, got.pipelines.len] }
+          body:
+            - decl: [cur_run, PipelineRun, { at: [got.pipelines, list_ix] }]
+            - set: [list_txt, "${list_txt}${cur_run.run_id} ${cur_run.pipeline_name} (${cur_run.stages.len})\n"]
+            - set: [list_ix, { +: [list_ix, 1] }]
+      - set: [fails, { +: [fails, { call: [expect, "die Lauf-Liste entsteht", { gt: [list_txt.len, 20] }] }] }]
+
+      # Mehrfach, wie in einer Bildschleife.
+      - decl: [round, i32, 0]
+      - while:
+          condition: { lt: [round, 15] }
+          body:
+            - decl: [color_runs, list<i32>]
+            - decl: [table, string, { call: [view_obj.render_run, picked, color_runs] }]
+            - if:
+                condition: { lt: [table.len, 20] }
+                then: [{ print: ["  FAIL zu kurze Tabelle in Runde ${round}"] }, { set: [fails, { +: [fails, 1] }] }]
+            - set: [round, { +: [round, 1] }]
+      - set: [fails, { +: [fails, { call: [expect, "15 Runden auf dekodierten Daten", { eq: [fails, 0] }] }] }]
+
+      - if:
+          condition: { neq: [fails, 0] }
+          then: [{ print: ["test_cluster_view_roundtrip FAIL (${fails})"] }, { return: 1 }]
+      - print: ["test_cluster_view_roundtrip PASS"]
+      - return: 0

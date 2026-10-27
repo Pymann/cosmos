@@ -1,0 +1,299 @@
+# RPCs der Job-Verwaltung (doc/spec/106 §106.4).
+#
+# Gelesen wird NICHT per RPC: die Jobs reisen im Cluster-Schnappschuss mit
+# (doc/spec/104 F104-1).  Ein eigener Lese-Kanal waere die zweite Quelle, die
+# dieses Projekt schon einmal teuer bezahlt hat (§104.0).
+
+- import: "sources/models/job_reqs.aiml"
+- import: "sources/models/job_param_reqs.aiml"
+- import: "sources/shared/job_def.aiml"
+- import: "sources/shared/job_params.aiml"
+- import: "sources/shared/ids.aiml"
+
+- groupmethods:
+    group: CosmosRuntime
+    instances:
+      # ── set_job_params: die Parameter eines Jobs setzen (§106.6) ─────────
+      #
+      # Die GANZE Liste reist (F106-16): so ist der Zustand nach dem Schreiben
+      # derselbe wie in der Oberflaeche, und es gibt keine halb angewandte
+      # Aenderung.  Geprueft wird hier, nicht beim Start — ein Parameter, der
+      # erst beim Start auffaellt, kostet einen Lauf (F106-5).
+      - instance: set_job_params
+        methods:
+          - def:
+              name: run
+              static_off: ["str_cmp"]
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, SetJobParamsReq]
+                - decl: [res, JobAck]
+                - set: [res.accepted, 0]
+                - if:
+                    condition: { neq: [{ call: [session.decode_rpc, rpc, req] }, 0] }
+                    then:
+                      - set: [res.message, "Anfrage unlesbar"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, res]
+                      - return: []
+                - decl: [pid, string, { call: [<.auth.pid_for_token, req.token] }]
+                - if:
+                    condition: { eq: [pid.len, 0] }
+                    then:
+                      - set: [res.message, "nicht angemeldet"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, res]
+                      - return: []
+                - decl: [job, JobDef, { call: [<.cluster.job_of, req.job_id] }]
+                - if:
+                    condition: { eq: [job.job_id.len, 0] }
+                    then:
+                      - set: [res.message, "unbekannter Job"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, res]
+                      - return: []
+                - decl: [bag, JobParams]
+                - set: [bag.owner_id, req.job_id]
+                - set: [bag.rows, req.rows]
+                - decl: [bad, string, { call: [<.submitter.param_problem, bag] }]
+                - if:
+                    condition: { gt: [bad.len, 0] }
+                    then:
+                      - set: [res.message, bad]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, res]
+                      - return: []
+                # Und die QUELLE muss mit den neuen Werten noch uebersetzen:
+                # einen Parameter zu entfernen, den die Quelle liest, wuerde
+                # sonst jeden kuenftigen Start zerlegen — und zwar erst dann.
+                - decl: [p_src, string, { call: [<.submitter.prm_bundle, bag, "vorschau"] }]
+                - decl: [chk, SubmitCheck, { call: [<.submitter.check, job.source, p_src] }]
+                - if:
+                    condition: { eq: [chk.accepted, 0] }
+                    then:
+                      - set: [res.message, "Mit diesen Parametern laeuft die Quelle nicht: ${chk.message}"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, res]
+                      - return: []
+                - call: [<.cluster.jobcfg.set_job_params, req.job_id, bag]
+                # Der Vorrang gehoert zur Zuteilung dieses Jobs (doc/spec/101
+                # §101.9) und wird von DERSELBEN Seite gesetzt wie die
+                # Parameter — ein zweiter Knopf anderswo wuerde ihn wieder
+                # ueberschreiben.
+                - call: [<.cluster.jobcfg.set_job_priority, req.job_id, req.priority]
+                - set: [res.accepted, 1]
+                - set: [res.job_id, req.job_id]
+                - set: [res.message, "${req.rows.len} Parameter gespeichert, Vorrang ${req.priority}"]
+                - call: [log.info, "[set_job_params] ${job.name}: ${req.rows.len} Parameter"]
+                - call: [session.reply_rpc, rpc, "set_result", 0, res]
+
+      # ── save_job: anlegen oder aendern ───────────────────────────────────
+      - instance: save_job
+        methods:
+          - def:
+              name: run
+              static_off: ["str_cmp"]
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, SaveJobReq]
+                - decl: [res, JobAck]
+                - set: [res.accepted, 0]
+                - if:
+                    condition: { neq: [{ call: [session.decode_rpc, rpc, req] }, 0] }
+                    then:
+                      - set: [res.message, "Anfrage unlesbar"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, res]
+                      - return: []
+                - decl: [pid, string, { call: [<.auth.pid_for_token, req.token] }]
+                - if:
+                    condition: { eq: [pid.len, 0] }
+                    then:
+                      - set: [res.message, "nicht angemeldet"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, res]
+                      - return: []
+                - if:
+                    condition: { eq: [req.name.len, 0] }
+                    then:
+                      - set: [res.message, "Ein Job braucht einen Namen"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, res]
+                      - return: []
+                # F106-5: Speichern PRUEFT die Quelle.  Ein Job, dessen Quelle
+                # nicht laeuft, darf gar nicht erst entstehen — sonst scheitert
+                # der Start an etwas, das hier schon bekannt war.
+                # Geprueft wird MIT den Parametern dieses Jobs (doc/spec/106
+                # §106.6c): eine Quelle, die `${prm.branch}` liest, ist ohne
+                # sie nicht uebersetzbar — die Pruefung muss dieselbe Lage
+                # sehen wie der Start.
+                - decl: [p_bag, JobParams, { call: [<.cluster.jobcfg.params_of_job, req.job_id] }]
+                - decl: [p_src, string, { call: [<.submitter.prm_bundle, p_bag, "vorschau"] }]
+                - decl: [chk, SubmitCheck, { call: [<.submitter.check, req.source, p_src] }]
+                - if:
+                    condition: { eq: [chk.accepted, 0] }
+                    then:
+                      - set: [res.message, "Quelle abgelehnt: ${chk.message}"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, res]
+                      - return: []
+                - decl: [job, JobDef]
+                # Die Kennung wird ein DATEINAME (doc/spec/103 §103.4e) und ein
+                # KV-Schluessel.  Sie wurde woertlich aus dem Namen uebernommen:
+                # ein Job „my/job" ergab Kennungen mit Schraegstrich.  Darum
+                # hier, an der Quelle, auf einen sicheren Zeichensatz bringen.
+                - set: [job.job_id, req.job_id]
+                - decl: [idgen, ptr<Ids>, { new: Ids }]
+                - if: { condition: { eq: [job.job_id.len, 0] }, then: [{ set: [job.job_id, { call: [idgen.slug, req.name, "job"] }] }] }
+                - set: [job.name, req.name]
+                - set: [job.source, req.source]
+                - set: [job.enabled, req.enabled]
+                - set: [job.interval_s, req.interval_s]
+                - set: [job.created_ms, { call: [time.now] }]
+                - decl: [okay, i32, { call: [<.cluster.save_job, job] }]
+                - set: [res.accepted, okay]
+                - set: [res.job_id, job.job_id]
+                - if:
+                    condition: { eq: [okay, 1] }
+                    then: [{ set: [res.message, "${job.name} gespeichert (${chk.lane_count} Lanes)"] }]
+                    else: [{ set: [res.message, "Job liess sich nicht speichern"] }]
+                - call: [session.reply_rpc, rpc, "set_result", 0, res]
+
+      # ── tick_schedule: faellige Jobs starten (doc/spec/106 G2) ──────────
+      # Als Gruppen-Methode, weil sie den Lauf-Zustand UND den Ausfalter
+      # braucht.  Die FAELLIGKEIT selbst rechnet `due_job` — ohne Uhr, ohne
+      # Server, damit der Zeitplan pruefbar bleibt.
+      - instance: cluster
+        methods:
+          - def:
+              name: tick_schedule
+              access: public
+              static_off: ["str_cmp"]
+              args: [[now_ms, i64]]
+              return: i32
+              body:
+                - decl: [job_id, string, { call: [<.due_job, now_ms] }]
+                - if: { condition: { eq: [job_id.len, 0] }, then: [{ return: 0 }] }
+                - decl: [job, JobDef, { call: [<.job_of, job_id] }]
+                # VOR dem Start vermerken: ein scheiternder Start darf nicht in
+                # einer Dauerschleife wiederholt werden.
+                - call: [<.mark_started, job_id, now_ms]
+                # F106-13: erst pruefen, dann die Nummer ziehen — auch hier.
+                - decl: [tick_bag, JobParams, { call: [<.jobcfg.params_of_job, job_id] }]
+                - decl: [tick_prm, string, { call: [<.submitter.prm_bundle, tick_bag, "${job_id}-vorschau"] }]
+                - decl: [chk_tick, SubmitCheck, { call: [<.submitter.check, job.source, tick_prm] }]
+                - if:
+                    condition: { eq: [chk_tick.accepted, 0] }
+                    then:
+                      - call: [log.error, "[zeitplan] ${job.name}: Quelle abgelehnt: ${chk_tick.message}"]
+                      - return: 0
+                - decl: [build, i32, { call: [<.take_build_number, job_id] }]
+                - decl: [run_id, string, "${job_id}-${build}"]
+                # F106-14: die Werte werden fuer DIESEN Lauf festgeschrieben,
+                # bevor sie ihn bauen — danach aendert ein Bearbeiten in der
+                # Oberflaeche nichts mehr an ihm.
+                - decl: [tick_run_prm, string, { call: [<.submitter.prm_bundle, tick_bag, run_id] }]
+                - call: [<.jobcfg.freeze_run_params, run_id, tick_bag]
+                - call: [<.jobcfg.freeze_run_priority, run_id, { call: [<.jobcfg.priority_of_job, job_id] }]
+                - decl: [run, PipelineRun, { call: [<.submitter.expand, job.source, run_id, tick_run_prm] }]
+                - if:
+                    condition: { eq: [run.run_id.len, 0] }
+                    then:
+                      - call: [log.error, "[zeitplan] ${job.name} #${build}: Ausfaltung scheiterte trotz bestandener Pruefung"]
+                      - return: 0
+                - set: [run.job_id, job_id]
+                - set: [run.build_number, build]
+                - set: [run.pipeline_name, job.name]
+                - set: [run.started_ms, now_ms]
+                # Nicht „running": genommen hat ihn noch niemand.  Wartet er
+                # laenger, fehlt ein Agent oder ein passendes Etikett — und genau
+                # das soll man sehen (doc/spec/103 F103-3a).
+                - set: [run.status, "queued"]
+                - call: [<.add_pipeline, run]
+                - call: [log.info, "[zeitplan] ${job.name} #${build} gestartet (alle ${job.interval_s} s)"]
+                - return: 1
+
+      # ── run_job: einen Lauf dieses Jobs starten ──────────────────────────
+      - instance: run_job
+        methods:
+          - def:
+              name: run
+              static_off: ["str_cmp"]
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, RunJobReq]
+                - decl: [res, JobAck]
+                - set: [res.accepted, 0]
+                - if:
+                    condition: { neq: [{ call: [session.decode_rpc, rpc, req] }, 0] }
+                    then:
+                      - set: [res.message, "Anfrage unlesbar"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, res]
+                      - return: []
+                - decl: [pid, string, { call: [<.auth.pid_for_token, req.token] }]
+                - if:
+                    condition: { eq: [pid.len, 0] }
+                    then:
+                      - set: [res.message, "nicht angemeldet"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, res]
+                      - return: []
+                - decl: [job, JobDef, { call: [<.cluster.job_of, req.job_id] }]
+                - if:
+                    condition: { eq: [job.job_id.len, 0] }
+                    then:
+                      - set: [res.message, "Unbekannter Job"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, res]
+                      - return: []
+                - if:
+                    condition: { eq: [job.enabled, 0] }
+                    then:
+                      - set: [res.message, "${job.name} ist abgeschaltet"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, res]
+                      - return: []
+                # F106-13: ERST pruefen, DANN die Nummer ziehen.  Vorher wurde
+                # sie vor der Ausfaltung gezogen: vier abgelehnte Starts haben
+                # so die Nummern 6..9 verbraucht, ohne dass ein Lauf entstand
+                # (gemessen 2026-10-16, Job `test`).  Eine Nummer ist das
+                # Versprechen eines Laufs — ohne Lauf wird sie nicht vergeben.
+                - decl: [run_bag, JobParams, { call: [<.cluster.jobcfg.params_of_job, job.job_id] }]
+                - decl: [chk_prm, string, { call: [<.submitter.prm_bundle, run_bag, "${job.job_id}-vorschau"] }]
+                - decl: [chk_run, SubmitCheck, { call: [<.submitter.check, job.source, chk_prm] }]
+                - if:
+                    condition: { eq: [chk_run.accepted, 0] }
+                    then:
+                      # Und es GEHOERT ins Protokoll: eine abgelehnte Anfrage
+                      # hinterliess bisher keine Spur, der Nutzer sah nur, dass
+                      # nichts geschah.
+                      - call: [log.warn, "[run_job] ${job.name}: Quelle abgelehnt: ${chk_run.message}"]
+                      - set: [res.message, "Quelle abgelehnt: ${chk_run.message}"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, res]
+                      - return: []
+                # F106-2: die Nummer vergibt der SERVER, monoton.
+                - decl: [build, i32, { call: [<.cluster.take_build_number, job.job_id] }]
+                - decl: [run_id, string, "${job.job_id}-${build}"]
+                # F106-14: Werte festschreiben, dann bauen.
+                - decl: [run_prm, string, { call: [<.submitter.prm_bundle, run_bag, run_id] }]
+                - call: [<.cluster.jobcfg.freeze_run_params, run_id, run_bag]
+                # F101-30: der Lauf traegt den Vorrang, den er beim Start hatte.
+                - call: [<.cluster.jobcfg.freeze_run_priority, run_id, { call: [<.cluster.jobcfg.priority_of_job, job.job_id] }]
+                - decl: [run, PipelineRun, { call: [<.submitter.expand, job.source, run_id, run_prm] }]
+                - if:
+                    condition: { eq: [run.run_id.len, 0] }
+                    then:
+                      - call: [log.error, "[run_job] ${job.name} #${build}: Ausfaltung scheiterte, obwohl die Pruefung zustimmte"]
+                      - set: [res.message, "Ausfaltung fehlgeschlagen (die Pruefung hatte zugestimmt — bitte melden)"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, res]
+                      - return: []
+                - set: [run.job_id, job.job_id]
+                - set: [run.build_number, build]
+                - set: [run.pipeline_name, job.name]
+                - set: [run.started_ms, { call: [time.now] }]
+                # Nicht „running": genommen hat ihn noch niemand.  Wartet er
+                # laenger, fehlt ein Agent oder ein passendes Etikett — und genau
+                # das soll man sehen (doc/spec/103 F103-3a).
+                - set: [run.status, "queued"]
+                - call: [<.cluster.add_pipeline, run]
+                # Der UNTERBAU gilt auch fuer einen Lauf AUS EINEM JOB (aiml
+                # spec/62 §18.4).  Er stand nur im `run_pipeline`-Weg; wer den
+                # Job in der Oberflaeche startete, bekam einen Lauf ohne
+                # Schichten — und die erste Stufe fiel mit „git: not found" um,
+                # obwohl dieselbe Pipeline eingereicht durchlief (gemeldet
+                # 22.10.2026, doc/spec/110 F110-117).
+                - call: [<.cluster.set_base, run_id, { call: [<.submitter.base_in, job.source, run_prm] }]
+                - set: [res.accepted, 1]
+                - set: [res.run_id, run_id]
+                - set: [res.build, build]
+                - set: [res.message, "${job.name} #${build} gestartet (${run.stages.len} Eintraege)"]
+                - call: [log.info, "[run_job] ${job.name} #${build} als ${run_id}"]
+                - call: [session.reply_rpc, rpc, "set_result", 0, res]

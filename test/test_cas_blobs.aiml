@@ -1,0 +1,111 @@
+# CAS-Blobs (doc/spec/92 §92.7): Abnahme C1 Determinismus, C2 Dedup/Idempotenz,
+# C3 Binärsicherheit, C7 Atomizität.  Ohne Netz, ohne Namespaces.
+#
+# Expected exit code: 0
+
+- import: "sources/server/cas_store.aiml"
+
+- def:
+    name: expect
+    args: [[label, string], [cond, i32]]
+    return: i32
+    body:
+      - if: { condition: { eq: [cond, 1] }, then: [{ return: 0 }] }
+      - print: ["FAIL ${label}"]
+      - return: 1
+
+# Hilfsfunktion: Datei mit Textinhalt anlegen.
+- def:
+    name: write_text_file
+    args: [[path, string], [body, string]]
+    body:
+      - decl: [fhw, file_handle, { call: [io.open, path, "wb"] }]
+      - if: { condition: { neq: [fhw, null] }, then: [{ call: [io.write, fhw, body] }, { call: [io.close, fhw] }] }
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      - decl: [base, string, "/tmp/aiml_cas_blob_test"]
+      - call: [io.remove_all, base]
+      - call: [io.mkdir_all, "${base}/src"]
+
+      - decl: [cas, ptr<CasStore>, { new: CasStore }]
+      - call: [cas.init, "${base}/cas"]
+
+      # ── C1: Determinismus — Inhalt bestimmt die Adresse ─────────────────
+      - decl: [file_a, string, "${base}/src/a.txt"]
+      - call: [write_text_file, file_a, "hallo cosmos"]
+      - decl: [id_a, string, { call: [cas.put_file, file_a] }]
+      - set: [fails, { +: [fails, { call: [expect, "C1 Adresse ist 64 Hex", { eq: [id_a.len, 64] }] }] }]
+      - decl: [want_a, string, { call: [hash.sha256, "hallo cosmos"] }]
+      - set: [fails, { +: [fails, { call: [expect, "C1 Adresse = sha256(Inhalt)", { eq: [id_a, want_a] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "C1 has() findet das Objekt", { eq: [{ call: [cas.has, id_a] }, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "C1 size_of stimmt", { eq: [{ call: [cas.size_of, id_a] }, 12] }] }] }]
+
+      # ── C2: Dedup — gleicher Inhalt, anderer Name → ein Objekt ──────────
+      - decl: [file_b, string, "${base}/src/b.txt"]
+      - call: [write_text_file, file_b, "hallo cosmos"]
+      - decl: [id_b, string, { call: [cas.put_file, file_b] }]
+      - set: [fails, { +: [fails, { call: [expect, "C2 gleiche Adresse", { eq: [id_b, id_a] }] }] }]
+      # und zweimal dieselbe Datei aufnehmen bleibt idempotent
+      - decl: [id_again, string, { call: [cas.put_file, file_a] }]
+      - set: [fails, { +: [fails, { call: [expect, "C2 idempotent", { eq: [id_again, id_a] }] }] }]
+      # verschiedener Inhalt → verschiedene Adresse
+      - decl: [file_c, string, "${base}/src/c.txt"]
+      - call: [write_text_file, file_c, "anderer inhalt"]
+      - decl: [id_c, string, { call: [cas.put_file, file_c] }]
+      - set: [fails, { +: [fails, { call: [expect, "C2 andere Adresse", { neq: [id_c, id_a] }] }] }]
+
+      # Quelle darf nicht verschwinden (put_file nimmt auf, verschiebt nicht)
+      - set: [fails, { +: [fails, { call: [expect, "C2 Quelle bleibt", { eq: [{ call: [io.is_file, file_a] }, true] }] }] }]
+
+      # ── C3: Binärsicherheit — 0x00 und hohe Bytes überleben ─────────────
+      - decl: [raw, buffer]
+      - call: [raw.alloc, 8]
+      - call: [raw.write, 7, u8]
+      - call: [raw.write, 0, u8]
+      - call: [raw.write, 255, u8]
+      - call: [raw.write, 10, u8]
+      - decl: [id_raw, string, { call: [cas.put_bytes, raw] }]
+      - set: [fails, { +: [fails, { call: [expect, "C3 put_bytes liefert Adresse", { eq: [id_raw.len, 64] }] }] }]
+      - decl: [want_raw, string, { call: [hash.sha256, raw] }]
+      - set: [fails, { +: [fails, { call: [expect, "C3 Adresse = sha256(Bytes)", { eq: [id_raw, want_raw] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "C3 vier Bytes gespeichert", { eq: [{ call: [cas.size_of, id_raw] }, 4] }] }] }]
+      # und das Objekt auf der Platte hat dieselbe Inhaltsadresse (byte-exakt)
+      - decl: [raw_path, string, { call: [cas.blob_path, id_raw] }]
+      - decl: [raw_disk, string, { call: [hash.sha256_file, raw_path] }]
+      - set: [fails, { +: [fails, { call: [expect, "C3 Objekt byte-exakt", { eq: [raw_disk, id_raw] }] }] }]
+
+      # ── read_window: nur das angefragte Fenster ─────────────────────────
+      - decl: [off_zero, i64, 0]
+      - decl: [off_six, i64, 6]
+      - decl: [win_all, string, { call: [cas.read_window, id_a, off_zero, 100] }]
+      - set: [fails, { +: [fails, { call: [expect, "Fenster ganz", { eq: [win_all, "hallo cosmos"] }] }] }]
+      - decl: [win_part, string, { call: [cas.read_window, id_a, off_six, 6] }]
+      - set: [fails, { +: [fails, { call: [expect, "Fenster Ausschnitt", { eq: [win_part, "cosmos"] }] }] }]
+
+      # ── Robustheit: erfundene / unsinnige Adressen ──────────────────────
+      - set: [fails, { +: [fails, { call: [expect, "has() auf Unsinn → 0", { eq: [{ call: [cas.has, "keine-id"] }, 0] }] }] }]
+      - decl: [bad_path, string, { call: [cas.blob_path, "zu-kurz"] }]
+      - set: [fails, { +: [fails, { call: [expect, "blob_path auf Unsinn → leer", { eq: [bad_path.len, 0] }] }] }]
+      - decl: [ghost, string, "0000000000000000000000000000000000000000000000000000000000000000"]
+      - set: [fails, { +: [fails, { call: [expect, "has() auf unbekannte ID → 0", { eq: [{ call: [cas.has, ghost] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "size_of unbekannt → -1", { eq: [{ call: [cas.size_of, ghost] }, -1] }] }] }]
+      - decl: [missing_id, string, { call: [cas.put_file, "${base}/src/gibts_nicht"] }]
+      - set: [fails, { +: [fails, { call: [expect, "put_file fehlende Quelle → leer", { eq: [missing_id.len, 0] }] }] }]
+
+      # ── C7: Atomizität — kein halbes Objekt, kein Müll in tmp ───────────
+      - decl: [tmp_rest, list<path>, { call: [io.list_dir, "${base}/cas/tmp"] }]
+      - set: [fails, { +: [fails, { call: [expect, "C7 tmp ist leer", { eq: [tmp_rest.len, 0] }] }] }]
+      # eine Datei, die in tmp liegen bleibt, wird NIE ein Objekt
+      - call: [write_text_file, "${base}/cas/tmp/halb-geschrieben", "unvollstaendig"]
+      - decl: [bogus, string, { call: [hash.sha256, "unvollstaendig"] }]
+      - set: [fails, { +: [fails, { call: [expect, "C7 tmp-Datei ist kein Objekt", { eq: [{ call: [cas.has, bogus] }, 0] }] }] }]
+
+      - call: [io.remove_all, base]
+      - if: { condition: { gt: [fails, 0] }, then: [{ print: ["test_cas_blobs: ${fails} failed"] }, { return: 1 }] }
+      - print: ["test_cas_blobs PASS"]
+      - return: 0

@@ -1,0 +1,1065 @@
+# JobRunsScreen (doc/spec/107 §107.1a) — die Job-Seite in drei Spalten:
+# links die Laeufe dieses Jobs, in der Mitte die AUSGABE des gewaehlten
+# Schritts (doc/spec/103 F103-19), rechts die Pipeline als klickbares Gitter
+# (F107-11).
+#
+# Gerechnet wird aus EINEM Schnappschuss (doc/spec/104 F104-1); gezeichnet wird
+# nur in der Inhaltsflaeche (F107-8).  Die Ausgabe holt der Bildschirm in
+# Fenstern nach (`read_run_output`) — nichts wird im Server-RAM gesammelt und
+# nichts hier doppelt gehalten ausser dem sichtbaren Ausschnitt.
+- import: "sources/client/prefabs.aiml"
+- import: "sources/shared/pipe_status.aiml"
+- import: "sources/client/net/live_state.aiml"
+- import: "sources/client/net/pipeline_state.aiml"
+- import: "sources/shared/job_runs.aiml"
+- import: "sources/client/gfx/pipe3d.aiml"
+- import: "sources/models/agent_list.aiml"
+
+- class:
+    name: JobRunsScreen
+    members:
+      - [initialized, i32]
+      - [scene,       prefab_instance]
+      - [is_visible,  i32]
+      - [job_id,      string]
+      - [job_name,    string]
+      # Treiber der Container: je Eintrag eine Zeile bzw. ein Knoten.  Der
+      # Inhalt wird danach imperativ gesetzt (spec/44_6 §5c).
+      - [run_keys,    list<string>]
+      - [lane_keys,   list<string>]
+      - [stage_keys,  list<string>]
+      # Welche Lauf-Kennungen die Zeilen zeigen, in Reihenfolge der Anzeige.
+      - [run_ids,     list<string>]
+      - [sel_run,     string]
+      - [sel_stage,   string]
+      - [sel_label,   string]
+      - [log_off,     i64]
+      # Zweiter Strom: stderr.  Eigener Versatz, eigener Text — zusammengefuegt
+      # wird erst beim Anzeigen (doc/spec/107 F107-53).
+      - [err_off,     i64]
+      # Wann kam zuletzt ein Byte?  Eine Stufe, die laeuft und schweigt, sieht
+      # aus wie eine, die haengt — `apt` laedt 27 MB am Stueck und sagt dabei
+      # nichts (doc/spec/107 F107-54).
+      - [log_seen_ms, i64]
+      # Die Laufzeiten des GEWAEHLTEN Laufs (doc/spec/107 §107.1h).
+      - [run_times,   list<StageTime>]
+      # Fuer WELCHE Stufe die Ausgabe-Box schon ans Ende gesprungen ist.  Ohne
+      # diese Notiz muesste jede der vier Auswahl-Stellen daran denken — und
+      # eine haette es vergessen.
+      - [log_pinned,  string]
+      # Laeuft die Ausgabe der Arbeit HINTERHER?  1 = ja (Vorgabe), bis jemand
+      # selbst eine Stufe waehlt.  Ohne das blieb sie bei der ersten stehen und
+      # man musste von Hand umschalten (gemeldet 22.10.2026, doc/spec/107
+      # F107-47).
+      - [follow,      i32]
+      # Ist der BEFEHL der Stufe eingeblendet?  Er liegt ueber der Ausgabe und
+      # darf sie verdecken (User 22.10.2026): wer ihn sehen will, will ihn
+      # jetzt sehen.
+      - [show_cmd,    i32]
+      - [log_text,    string]
+      - [err_text,    string]
+      - [shown_sig,   string]
+      # Wuensche, die der Wirt ausfuehrt (ein Bildschirm schickt keine RPCs).
+      - [want_src,    i32]
+      - [want_back,   i32]
+      - [want_start,  i32]
+      # doc/spec/106 §106.6a: der Reiter „Parameter".
+      - [want_prm,    i32]
+      # Gerechnet wird in JobRuns (pruefbar ohne Fenster), gezeichnet hier.
+      - [order,       JobRuns]
+      # doc/spec/107 §107.1b: die Pipeline raeumlich.  Die Koerper werden in
+      # PipeScene GERECHNET (ohne Fenster pruefbar), hier nur gezeichnet.
+      - [space,       PipeScene]
+      - [view3d,      Pipe3D]
+      - [bodies,      list<SceneItem>]
+      - [space_sig,   string]
+      # Zeiger auf die AKTUELLE Agentenliste; sie gehoert dem Zustand, nicht
+      # diesem Bildschirm (doc/spec/104 F104-1: eine Quelle).
+      - [crew_ref,    ref<AgentList>]
+      - [live_ref,    ref<LiveState>]
+      # 1 = seit dem Druecken wurde gedreht; dann waehlt das Loslassen nicht.
+      - [dragged,     i32]
+      # Worueber die Maus gerade steht.  Ohne Beschriftung sind Kugeln anonym
+      # — und ein Klick, um zu ERFAHREN was man anklickt, ist einer zu viel.
+      - [hover_tag,   string]
+      # 1 = der Raum nimmt die ganze Inhaltsflaeche (F107-15).
+      - [wide_view,   i32]
+      # Schwebende Namen ueber den Kugeln (F107-16).  Eigene Instanzen, weil
+      # Szenen-KINDER sich nicht bewegen lassen.
+      - [tags,        list<prefab_instance>]
+    methods:
+      - def:
+          name: init
+          access: public
+          body:
+            - if: { condition: { eq: [<.initialized, 1] }, then: [{ return: [] }] }
+            - set: [<.scene, { call: [engine.instantiate, "JobRunsScene"] }]
+            - call: [<.scene.set_pos, 0.0, 0.0]
+            - call: [<.scene.set_z, 0]
+            - call: [<.scene.bind_list, "runs_list", <.run_keys]
+            - call: [<.scene.bind_list, "graph_rows", <.lane_keys]
+            # UTC steht in der Ueberschrift, weil die Zeit vom SERVER kommt
+            # (doc/spec/104 F99-10) — eine stillschweigend lokale Anzeige waere
+            # eine Behauptung ueber die Uhr des Browsers.
+            - call: [<.scene.set_text, "runs_hdr", "Läufe (UTC)"]
+            - call: [<.scene.set_text, "log_box", ""]
+            # Ein Vorrat an Namensschildern; mehr Kugeln als das zeigt das
+            # Bild ohnehin nicht lesbar an.
+            - decl: [tix, i32, 0]
+            - while:
+                condition: { lt: [tix, 12] }
+                body:
+                  - decl: [tag, prefab_instance, { call: [engine.instantiate, "NodeTag"] }]
+                  - call: [tag.set_z, 30]
+                  - call: [tag.set_visible, 0]
+                  - call: [<.tags.push, tag]
+                  - set: [tix, { +: [tix, 1] }]
+            - decl: [gfx_ok, i32, { call: [<.view3d.init] }]
+            - if: { condition: { neq: [gfx_ok, 1] }, then: [{ call: [log.warn, "[jobview] raeumliche Ansicht nicht verfuegbar"] }] }
+            # Die 2D-Spurenliste liegt GENAU unter dem raeumlichen Ausschnitt.  Sie
+            # ist dort unsichtbar (das Bild wird darueber gezeichnet), nimmt aber
+            # weiter das Mausrad an: eine Radbewegung zoomte die Kamera UND rollte
+            # die verdeckte Liste (aiml spec/44_0 §3.2 — ein Rad-Wert, mehrere
+            # Abnehmer).  Wo der Raum zeichnet, ist die Liste darum weg; ohne GL
+            # bleibt sie als Rueckfall stehen.
+            - if:
+                condition: { eq: [gfx_ok, 1] }
+                then:
+                  - call: [<.scene.set_child_visible, "graph_rows", 0]
+                  - call: [<.scene.set_child_visible, "graph_none", 0]
+            - set: [<.initialized, 1]
+            - set: [<.is_visible, 1]
+
+      - def:
+          name: set_visible
+          access: public
+          args: [[vis, i32]]
+          body:
+            - if: { condition: { eq: [<.initialized, 0] }, then: [{ return: [] }] }
+            - call: [<.scene.set_visible, vis]
+            - set: [<.is_visible, vis]
+            - if: { condition: { eq: [vis, 0] }, then: [{ call: [<.hide_tags] }] }
+
+      # open_job: auf welchen Job sehen wir?  Auswahl und Ausgabe werden
+      # zuruckgesetzt — der Log eines fremden Jobs waere eine Falschaussage.
+      - def:
+          name: open_job
+          access: public
+          args: [[job_id, string], [name, string]]
+          body:
+            - set: [<.job_id, job_id]
+            - set: [<.job_name, name]
+            - set: [<.follow, 1]
+            - set: [<.sel_run, ""]
+            - set: [<.sel_stage, ""]
+            - set: [<.sel_label, ""]
+            - set: [<.log_off, 0]
+            - set: [<.err_off, 0]
+            - set: [<.log_seen_ms, 0]
+            - set: [<.log_text, ""]
+            - set: [<.err_text, ""]
+            - set: [<.shown_sig, ""]
+            - if: { condition: { eq: [<.initialized, 1] }, then: [{ call: [<.scene.set_text, "log_box", ""] }, { call: [<.scene.set_text, "title_lbl", name] }] }
+
+      # focus_run: auf DIESEN Lauf springen.  Nach „Starten" soll man dort
+      # landen, wo das Neue passiert — sonst sieht man den alten Lauf und
+      # fragt sich, ob ueberhaupt etwas losging (gemeldet 22.10.2026).
+      - def:
+          name: focus_run
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run_id, string]]
+          body:
+            - if: { condition: { eq: [run_id.len, 0] }, then: [{ return: [] }] }
+            - set: [<.sel_run, run_id]
+            # Neuer Lauf: wieder mitlaufen, bis jemand waehlt.
+            - set: [<.follow, 1]
+            # Stufe und Protokoll gehoeren dem alten Lauf: mitnehmen waere
+            # falscher als nichts zu zeigen.
+            - set: [<.sel_stage, ""]
+            - set: [<.sel_label, ""]
+            - set: [<.log_text, ""]
+            - set: [<.err_text, ""]
+            - set: [<.log_off, 0]
+            - set: [<.err_off, 0]
+            - set: [<.log_seen_ms, 0]
+            - set: [<.log_pinned, ""]
+            - call: [<.scene.set_text, "log_box", ""]
+
+      - def:
+          name: selected_job
+          access: public
+          return: { type: string, lifetime: producer }
+          body:
+            - return: <.job_id
+
+      # take_src / take_back / take_start: EINMAL abholbare Wuensche.
+      - def:
+          name: take_src
+          access: public
+          return: i32
+          body:
+            - decl: [val, i32, <.want_src]
+            - set: [<.want_src, 0]
+            - return: val
+
+      - def:
+          name: take_prm
+          access: public
+          return: i32
+          body:
+            - decl: [val, i32, <.want_prm]
+            - set: [<.want_prm, 0]
+            - return: val
+
+      - def:
+          name: take_back
+          access: public
+          return: i32
+          body:
+            - decl: [val, i32, <.want_back]
+            - set: [<.want_back, 0]
+            - return: val
+
+      - def:
+          name: take_start
+          access: public
+          return: i32
+          body:
+            - decl: [val, i32, <.want_start]
+            - set: [<.want_start, 0]
+            - return: val
+
+      # ── Spalte 1: die Laeufe dieses Jobs ───────────────────────────────
+      # Neueste oben.  Die Nummer ist die Build-Nummer des Jobs (F106-2), das
+      # Datum der Beginn — beides steht in der Zeile, weil „#7" allein nicht
+      # sagt, ob das von heute oder vom letzten Monat ist.
+      - def:
+          name: sync_runs
+          static_off: ["str_cmp"]
+          args: [[view, ref<ClusterView>]]
+          body:
+            - call: [<.run_ids.clear]
+            - decl: [found, list<string>, { call: [<.order.of_job, view, <.job_id] }]
+            - decl: [fix, i32, 0]
+            - while:
+                condition: { lt: [fix, found.len] }
+                body:
+                  - call: [<.run_ids.push, { at: [found, fix] }]
+                  - set: [fix, { +: [fix, 1] }]
+            # Zeilenzahl nachziehen (der Container spawnt je Eintrag eine Zeile).
+            - if:
+                condition: { neq: [<.run_keys.len, <.run_ids.len] }
+                then:
+                  - call: [<.run_keys.clear]
+                  - decl: [kix, i32, 0]
+                  - while:
+                      condition: { lt: [kix, <.run_ids.len] }
+                      body:
+                        - call: [<.run_keys.push, { at: [<.run_ids, kix] }]
+                        - set: [kix, { +: [kix, 1] }]
+            - decl: [none_txt, string, ""]
+            - if: { condition: { eq: [<.run_ids.len, 0] }, then: [{ set: [none_txt, "Noch kein Lauf."] }] }
+            - call: [<.scene.set_text, "runs_none", none_txt]
+            # Ohne Auswahl: der neueste Lauf.  Eine leere Mitte waere ein
+            # Bildschirm, der fragt, statt zu zeigen.
+            - if:
+                condition: { '&&': [{ eq: [<.sel_run.len, 0] }, { gt: [<.run_ids.len, 0] }] }
+                then: [{ set: [<.sel_run, { at: [<.run_ids, 0] }] }, { set: [<.follow, 1] }]
+            # Im grossen Modus gibt es keine Lauf-SPALTE — die AUSWAHL bleibt
+            # aber bestehen, sonst waere der Raum leer.  Der Container spawnt
+            # nach der Liste, nicht nach der Sichtbarkeit seiner Flaeche.
+            - if: { condition: { eq: [<.wide_view, 1] }, then: [{ call: [<.run_keys.clear] }] }
+
+      - def:
+          name: fill_runs
+          static_off: ["str_cmp"]
+          args: [[view, ref<ClusterView>]]
+          body:
+            - decl: [rcc, i32, { call: [<.scene.container_row_count, "runs_list"] }]
+            - decl: [rci, i32, 0]
+            - while:
+                condition: { lt: [rci, rcc] }
+                body:
+                  - decl: [row, prefab_instance, { call: [<.scene.container_row, "runs_list", rci] }]
+                  - if:
+                      condition: { '&&': [{ neq: [row, null] }, { lt: [rci, <.run_ids.len] }] }
+                      then:
+                        - decl: [rid, string, { at: [<.run_ids, rci] }]
+                        - decl: [prun, PipelineRun, { call: [<.run_of, view, rid] }]
+                        - call: [row.set_text, "num_lblx", "#${prun.build_number}"]
+                        - call: [row.set_text, "when_lblx", { call: [<.order.when_of, prun.started_ms] }]
+                        - call: [row.set_bg_color, "stat_dotx", { call: [<.status_color, prun.status] }]
+                        # Die Auswahl muss SICHTBAR sein, sonst weiss niemand,
+                        # welcher Lauf in der Mitte steht.
+                        - decl: [rowc, i32, 0x111826FF]
+                        - if: { condition: { eq: [rid, <.sel_run] }, then: [{ set: [rowc, 0x1E2A42FF] }] }
+                        - call: [row.set_bg_color, "row_backg", rowc]
+                        - if:
+                            condition: { eq: [{ call: [row.child_clicked, "click_area"] }, 1] }
+                            then:
+                              - set: [<.sel_run, rid]
+                              - set: [<.sel_stage, ""]
+                              - set: [<.follow, 1]
+                              - set: [<.log_off, 0]
+                              - set: [<.err_off, 0]
+                              - set: [<.log_seen_ms, 0]
+                              - set: [<.log_text, ""]
+                              - set: [<.err_text, ""]
+                              - call: [<.scene.set_text, "log_box", ""]
+                  - set: [rci, { +: [rci, 1] }]
+
+      - def:
+          name: run_of
+          static_off: ["str_cmp"]
+          args: [[view, ref<ClusterView>], [rid, string]]
+          return: { type: PipelineRun, lifetime: producer }
+          body:
+            - decl: [out, PipelineRun]
+            - decl: [rix, i32, 0]
+            - while:
+                condition: { lt: [rix, view.pipelines.len] }
+                body:
+                  - decl: [prun, PipelineRun, { at: [view.pipelines, rix] }]
+                  - if: { condition: { eq: [prun.run_id, rid] }, then: [{ return: prun }] }
+                  - set: [rix, { +: [rix, 1] }]
+            - return: out
+
+      # Eine Farbe je Zustand — dieselbe Zuordnung fuer Laufzeilen und Knoten,
+      # damit links und rechts nicht verschiedene Sprachen sprechen.
+      - def:
+          name: status_color
+          static_off: ["str_cmp"]
+          args: [[status, string]]
+          return: i32
+          body:
+            # Ueber den ENUM (sources/shared/pipe_status.aiml): hier war es zufaellig
+            # richtig, in der Jobliste nicht — zwei Stellen, ein Vokabular, und nur
+            # eine davon stimmte.  Jetzt kann keine mehr abweichen.
+            - decl: [code_a, i32, { call: [pipe_status_of, status] }]
+            - if: { condition: { eq: [code_a, PipeStatus.done] }, then: [{ return: 0x66CC88FF }] }
+            - if: { condition: { eq: [code_a, PipeStatus.failed] }, then: [{ return: 0xDD6655FF }] }
+            - if: { condition: { eq: [status, "running"] }, then: [{ return: 0xFFCC66FF }] }
+            - if: { condition: { eq: [status, "queued"] }, then: [{ return: 0x5588BBFF }] }
+            - return: 0x667788FF
+
+      # ── Spalte 3: die Pipeline als Gitter ──────────────────────────────
+      # Ein Lauf ist eine Matrix: Zeilen sind Lanes (`bindings`), Spalten die
+      # Stufen in ihrer Reihenfolge.  Jede Lane hat dieselben Stufen (doc/spec/97),
+      # darum genuegt EINE Stufenliste fuer alle Zeilen.
+      - def:
+          name: sync_graph
+          static_off: ["str_cmp"]
+          args: [[view, ref<ClusterView>]]
+          body:
+            - decl: [prun, PipelineRun, { call: [<.run_of, view, <.sel_run] }]
+            - decl: [lanes, list<string>]
+            - decl: [stages, list<string>]
+            - decl: [six, i32, 0]
+            - while:
+                condition: { lt: [six, prun.stages.len] }
+                body:
+                  - decl: [stg, PipelineStage, { at: [prun.stages, six] }]
+                  - set: [six, { +: [six, 1] }]
+                  - if: { condition: { eq: [{ call: [lanes.contains, stg.bindings] }, 0] }, then: [{ call: [lanes.push, stg.bindings] }] }
+                  - decl: [short, string, { call: [<.order.short_name, stg.name] }]
+                  - if: { condition: { eq: [{ call: [stages.contains, short] }, 0] }, then: [{ call: [stages.push, short] }] }
+            # Nur bei Aenderung neu binden: ein Neuaufbau je Rahmen liesse die
+            # Knoepfe unter dem Zeiger verschwinden.
+            - if:
+                condition: { neq: [lanes.len, <.lane_keys.len] }
+                then:
+                  - call: [<.lane_keys.clear]
+                  - decl: [lix, i32, 0]
+                  - while:
+                      condition: { lt: [lix, lanes.len] }
+                      body:
+                        - call: [<.lane_keys.push, { at: [lanes, lix] }]
+                        - set: [lix, { +: [lix, 1] }]
+            - if:
+                condition: { neq: [stages.len, <.stage_keys.len] }
+                then:
+                  - call: [<.stage_keys.clear]
+                  - decl: [tix, i32, 0]
+                  - while:
+                      condition: { lt: [tix, stages.len] }
+                      body:
+                        - call: [<.stage_keys.push, { at: [stages, tix] }]
+                        - set: [tix, { +: [tix, 1] }]
+            - decl: [none_txt, string, ""]
+            - if: { condition: { eq: [prun.stages.len, 0] }, then: [{ set: [none_txt, "Kein Lauf gewählt."] }] }
+            - call: [<.scene.set_text, "graph_none", none_txt]
+            # Dieselben Daten, andere Darstellung: die Koerper fuer den Raum.
+            # Die Schichten dieses Laufs aus dem Schnappschuss heraussieben —
+            # er traegt sie fuer ALLE sichtbaren Laeufe in einer Liste.
+            - decl: [lays, list<StageLayer>]
+            - decl: [lyx, i32, 0]
+            - while:
+                condition: { lt: [lyx, view.layers.len] }
+                body:
+                  - decl: [lrow, StageLayer, { at: [view.layers, lyx] }]
+                  - set: [lyx, { +: [lyx, 1] }]
+                  - if: { condition: { eq: [lrow.run_id, <.sel_run] }, then: [{ call: [lays.push, lrow] }] }
+            # Dieselbe Siebung fuer die Laufzeiten (doc/spec/107 §107.1h).
+            - call: [<.run_times.clear]
+            - decl: [tyx, i32, 0]
+            - while:
+                condition: { lt: [tyx, view.times.len] }
+                body:
+                  - decl: [trow, StageTime, { at: [view.times, tyx] }]
+                  - set: [tyx, { +: [tyx, 1] }]
+                  - if: { condition: { eq: [trow.run_id, <.sel_run] }, then: [{ call: [<.run_times.push, trow] }] }
+            - call: [<.rebuild_bodies, prun, lays]
+            # Steht der Raum, verschwinden die flachen Kaesten — zwei
+            # Darstellungen derselben Sache uebereinander waeren eine zu viel.
+            # Faellt der Shader aus (alte Treiber, WebGL ohne GLES3), bleiben
+            # sie: lieber flach als gar nichts (doc/spec/107 §107.1b).
+            - if:
+                condition: { eq: [{ call: [<.view3d.is_ready] }, 1] }
+                then:
+                  - call: [<.lane_keys.clear]
+                  - call: [<.stage_keys.clear]
+
+      # fill_graph: Knoten beschriften, faerben — und Klicks einsammeln
+      # (F107-11: der Graph ist das Auswahlmittel fuer die Ausgabe).
+      - def:
+          name: fill_graph
+          static_off: ["str_cmp"]
+          args: [[view, ref<ClusterView>]]
+          body:
+            - decl: [prun, PipelineRun, { call: [<.run_of, view, <.sel_run] }]
+            - decl: [lcc, i32, { call: [<.scene.container_row_count, "graph_rows"] }]
+            - decl: [lci, i32, 0]
+            - while:
+                condition: { lt: [lci, lcc] }
+                body:
+                  - decl: [lane, prefab_instance, { call: [<.scene.container_row, "graph_rows", lci] }]
+                  - if:
+                      condition: { '&&': [{ neq: [lane, null] }, { lt: [lci, <.lane_keys.len] }] }
+                      then:
+                        - decl: [lkey, string, { at: [<.lane_keys, lci] }]
+                        - decl: [ltxt, string, lkey]
+                        - if: { condition: { eq: [lkey.len, 0] }, then: [{ set: [ltxt, "(eine Lane)"] }] }
+                        - call: [lane.set_text, "lane_lblx", ltxt]
+                        - call: [lane.bind_list, "lane_nodes", <.stage_keys]
+                        - call: [<.fill_lane, lane, prun, lkey]
+                  - set: [lci, { +: [lci, 1] }]
+
+      - def:
+          name: fill_lane
+          static_off: ["str_cmp"]
+          args: [[lane, prefab_instance], [prun, ref<PipelineRun>], [lkey, string]]
+          body:
+            - decl: [ncc, i32, { call: [lane.container_row_count, "lane_nodes"] }]
+            - decl: [nci, i32, 0]
+            - while:
+                condition: { lt: [nci, ncc] }
+                body:
+                  - decl: [node, prefab_instance, { call: [lane.container_row, "lane_nodes", nci] }]
+                  - if:
+                      condition: { '&&': [{ neq: [node, null] }, { lt: [nci, <.stage_keys.len] }] }
+                      then:
+                        - decl: [skey, string, { at: [<.stage_keys, nci] }]
+                        - call: [node.set_text, "node_lblx", skey]
+                        # Die Stufe DIESER Lane mit DIESEM Namen finden.
+                        - decl: [found, i32, 0]
+                        - decl: [stage_id, string, ""]
+                        - decl: [stat, string, ""]
+                        - decl: [full, string, ""]
+                        - decl: [six, i32, 0]
+                        - while:
+                            condition: { lt: [six, prun.stages.len] }
+                            body:
+                              - decl: [stg, PipelineStage, { at: [prun.stages, six] }]
+                              - set: [six, { +: [six, 1] }]
+                              - if:
+                                  condition: { '&&': [{ eq: [found, 0] }, { '&&': [{ eq: [stg.bindings, lkey] }, { eq: [{ call: [<.order.short_name, stg.name] }, skey] }] }] }
+                                  then:
+                                    - set: [found, 1]
+                                    - set: [stage_id, stg.stage_id]
+                                    - set: [stat, stg.status]
+                                    - set: [full, stg.name]
+                        - call: [node.set_bg_color, "node_bg", { call: [<.node_color, stat, stage_id] }]
+                        - if:
+                            condition: { '&&': [{ eq: [{ call: [node.child_clicked, "node_hit"] }, 1] }, { gt: [stage_id.len, 0] }] }
+                            then:
+                              - set: [<.sel_stage, stage_id]
+                              # Von Hand gewaehlt: ab jetzt nicht mehr
+                              # mitlaufen (F107-47).
+                              - set: [<.follow, 0]
+                              - set: [<.sel_label, "${full}  —  ${stat}"]
+                              - set: [<.log_off, 0]
+                              - set: [<.err_off, 0]
+                              - set: [<.log_seen_ms, 0]
+                              - set: [<.log_text, ""]
+                              - set: [<.err_text, ""]
+                              - call: [<.scene.set_text, "log_box", ""]
+                  - set: [nci, { +: [nci, 1] }]
+
+      # node_color: Zustand als Flaeche, Auswahl als hellerer Ton.  Dieselbe
+      # Zuordnung wie bei den Laufzeilen (status_color), nur abgedunkelt — ein
+      # Knoten ist Flaeche, kein Punkt.
+      - def:
+          name: node_color
+          static_off: ["str_cmp"]
+          args: [[status, string], [stage_id, string]]
+          return: i32
+          body:
+            - if: { condition: { '&&': [{ gt: [stage_id.len, 0] }, { eq: [stage_id, <.sel_stage] }] }, then: [{ return: 0x2E4470FF }] }
+            - decl: [code_b, i32, { call: [pipe_status_of, status] }]
+            - if: { condition: { eq: [code_b, PipeStatus.done] }, then: [{ return: 0x1C3826FF }] }
+            - if: { condition: { eq: [code_b, PipeStatus.failed] }, then: [{ return: 0x3A1E1AFF }] }
+            - if: { condition: { eq: [status, "running"] }, then: [{ return: 0x3A3016FF }] }
+            - if: { condition: { eq: [status, "queued"] }, then: [{ return: 0x16243AFF }] }
+            - return: 0x1A2030FF
+
+      # ── Die raeumliche Darstellung (doc/spec/107 §107.1b) ──────────────
+      # Die Koerper werden nur bei Aenderung neu gerechnet; gezeichnet wird
+      # jeden Rahmen, weil der Fluss laeuft (F107-14).
+      # set_crew: fuer Aufnahmen und Proben — im Betrieb setzt `render` sie.
+      - def:
+          name: set_crew
+          access: public
+          args: [[crew, ref<AgentList>]]
+          body:
+            - set: [<.crew_ref, crew]
+            - set: [<.shown_sig, ""]
+
+      - def:
+          name: rebuild_bodies
+          static_off: ["str_cmp"]
+          args: [[prun, ref<PipelineRun>], [lays, list<StageLayer>]]
+          body:
+            - call: [<.bodies.clear]
+            - decl: [built, list<SceneItem>, { call: [<.space.of_run, prun, <.sel_stage] }]
+            - decl: [bix, i32, 0]
+            - while:
+                condition: { lt: [bix, built.len] }
+                body:
+                  - call: [<.bodies.push, { at: [built, bix] }]
+                  - set: [bix, { +: [bix, 1] }]
+            # Die Platten UNTER den Kugeln (doc/spec/107 §107.1c): was jede
+            # Stufe hinterlassen hat.  Gemeldet hat es der Agent, der die
+            # Schicht auf seinem Wirt gemessen hat — hier wird nur gezeichnet.
+            - call: [<.space.layers_of, <.bodies, prun, lays]
+            # Und die DAUER an die Kugel (§107.1h).  Laufende Stufen zaehlen
+            # gegen jetzt hoch, darum die Uhr als Argument: die Szene soll
+            # keine eigene Zeitquelle haben.
+            - call: [<.space.stamp_times, <.bodies, prun, <.run_times, { call: [time.now] }]
+            - if: { condition: { pneq: [<.crew_ref, null] }, then: [{ call: [<.space.add_agents, <.bodies, <.crew_ref, prun] }] }
+            # KEINE Speicher in der LAUF-Ansicht (doc/spec/107 F107-41).  Sie
+            # gehoeren dem Controller, nicht dem Lauf: welche KVs er fuehrt,
+            # sagt ueber diesen Lauf nichts.  Als es drei waren, war es
+            # Beiwerk; inzwischen sind es rund zwanzig, und sie standen als
+            # endlose Reihe bis ueber den Boden hinaus — mit zwanzig
+            # Beschriftungen, die zu einem Schmierstreifen verliefen (gemeldet
+            # 22.10.2026).  Im Cluster-Bild (§107.5a) stehen sie weiterhin,
+            # dort ist der Controller das Thema.
+            - call: [<.space.add_ground, <.bodies]
+            - call: [<.view3d.fit, <.bodies]
+
+      # draw3d: in den Ausschnitt der Pipeline-Spalte, NACH der Oberflaeche.
+      # Der Aufrufer ist der Wirt (CosmosApp), weil nur dort die Reihenfolge
+      # im Rahmen feststeht — ein Bildschirm, der mitten im Zeichnen zeichnet,
+      # haette zwei Eigentuemer fuer einen Rahmen.
+      # Pruefhaken: wie viele Koerper stehen gerade im Raum?  Ohne ihn liesse
+      # sich „nichts zu sehen" nicht von „nichts gebaut" unterscheiden.
+      - def:
+          name: body_count
+          access: public
+          return: i32
+          body:
+            - return: <.bodies.len
+
+      - def:
+          name: gfx_ready
+          access: public
+          return: i32
+          body:
+            - return: { call: [<.view3d.is_ready] }
+
+      - def:
+          name: draw3d
+          access: public
+          # Die Fenstergroesse kommt vom WIRT: sie haengt am Fenster-Griff, und
+          # den besitzt die Anwendung, nicht ein Bildschirm.
+          args: [[seconds, f32], [win_w, i32], [win_h, i32]]
+          body:
+            - if: { condition: { eq: [<.is_visible, 0] }, then: [{ return: [] }] }
+            - if: { condition: { eq: [<.bodies.len, 0] }, then: [{ return: [] }] }
+            - call: [<.view3d.advance, seconds]
+            # Die Szene ist auf 1280x720 entworfen; das Fenster kann groesser
+            # sein.  Der Ausschnitt wird darum mitskaliert, und y zaehlt in GL
+            # von UNTEN.
+            - if: { condition: { le: [win_w, 0] }, then: [{ return: [] }] }
+            - decl: [scale_x, f32, { '/': [{ cast: [win_w, f32] }, 1280.0] }]
+            - decl: [scale_y, f32, { '/': [{ cast: [win_h, f32] }, 720.0] }]
+            # Schmal: die Pipeline-Spalte.  Gross: die ganze Inhaltsflaeche.
+            - decl: [des_x, f32, 906.0]
+            - decl: [des_w, f32, 350.0]
+            - decl: [des_h, f32, 436.0]
+            - decl: [des_bot, f32, 116.0]
+            - if:
+                condition: { eq: [<.wide_view, 1] }
+                then:
+                  - set: [des_x, 24.0]
+                  - set: [des_w, 1232.0]
+                  - set: [des_h, 500.0]
+                  - set: [des_bot, 54.0]
+            - decl: [left, i32, { cast: [{ '*': [des_x, scale_x] }, i32] }]
+            - decl: [wide, i32, { cast: [{ '*': [des_w, scale_x] }, i32] }]
+            - decl: [high, i32, { cast: [{ '*': [des_h, scale_y] }, i32] }]
+            - decl: [bottom, i32, { cast: [{ '*': [des_bot, scale_y] }, i32] }]
+            - call: [<.view3d.draw, <.bodies, left, bottom, wide, high]
+            - call: [<.place_tags, { '/': [des_w, des_h] }, des_x, des_bot, des_w, des_h]
+            # Den Ausschnitt ZURUECKSETZEN: der naechste Rahmen zeichnet die
+            # Oberflaeche wieder ganzflaechig.  Ohne das schrumpfte die ganze
+            # 2D-Ansicht auf die Groesse der Pipeline-Spalte (gemessen).
+            - call: [gl.viewport, 0, 0, win_w, win_h]
+
+      # ── Namen ueber den Kugeln (doc/spec/107 F107-16) ──────────────────
+      # Projiziert, nicht geraten: dieselbe Kamera wie das Bild (Pipe3D.project).
+      # Ohne Namen muesste man jede Kugel anfassen, um zu erfahren, was sie ist.
+      - def:
+          name: place_tags
+          static_off: ["str_cmp", "args"]
+          args: [[aspect, f32], [des_x, f32], [des_bot, f32], [des_w, f32], [des_h, f32]]
+          body:
+            - decl: [used, i32, 0]
+            - decl: [bix, i32, 0]
+            - while:
+                condition: { '&&': [{ lt: [bix, <.bodies.len] }, { lt: [used, <.tags.len] }] }
+                body:
+                  - decl: [one, SceneItem, { at: [<.bodies, bix] }]
+                  - set: [bix, { +: [bix, 1] }]
+                  # Ein Schild nur, wo es auch LESBAR ist (doc/spec/107 F107-42).
+                  # Jeder Koerper traegt seinen Namen (F107-16) — aber zwanzig
+                  # Namen auf Briefmarkengroesse sind kein Text mehr, sondern
+                  # ein Streifen (gemeldet 22.10.2026).  Gezeigt wird darum,
+                  # was gross genug ist, und was der Zeiger beruehrt.
+                  - decl: [big_enough, i32, 0]
+                  - if: { condition: { ge: [one.radius, 0.5] }, then: [{ set: [big_enough, 1] }] }
+                  - if: { condition: { eq: [one.tag, <.hover_tag] }, then: [{ set: [big_enough, 1] }] }
+                  - if: { condition: { '&&': [{ gt: [one.tag.len, 0] }, { eq: [one.tag, <.sel_stage] }] }, then: [{ set: [big_enough, 1] }] }
+                  - if:
+                      condition: { '&&': [{ gt: [one.label.len, 0] }, { eq: [big_enough, 1] }] }
+                      then:
+                        - decl: [ndc, vec3, { call: [<.view3d.project, one.pos_x, { +: [one.pos_y, { +: [one.radius, 0.35] }] }, one.pos_z, aspect] }]
+                        - decl: [tag, prefab_instance, { at: [<.tags, used] }]
+                        - if:
+                            condition: { lt: [ndc.z, 0.0] }
+                            then: [{ call: [tag.set_visible, 0] }]
+                            else:
+                              # Bild- in Entwurfskoordinaten: y zaehlt im Bild
+                              # von unten, im Entwurf von oben.
+                              - decl: [scr_x, f32, { +: [des_x, { '*': [{ '*': [{ +: [ndc.x, 1.0] }, 0.5] }, des_w] }] }]
+                              - decl: [scr_y, f32, { -: [{ -: [720.0, des_bot] }, { '*': [{ '*': [{ +: [ndc.y, 1.0] }, 0.5] }, des_h] }] }]
+                              - call: [tag.set_pos, { -: [scr_x, 60.0] }, { -: [scr_y, 9.0] }]
+                              - call: [tag.set_text, "tag_lblx", one.label]
+                              - call: [tag.set_visible, 1]
+                        - set: [used, { +: [used, 1] }]
+            # Uebrige Schilder aus dem Bild nehmen.
+            - while:
+                condition: { lt: [used, <.tags.len] }
+                body:
+                  - decl: [spare, prefab_instance, { at: [<.tags, used] }]
+                  - call: [spare.set_visible, 0]
+                  - set: [used, { +: [used, 1] }]
+
+      - def:
+          name: hide_tags
+          body:
+            - decl: [hix, i32, 0]
+            - while:
+                condition: { lt: [hix, <.tags.len] }
+                body:
+                  - decl: [tag, prefab_instance, { at: [<.tags, hix] }]
+                  - call: [tag.set_visible, 0]
+                  - set: [hix, { +: [hix, 1] }]
+
+      # ── Bedienung im Raum (doc/spec/107 F107-11) ───────────────────────
+      # Klick waehlt den Schritt, Ziehen dreht, Rad zoomt.  Das Feld ist in
+      # ENTWURFS-Koordinaten bekannt (1280x720) — `input.mouse_design_*`
+      # liefert die Maus darin, also entfaellt jede Umrechnung.
+      - def:
+          name: space_input
+          access: public
+          static_off: ["str_cmp"]
+          body:
+            - if: { condition: { eq: [<.is_visible, 0] }, then: [{ return: [] }] }
+            - if: { condition: { eq: [{ call: [<.view3d.is_ready] }, 0] }, then: [{ return: [] }] }
+            - if:
+                condition: { eq: [{ call: [<.scene.child_clicked, "wide_btn"] }, 1] }
+                then:
+                  - set: [<.wide_view, { -: [1, <.wide_view] }]
+                  - call: [<.apply_wide]
+                  - return: []
+            - decl: [mouse_x, f32, { call: [engine.mouse_design_x] }]
+            - decl: [mouse_y, f32, { call: [engine.mouse_design_y] }]
+            # Das Feld, in dem gedreht und gewaehlt wird — es folgt dem Modus.
+            - decl: [box_x0, f32, 906.0]
+            - decl: [box_x1, f32, 1256.0]
+            - decl: [box_y0, f32, 168.0]
+            - decl: [box_y1, f32, 604.0]
+            - if:
+                condition: { eq: [<.wide_view, 1] }
+                then:
+                  - set: [box_x0, 24.0]
+                  - set: [box_x1, 1256.0]
+                  - set: [box_y0, 166.0]
+                  - set: [box_y1, 666.0]
+            - decl: [inside, i32, 0]
+            - if:
+                condition: { '&&': [{ ge: [mouse_x, box_x0] }, { '&&': [{ le: [mouse_x, box_x1] }, { '&&': [{ ge: [mouse_y, box_y0] }, { le: [mouse_y, box_y1] }] }] }] }
+                then: [{ set: [inside, 1] }]
+            - if: { condition: { eq: [inside, 0] }, then: [{ return: [] }] }
+            # Drehen, solange die Taste haelt — der Ausschnitt ist klein, also
+            # sind die Schritte klein.
+            - if:
+                condition: { eq: [{ call: [input.mouse_button, 0] }, 1] }
+                then:
+                  - decl: [drag_x, f32, { call: [input.mouse_delta_x] }]
+                  - decl: [drag_y, f32, { call: [input.mouse_delta_y] }]
+                  - if:
+                      condition: { '||': [{ gt: [drag_x, 0.5] }, { '||': [{ lt: [drag_x, -0.5] }, { '||': [{ gt: [drag_y, 0.5] }, { lt: [drag_y, -0.5] }] }] }] }
+                      then:
+                        - call: [<.view3d.turn, { '*': [drag_x, 0.35] }, { '*': [drag_y, -0.3] }]
+                        - set: [<.dragged, 1]
+            # Zeigen, worueber man steht — ohne zu klicken.
+            - if:
+                condition: { eq: [{ call: [input.mouse_button, 0] }, 0] }
+                then:
+                  - decl: [hov_x, f32, { -: [{ '*': [2.0, { '/': [{ -: [mouse_x, box_x0] }, { -: [box_x1, box_x0] }] }] }, 1.0] }]
+                  - decl: [hov_y, f32, { -: [1.0, { '*': [2.0, { '/': [{ -: [mouse_y, box_y0] }, { -: [box_y1, box_y0] }] }] }] }]
+                  - decl: [hov_aspect, f32, { '/': [{ -: [box_x1, box_x0] }, { -: [box_y1, box_y0] }] }]
+                  - decl: [over, string, { call: [<.view3d.pick, <.bodies, hov_x, hov_y, hov_aspect] }]
+                  - if:
+                      condition: { neq: [over, <.hover_tag] }
+                      then:
+                        - set: [<.hover_tag, over]
+                        - call: [<.name_hovered]
+            - decl: [wheel, f32, { call: [input.mouse_scroll_y] }]
+            - if: { condition: { gt: [wheel, 0.1] }, then: [{ call: [<.view3d.zoom, 0.88] }] }
+            - if: { condition: { lt: [wheel, -0.1] }, then: [{ call: [<.view3d.zoom, 1.14] }] }
+            # Auswaehlen beim LOSLASSEN, und nur ohne Drehung davor: sonst
+            # waehlte jedes Drehen am Ende einen Schritt aus.
+            - if:
+                condition: { eq: [{ call: [input.mouse_released, 0] }, 1] }
+                then:
+                  - if:
+                      condition: { eq: [<.dragged, 0] }
+                      then:
+                        - decl: [ndc_x, f32, { -: [{ '*': [2.0, { '/': [{ -: [mouse_x, box_x0] }, { -: [box_x1, box_x0] }] }] }, 1.0] }]
+                        - decl: [ndc_y, f32, { -: [1.0, { '*': [2.0, { '/': [{ -: [mouse_y, box_y0] }, { -: [box_y1, box_y0] }] }] }] }]
+                        - decl: [box_aspect, f32, { '/': [{ -: [box_x1, box_x0] }, { -: [box_y1, box_y0] }] }]
+                        - decl: [hit, string, { call: [<.view3d.pick, <.bodies, ndc_x, ndc_y, box_aspect] }]
+                        - if:
+                            condition: { gt: [hit.len, 0] }
+                            then:
+                              - set: [<.sel_stage, hit]
+                              - set: [<.follow, 0]
+                              - set: [<.log_off, 0]
+                              - set: [<.err_off, 0]
+                              - set: [<.log_seen_ms, 0]
+                              - set: [<.log_text, ""]
+                              - set: [<.err_text, ""]
+                              - call: [<.scene.set_text, "log_box", ""]
+                              - call: [<.name_selected]
+                              # Die Auswahl aendert die Groesse der Kugel —
+                              # also neu bauen.
+                              - set: [<.shown_sig, ""]
+                  - set: [<.dragged, 0]
+
+      # apply_wide: im grossen Modus treten Laeufe und Ausgabe zurueck.  Sie
+      # verschwinden, statt zu schrumpfen: eine halb sichtbare Spalte ist
+      # schlechter als keine, und der Weg zurueck ist ein Klick.
+      # toggle_wide: fuer Aufnahmen und Proben — im Betrieb macht das der Knopf.
+      - def:
+          name: toggle_wide
+          access: public
+          body:
+            - set: [<.wide_view, { -: [1, <.wide_view] }]
+            - call: [<.apply_wide]
+
+      - def:
+          name: apply_wide
+          body:
+            - decl: [small, i32, { -: [1, <.wide_view] }]
+            - call: [<.scene.set_child_visible, "runs_pane", small]
+            - call: [<.scene.set_child_visible, "runs_list", small]
+            - call: [<.scene.set_child_visible, "runs_hdr", small]
+            - call: [<.scene.set_child_visible, "runs_none", small]
+            - call: [<.scene.set_child_visible, "log_box", small]
+            - call: [<.scene.set_child_visible, "log_hdr", small]
+            - call: [<.scene.set_child_visible, "graph_pane", small]
+            - if:
+                condition: { eq: [<.wide_view, 1] }
+                then:
+                  - call: [<.scene.set_text, "wide_btn", "klein"]
+                  - call: [<.scene.set_text, "graph_hdr", "Pipeline — ziehen dreht, Rad zoomt, Klick wählt"]
+                  # Die ZEILEN gehoeren dem Container, nicht der Flaeche: ein
+                  # verstecktes Behaeltnis laesst sie stehen.  Also die Liste
+                  # leeren — und beim Zurueck neu bauen lassen.
+                  - call: [<.run_keys.clear]
+                else:
+                  - call: [<.scene.set_text, "wide_btn", "groß"]
+                  - call: [<.scene.set_text, "graph_hdr", "Pipeline"]
+                  - set: [<.shown_sig, ""]
+
+      # name_hovered: die Zeile unter dem Graphen nennt, worueber die Maus
+      # steht — und faellt auf die AUSWAHL zurueck, sobald man wegfaehrt.
+      # Zwei Zeilen (eine fuer Auswahl, eine fuer Hover) waeren Platz fuer
+      # eine Unterscheidung, die niemand braucht.
+      - def:
+          name: name_hovered
+          static_off: ["str_cmp"]
+          body:
+            - if:
+                condition: { eq: [<.hover_tag.len, 0] }
+                then: [{ call: [<.scene.set_text, "sel_lbl", <.sel_label] }, { return: [] }]
+            - if: { condition: { peq: [<.live_ref, null] }, then: [{ return: [] }] }
+            - decl: [prun, PipelineRun, { call: [<.run_of, <.live_ref.view, <.sel_run] }]
+            - decl: [six, i32, 0]
+            - while:
+                condition: { lt: [six, prun.stages.len] }
+                body:
+                  - decl: [stg, PipelineStage, { at: [prun.stages, six] }]
+                  - set: [six, { +: [six, 1] }]
+                  - if:
+                      condition: { eq: [stg.stage_id, <.hover_tag] }
+                      then:
+                        - decl: [who, string, ""]
+                        - if: { condition: { gt: [stg.agent.len, 0] }, then: [{ set: [who, "  auf ${stg.agent}"] }] }
+                        - call: [<.scene.set_text, "sel_lbl", "▸ ${stg.name}  —  ${stg.status}${who}"]
+
+      # name_selected: die Beschriftung unter dem Graphen.  Sie nennt Stufe
+      # UND Zustand; eine Kugel allein sagt die Lane nicht.
+      - def:
+          name: name_selected
+          static_off: ["str_cmp"]
+          body:
+            - if: { condition: { peq: [<.live_ref, null] }, then: [{ return: [] }] }
+            - decl: [prun, PipelineRun, { call: [<.run_of, <.live_ref.view, <.sel_run] }]
+            - decl: [six, i32, 0]
+            - while:
+                condition: { lt: [six, prun.stages.len] }
+                body:
+                  - decl: [stg, PipelineStage, { at: [prun.stages, six] }]
+                  - set: [six, { +: [six, 1] }]
+                  - if:
+                      condition: { eq: [stg.stage_id, <.sel_stage] }
+                      then:
+                        - set: [<.sel_label, "${stg.name}  —  ${stg.status}"]
+                        # Laeuft sie und schweigt?  Dann sagen, WIE LANGE schon
+                        # (F107-54).  Ohne diese Zahl ist „nichts passiert"
+                        # nicht von „haengt" zu unterscheiden, und man wartet
+                        # entweder zu kurz oder zu lang.
+                        - if:
+                            condition: { '&&': [{ eq: [{ call: [pipe_status_of, stg.status] }, PipeStatus.running] }, { gt: [<.log_seen_ms, 0] }] }
+                            then:
+                              - decl: [still_s, i64, { '/': [{ -: [{ call: [time.now] }, <.log_seen_ms] }, 1000] }]
+                              - if:
+                                  condition: { ge: [still_s, 5] }
+                                  then: [{ set: [<.sel_label, "${<.sel_label}   ·   seit ${still_s}s still"] }]
+                        - call: [<.scene.set_text, "sel_lbl", <.sel_label]
+                        # Der Knopf NENNT die Stufe, die er wiederholt.  „Ab
+                        # hier nochmal" liess offen, ob die angeklickte Kugel
+                        # dazugehoert — sie tut es (User 22.10.2026).
+                        - call: [<.scene.set_text, "again_btn", "${{ call: [<.order.short_name, stg.name] }} neu"]
+
+      # ── Spalte 2: die Ausgabe nachladen ────────────────────────────────
+      # In FENSTERN, ab dem letzten Offset — wie der Agent sie hochschiebt
+      # (doc/spec/103 §103.4e).  Dadurch waechst die Mitte mit dem Lauf mit,
+      # ohne dass jemand die ganze Datei haelt.
+      #
+      # Ohne gewaehlten Schritt zeigt die Mitte den ersten NICHT erfolgreichen
+      # — das ist fast immer der gesuchte (F107-11).
+      - def:
+          name: pick_stage
+          static_off: ["str_cmp"]
+          args: [[view, ref<ClusterView>]]
+          body:
+            # Selbst gewaehlt?  Dann bleibt es dabei — wer liest, will nicht
+            # weggeschaltet werden.
+            - if: { condition: { '&&': [{ gt: [<.sel_stage.len, 0] }, { eq: [<.follow, 0] }] }, then: [{ return: [] }] }
+            - decl: [prun, PipelineRun, { call: [<.run_of, view, <.sel_run] }]
+            - decl: [want, string, { call: [<.order.current_stage, prun] }]
+            - if: { condition: { eq: [want.len, 0] }, then: [{ return: [] }] }
+            # Schon dort?  Dann NICHTS anfassen — sonst leerte jeder Rahmen das
+            # Protokoll und die Box flackerte.
+            - if: { condition: { eq: [want, <.sel_stage] }, then: [{ return: [] }] }
+            - set: [<.sel_stage, want]
+            - set: [<.log_off, 0]
+            - set: [<.err_off, 0]
+            - set: [<.log_seen_ms, 0]
+            - set: [<.log_text, ""]
+            - set: [<.err_text, ""]
+            - decl: [six, i32, 0]
+            - while:
+                condition: { lt: [six, prun.stages.len] }
+                body:
+                  - decl: [stg, PipelineStage, { at: [prun.stages, six] }]
+                  - set: [six, { +: [six, 1] }]
+                  - if: { condition: { eq: [stg.stage_id, want] }, then: [{ set: [<.sel_label, "${stg.name}  —  ${stg.status}"] }] }
+
+      - def:
+          name: pull_log
+          access: public
+          static_off: ["str_cmp"]
+          args: [[pipes, ref<PipelineState>]]
+          body:
+            - if:
+                condition: { eq: [<.sel_stage.len, 0] }
+                then:
+                  - call: [<.scene.set_text, "again_btn", "Stufe waehlen"]
+                  - return: []
+            - decl: [win, RunWindow, { call: [pipes.log_window, <.sel_stage, <.log_off, 16384, 0] }]
+            # stderr IMMER mitholen (doc/spec/107 F107-53): ein Schritt kann
+            # ohne eine Zeile auf stdout scheitern — `apt` tut genau das, und
+            # dann stand in der Ausgabe nichts und im Bild nur „failed".
+            - decl: [ewin, RunWindow, { call: [pipes.log_window, <.sel_stage, <.err_off, 16384, 1] }]
+            - if: { condition: { '&&': [{ eq: [win.data.len, 0] }, { eq: [ewin.data.len, 0] }] }, then: [{ return: [] }] }
+            - set: [<.log_off, win.next_offset]
+            - set: [<.log_text, "${<.log_text}${win.data}"]
+            - set: [<.err_off, ewin.next_offset]
+            - set: [<.err_text, "${<.err_text}${ewin.data}"]
+            - set: [<.log_seen_ms, { call: [time.now] }]
+            # Nur der sichtbare Ausschnitt wird gehalten: ein 2-MiB-Protokoll
+            # gehoert nicht in den Browser-Speicher (doc/spec/103 §103.4e).
+            - if:
+                condition: { gt: [<.log_text.len, 60000] }
+                then: [{ set: [<.log_text, { call: [<.log_text.substr, { -: [<.log_text.len, 60000] }, 60000] }] }]
+            - if:
+                condition: { gt: [<.err_text.len, 60000] }
+                then: [{ set: [<.err_text, { call: [<.err_text.substr, { -: [<.err_text.len, 60000] }, 60000] }] }]
+            # Erst die Ausgabe, dann die Fehlerausgabe — mit Trennzeile, damit
+            # niemand raten muss, woher eine Zeile kommt.
+            - decl: [shown, string, <.log_text]
+            - if:
+                condition: { gt: [<.err_text.len, 0] }
+                then:
+                  - if: { condition: { gt: [shown.len, 0] }, then: [{ set: [shown, "${shown}\n"] }] }
+                  - set: [shown, "${shown}── Fehlerausgabe (stderr) ──\n${<.err_text}"]
+            - call: [<.scene.set_text, "log_box", shown]
+            # Ans Ende springen nur beim WECHSEL der Stufe — danach entscheidet
+            # der Leser.  Vorher wurde bei JEDEM Nachschub angepinnt, und weil
+            # ein laufendes Protokoll jede Sekunde waechst, riss es den Leser
+            # sofort wieder nach unten: Zurueckblaettern war unmoeglich
+            # (gemeldet 22.10.2026).  Dem Ende FOLGEN tut die Box ohnehin von
+            # selbst (`tail: true`) — und sie laesst los, sobald jemand
+            # hochscrollt (aiml spec/44_6 §5f).
+            - if:
+                condition: { neq: [<.log_pinned, <.sel_stage] }
+                then:
+                  - call: [<.scene.scroll_to_end, "log_box"]
+                  - set: [<.log_pinned, <.sel_stage]
+                  # Neue Stufe: der eingeblendete Befehl gehoerte der alten.
+                  - if:
+                      condition: { eq: [<.show_cmd, 1] }
+                      then:
+                        - set: [<.show_cmd, 0]
+                        - call: [<.scene.set_child_visible, "cmd_box", 0]
+
+      # paint: alles Zeichnen ohne Netz — damit die Ansicht ohne Server
+      # aufnehmbar ist (tools/ui_shot.sh) und nicht erst im Betrieb auffaellt,
+      # wenn Spalten sich ueberlappen.
+      #
+      # `sig` sagt, ob sich etwas geaendert hat: Zeilen und Knoten werden nur
+      # dann neu aufgebaut, die KLICKS dagegen jeden Rahmen — sonst gingen sie
+      # verloren.
+      - def:
+          name: paint
+          access: public
+          static_off: ["str_cmp"]
+          args: [[view, ref<ClusterView>], [sig, string]]
+          body:
+            - if:
+                condition: { neq: [sig, <.shown_sig] }
+                then:
+                  - set: [<.shown_sig, sig]
+                  - call: [<.sync_runs, view]
+                  - call: [<.pick_stage, view]
+                  - call: [<.sync_graph, view]
+                  - call: [<.scene.set_text, "sel_lbl", <.sel_label]
+            - call: [<.fill_runs, view]
+            - call: [<.fill_graph, view]
+
+      # ── render: je Rahmen, aber nur das Noetige ────────────────────────
+      - def:
+          name: render
+          access: public
+          static_off: ["str_cmp"]
+          args: [[live, ref<LiveState>], [pipes, ref<PipelineState>], [crew, ref<AgentList>]]
+          body:
+            - if: { condition: { eq: [<.is_visible, 0] }, then: [{ return: [] }] }
+            - if: { condition: { eq: [<.initialized, 0] }, then: [{ return: [] }] }
+            - if: { condition: { eq: [<.job_id.len, 0] }, then: [{ return: [] }] }
+            - if: { condition: { eq: [{ call: [live.has] }, 0] }, then: [{ return: [] }] }
+            - decl: [view, ref<ClusterView>, live.view]
+            # Zeilen und Knoten nur bei NEUEM Schnappschuss neu aufbauen; die
+            # Klicks dagegen jeden Rahmen, sonst gingen sie verloren.
+            # Die Agenten gehoeren mit ins Bild (Vorgabe 15.10.2026): ihre
+            # Zahl und Anwesenheit aendern die Szene, also in die Signatur.
+            - decl: [crew_n, i32, 0]
+            - if: { condition: { pneq: [crew, null] }, then: [{ set: [crew_n, crew.agents.len] }] }
+            - decl: [sig, string, "${<.sel_run}|${live.seq}|${crew_n}"]
+            - set: [<.crew_ref, crew]
+            - set: [<.live_ref, live]
+            - call: [<.paint, view, sig]
+            - call: [<.space_input]
+            - call: [<.pull_log, pipes]
+            # „Ab hier nochmal": die gewaehlte Stufe und alles danach in
+            # derselben Lane wieder wartend (doc/spec/101 §101.8).  Ohne
+            # gewaehlte Stufe waere nicht zu sagen, ab WO — dann sagt es das,
+            # statt stumm nichts zu tun.
+            - if:
+                condition: { eq: [{ call: [<.scene.child_clicked, "again_btn"] }, 1] }
+                then:
+                  - if:
+                      condition: { eq: [<.sel_stage.len, 0] }
+                      then: [{ call: [<.scene.set_text, "sel_lbl", "Erst eine Stufe waehlen — ab ihr wird wiederholt."] }]
+                      else:
+                        - decl: [bad, string, { call: [pipes.rewind, <.sel_run, <.sel_stage] }]
+                        - if:
+                            condition: { gt: [bad.len, 0] }
+                            then: [{ call: [<.scene.set_text, "sel_lbl", "Wiederholen abgelehnt: ${bad}"] }]
+                            else:
+                              - call: [<.scene.set_text, "sel_lbl", "${<.sel_stage}: laeuft erneut — alles DAVOR bleibt fertig, diese Stufe und alles danach fangen neu an"]
+                              # Die Ausgabe der alten Runde gehoert nicht zur neuen.
+                              - set: [<.log_off, 0]
+                              - set: [<.err_off, 0]
+                              - set: [<.log_seen_ms, 0]
+                              - set: [<.log_text, ""]
+                              - set: [<.err_text, ""]
+                              - call: [<.scene.set_text, "log_box", ""]
+
+            # Befehl ein/aus.  Der Text kommt aus der GEWAEHLTEN Stufe — nicht
+            # aus einer zweiten Quelle (doc/spec/104 F104-1).
+            - if:
+                condition: { eq: [{ call: [<.scene.child_clicked, "cmd_btn"] }, 1] }
+                then:
+                  - set: [<.show_cmd, { -: [1, <.show_cmd] }]
+                  - if:
+                      condition: { eq: [<.show_cmd, 1] }
+                      then:
+                        - decl: [crun, PipelineRun, { call: [<.run_of, view, <.sel_run] }]
+                        - decl: [ctext, string, "(keine Stufe gewaehlt)"]
+                        - decl: [cix2, i32, 0]
+                        - while:
+                            condition: { lt: [cix2, crun.stages.len] }
+                            body:
+                              - decl: [cstg, PipelineStage, { at: [crun.stages, cix2] }]
+                              - set: [cix2, { +: [cix2, 1] }]
+                              - if:
+                                  condition: { eq: [cstg.stage_id, <.sel_stage] }
+                                  then:
+                                    - set: [ctext, "${cstg.name}\n\n${cstg.command}"]
+                                    - if: { condition: { eq: [cstg.command.len, 0] }, then: [{ set: [ctext, "${cstg.name}\n\n(kein Befehl — diese Stufe fuehrt nichts aus)"] }] }
+                        - call: [<.scene.set_text, "cmd_box", ctext]
+                  - call: [<.scene.set_child_visible, "cmd_box", <.show_cmd]
+            # Die Reiter (doc/spec/106 §106.6a): gemerkt, nicht ausgefuehrt —
+            # den Bereich wechselt der Wirt, wie bei jedem anderen Wunsch.
+            - if: { condition: { eq: [{ call: [<.scene.child_clicked, "tab_srcx"] }, 1] }, then: [{ set: [<.want_src, 1] }] }
+            - if: { condition: { eq: [{ call: [<.scene.child_clicked, "tab_prmx"] }, 1] }, then: [{ set: [<.want_prm, 1] }] }
+            - if: { condition: { eq: [{ call: [<.scene.child_clicked, "back_btnx"] }, 1] }, then: [{ set: [<.want_back, 1] }] }
+            - if: { condition: { eq: [{ call: [<.scene.child_clicked, "start_btn"] }, 1] }, then: [{ set: [<.want_start, 1] }] }

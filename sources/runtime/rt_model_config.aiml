@@ -1,0 +1,32 @@
+# Die Konfiguration als Ganzes, und das Urteil über ein Bundle.
+# Ein `ok` allein wäre zu wenig: wer ein Bundle ablehnt, muss sagen WO —
+# sonst sucht der Mensch in 800 Zeilen JSON.
+
+- import: "sources/runtime/rt_model_process.aiml"
+- import: "sources/runtime/rt_model_linux.aiml"
+
+- model:
+    name: RtConfig
+    fields:
+      - [ociVersion, string]
+      - [hostname,   string]
+      - [process,    RtProcess]
+      - [root,       RtRoot]
+      - [mounts,     list<RtMount>]
+      - [linux,      RtLinux]
+
+# Das Urteil über ein Bundle.  Ein `ok` allein wäre zu wenig: wer ein Bundle
+# ablehnt, muss sagen WO — sonst sucht der Mensch in 800 Zeilen JSON.
+- model:
+    name: RtVerdict
+    fields:
+      - [holds,  i32]      # 1 = brauchbar
+      - [field,  string]   # was fehlt/stört ("" = nichts)
+      - [detail, string]
+
+- model:
+    name: RtVerdict
+    fields:
+      - [holds,  i32]      # 1 = brauchbar
+      - [field,  string]   # was fehlt/stört ("" = nichts)
+      - [detail, string]

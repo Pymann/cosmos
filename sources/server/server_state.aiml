@@ -1,0 +1,321 @@
+# Cosmos control-plane: die Dienste des Servers als EINE Classgroup (spec/58).
+#
+# Vorher hingen hier zehn `g_*`-Globals, die 13 Dateien direkt angefasst haben.
+# spec/58 §11.3 nennt das die „`g_*` bridge" und beschreibt ihre Ablösung: die
+# Gruppen-Typen sind in jeder importierenden Datei sichtbar, die Methodenkörper
+# werden EINMAL hier emittiert, alle anderen Dateien forward-deklarieren.  Damit
+# bleibt genau ein Global übrig — `g_runtime` — und jeder neue Dienst (CAS,
+# ActionCache, Step-Runner) wird eine Instanz statt eines weiteren Globals.
+#
+# Konstruktion in zwei Phasen (§3): Phase 0 führt je Instanz den `constructor`
+# aus (sees-blind, daher ordnungsfrei), Phase 1 verdrahtet die `sees`-Kanten,
+# Phase 2 ruft `on_wired` — dort steht Init, die einen Kollaborateur braucht
+# (CasTrees braucht den CasStore).
+#
+# `g_current_peer_id` bleibt bewusst ein Global (in conn_registry.aiml): das ist
+# Zustand der LAUFENDEN Anfrage, den der Dispatcher vor jedem Handler setzt —
+# kein Dienst, also keine Instanz.
+
+- import: "sources/auth/auth_service.aiml"
+- import: "sources/server/conn_registry.aiml"        # ConnRegistry + g_current_peer_id
+- import: "sources/server/cluster_bootstrap.aiml"    # ClusterBootstrap (cluster KVs + snapshot)
+- import: "sources/server/agent_registry.aiml"       # AgentRegistry (AP1: verbundene Agenten)
+- import: "sources/server/run_store.aiml"            # RunStore (AP1: Ausgabe-Ablage, §AP1.5a)
+- import: "sources/server/agent_token_store.aiml"    # AgentTokenStore (AP1.9: Enrollment-Tokens)
+- import: "sources/server/peer_subscribers.aiml"     # Live-Push-Abonnenten (je Instanz eine Menge)
+- import: "sources/server/run_router.aiml"           # run_ref → Anfrager-peer_id
+- import: "sources/server/cas_trees.aiml"            # CasTrees (+ CasStore, doc/spec/92)
+- import: "sources/server/push_worker.aiml"          # PushWorker (aiml spec/62 §18: push:)
+- import: "sources/server/action_cache.aiml"         # ActionCache (doc/spec/92 §92.2)
+- import: "sources/server/agent_provisioner.aiml"    # Einrichtung über SSH (doc/spec/94)
+- import: "sources/server/provision_worker.aiml"     # … und zwar NEBENHER (eigener Faden)
+- import: "sources/server/rpc_handler_base.aiml"     # gemeinsame Basis der Handler-Instanzen
+- import: "sources/server/live_push.aiml"            # Live-Push an Abonnenten (Stufe 3)
+- import: "sources/server/peer_reaper.aiml"          # Aufräumen bei Verbindungsverlust (Stufe 3)
+# Die `groupmethods:`-Dateien MÜSSEN hier hereinkommen: der Compiler faltet sie
+# vor der Validierung in die Gruppe (§1.1), und validiert wird beim Übersetzen
+# DIESER Datei.  Importierte sie umgekehrt server_state, fehlte `run` noch und
+# das instance-level `implements:` schlüge fehl.  Darum importieren jene Dateien
+# ihrerseits NICHTS aus dem Server — ihre Token-Auflösung ist `<.auth`.
+- import: "sources/server/run_read_handlers.aiml"
+- import: "sources/server/auth_handlers.aiml"
+- import: "sources/server/auth_logout_handler.aiml"
+- import: "sources/server/auth_profile_handlers.aiml"
+- import: "sources/server/level_handlers.aiml"
+- import: "sources/server/console_runner.aiml"
+- import: "sources/server/console_handlers.aiml"
+- import: "sources/server/cluster_read_handlers.aiml"
+- import: "sources/server/agent_reg_handlers.aiml"
+- import: "sources/server/run_exec_handlers.aiml"
+- import: "sources/server/agent_token_handlers.aiml"
+- import: "sources/server/provision_handlers.aiml"
+- import: "sources/server/step_dispatch_handlers.aiml"
+- import: "sources/server/job_handlers.aiml"
+- import: "sources/server/pipeline_submit.aiml"
+- import: "sources/server/pipeline_handlers.aiml"
+- import: "sources/server/run_control_handlers.aiml"
+
+- classgroup:
+    name: CosmosRuntime
+    # Wurzeln als Parameter, nicht als Literale im constructor: so sind sie von
+    # aussen konfigurierbar (Tests/Betrieb setzen eigene Pfade), statt im
+    # Gruppen-Aufbau festzustehen.  (String-Literale funktionieren seit dem Fix
+    # in spec/58 §4 ebenfalls — hier ist der Parameter nur die bessere Wahl.)
+    params: [[db_dir, path], [runs_root, string], [cas_root, string], [oci_bin, string]]
+    instances:
+      - class: AuthService
+        instance: auth
+        constructor: [init, db_dir]
+        sees: [conn]
+        methods:
+          # Was bisher die freie Funktion `resolve_token_pid` tat: Token prüfen,
+          # die Verbindung als lebend stempeln und die opake player_id liefern
+          # ("" = ungültig).  Als Gruppen-Methode, weil sie Basis-Zustand UND
+          # den Kollaborateur `conn` braucht — eine Basis-Methode kann das nicht.
+          - def:
+              name: pid_for_token
+              args: [[token, string]]
+              return: { type: string, lifetime: producer }
+              body:
+                - decl: [req, TokenReq]
+                - set: [req.token, token]
+                - decl: [res, AuthResult, { call: [<.handle_validate, req] }]
+                - if:
+                    condition: { eq: [res.success, 1] }
+                    then:
+                      - call: [<.conn.touch, g_current_peer_id, res.player_id, { call: [time.now] }]
+                      - return: res.player_id
+                - return: ""
+
+          # Dasselbe, liefert aber die email statt der player_id.  Nur die
+          # Profil-Handler brauchen sie (das Nutzer-KV ist email-keyed); alles
+          # andere nimmt pid_for_token, damit die email den Auth-Layer nicht
+          # verlässt.
+          - def:
+              name: email_for_token
+              args: [[token, string]]
+              return: { type: string, lifetime: producer }
+              body:
+                - decl: [req, TokenReq]
+                - set: [req.token, token]
+                - decl: [res, AuthResult, { call: [<.handle_validate, req] }]
+                - if:
+                    condition: { eq: [res.success, 1] }
+                    then:
+                      - call: [<.conn.touch, g_current_peer_id, res.player_id, { call: [time.now] }]
+                      - return: res.email
+                - return: ""
+
+      - class: ConnRegistry
+        instance: conn
+        constructor: [init]
+
+      - class: AgentRegistry
+        instance: agents
+
+      - class: ClusterBootstrap
+        instance: cluster
+        constructor: [init]
+        # doc/spec/104 F104-1: EIN Schnappschuss (Anwesenheit) und
+        # doc/spec/106 G2: faellige Jobs ausfalten (submitter).
+        sees: [agents, submitter]
+
+      - class: RunStore
+        instance: runs
+        constructor: [init, runs_root]
+
+      # Das Ergebnis einer Stufe als OCI-Abbild ablegen (aiml spec/62 §18).
+      # Der Wandler ist ein eigenes Programm; sein Pfad gehoert dem Wirt.
+      - class: PushWorker
+        instance: pusher
+        constructor: [init, oci_bin]
+
+      - class: AgentTokenStore
+        instance: tokens
+        constructor: [init, db_dir]
+
+      # Inhaltsadressierter Store (doc/spec/92).  Neu als Instanz — unter dem
+      # alten Muster wären hier zwei weitere Globals entstanden.
+      - class: CasStore
+        instance: cas
+        constructor: [init, cas_root]
+
+      - class: CasTrees
+        instance: cas_trees
+        sees: [cas]
+        methods:
+          # Phase 2: erst hier ist die sees-Kante verdrahtet (§3), und CasTrees
+          # braucht den Store — ein phase-0-constructor könnte ihn nicht sehen.
+          - def:
+              name: on_wired
+              body:
+                - call: [<.init, <.cas]
+
+      # ActionCache: step_key → ActionResult (doc/spec/92).  Ein Treffer ersetzt
+      # die Ausfuehrung eines Schritts.
+      - class: ActionCache
+        instance: actions
+        constructor: [init, db_dir]
+
+      # Zwei Instanzen derselben Klasse: gleicher Code, getrennter Zustand.
+      - class: PeerSubscribers
+        instance: cluster_subs
+
+      - class: PeerSubscribers
+        instance: agent_subs
+
+      # Einrichtung eines Knotens über SSH (doc/spec/94).  Zustandslos; die
+      # Knoten-Vorgaben kommen je Aufruf aus der Umgebung (§94.5a).
+      # doc/spec/108: die Skript-Konsole.  Startet je Skript einen EIGENEN Prozess
+      # (F108-5) — der Server ist AOT und hat keinen Uebersetzer; ein abstuerzender
+      # Faden naehme alle Nutzer mit.  `init` prueft beim Start, ob Bibliothek,
+      # Tabelle und Praeambel da sind, statt beim ersten Skript abzustuerzen.
+      - class: ConsoleRunner
+        instance: console
+        constructor: [init]
+
+      - class: AgentProvisioner
+        instance: provisioner
+
+      # Der laufende Einrichtungs-Auftrag.  Er gehoert in die Gruppe, weil zwei
+      # Handler ihn sehen muessen: der eine startet ihn, der andere berichtet
+      # seinen Stand.  Die Schritte laufen in einem eigenen FADEN — bis
+      # 2026-10-15 liefen sie in der Server-Schleife und legten neun Sekunden
+      # lang die ganze Steuerebene still.
+      - class: ProvisionWorker
+        instance: prov_job
+        # Die Sperre MUSS stehen, sobald die Instanz existiert: der erste
+        # Zugriff war eine Abfrage („laeuft schon einer?") und traf auf eine
+        # nicht initialisierte Mutex — der Server stuerzte ab
+        # (pthread_mutex_lock, gemessen 2026-10-15).
+        constructor: [init]
+
+      - class: RunRouter
+        instance: router
+
+      # Stufe 3: was vorher im Daemon stand.  Beide halten eigenen Zustand
+      # (Push-Signaturen bzw. Verlust-Zähler), der vorher als Daemon-Member
+      # neben der Logik lag.
+      - class: LivePush
+        instance: push
+        sees: [cluster, agents, cluster_subs, agent_subs]
+
+      - class: PeerReaper
+        instance: reaper
+        sees: [conn, agents, runs, cluster_subs, agent_subs]
+
+      # ── RPC-Handler als Instanzen (Stufe 2) ───────────────────────────────
+      # Ihr `run` lebt als Gruppen-Methode in der jeweiligen Handler-Datei
+      # (`groupmethods:`, §1.1) — nur dort sind die sees-Kanten sichtbar.
+      # `implements:` auf der INSTANZ (M3): die synthetisierte Unterklasse trägt
+      # die vtable, also nimmt der Dispatcher sie als ref<mirror.RpcHandler>.
+      - class: RpcHandlerBase
+        instance: read_run_output
+        sees: [runs, auth]
+        implements: [mirror.RpcHandler]
+
+      - class: RpcHandlerBase
+        instance: get_run_info
+        sees: [runs, auth]
+        implements: [mirror.RpcHandler]
+
+      # Die `sees`-Liste ist hier die Zugriffsliste des Handlers: er kann
+      # genau diese Dienste erreichen und keinen weiteren.  Vorher lag jedem
+      # Handler über `g_runtime` der ganze Server offen.
+      - { class: RpcHandlerBase, instance: submit_login,       sees: [auth], implements: [mirror.RpcHandler] }
+      - { class: RpcHandlerBase, instance: submit_register,    sees: [auth], implements: [mirror.RpcHandler] }
+      - { class: RpcHandlerBase, instance: validate_token,     sees: [auth], implements: [mirror.RpcHandler] }
+      - { class: RpcHandlerBase, instance: logout,             sees: [auth], implements: [mirror.RpcHandler] }
+      - { class: RpcHandlerBase, instance: set_nickname,       sees: [auth], implements: [mirror.RpcHandler] }
+      - { class: RpcHandlerBase, instance: change_password,    sees: [auth], implements: [mirror.RpcHandler] }
+      - { class: RpcHandlerBase, instance: change_email,       sees: [auth], implements: [mirror.RpcHandler] }
+
+      # doc/spec/108 §2: Rechtevergabe.  `sees: [auth]` reicht — Freigaben leben im
+      # AuthService, und ein Handler, der mehr sieht als er braucht, ist der Anfang
+      # der naechsten Luecke (F93-4).
+      - { class: RpcHandlerBase, instance: my_clearance,      sees: [auth], implements: [mirror.RpcHandler] }
+      - { class: RpcHandlerBase, instance: list_users,        sees: [auth], implements: [mirror.RpcHandler] }
+      - { class: RpcHandlerBase, instance: set_user_level,    sees: [auth], implements: [mirror.RpcHandler] }
+      # doc/spec/108: `sees: [auth, console]` — Identitaet und Freigabe aus dem
+      # AuthService, der Lauf aus dem ConsoleRunner.  Nichts weiter: ein Handler, der
+      # fremden Quelltext ausfuehrt, soll so wenig wie moeglich erreichen koennen.
+      - { class: RpcHandlerBase, instance: console_exec,      sees: [auth, console], implements: [mirror.RpcHandler] }
+
+      - { class: RpcHandlerBase, instance: get_cluster,        sees: [auth, cluster], implements: [mirror.RpcHandler] }
+      - { class: RpcHandlerBase, instance: subscribe_cluster,  sees: [auth, cluster, cluster_subs], implements: [mirror.RpcHandler] }
+
+      # Agent-Registrierung prüft den Enrollment-Token selbst (§AP1.9) und
+      # braucht daher `tokens`, aber NICHT `auth` — das sind getrennte
+      # Vertrauensketten (Agent-Token vs. Nutzer-Session).
+      - { class: RpcHandlerBase, instance: agent_register,     sees: [agents, tokens], implements: [mirror.RpcHandler] }
+      - { class: RpcHandlerBase, instance: agent_heartbeat,    sees: [agents], implements: [mirror.RpcHandler] }
+      - { class: RpcHandlerBase, instance: subscribe_agents,   sees: [auth, agents, agent_subs], implements: [mirror.RpcHandler] }
+
+      # `command_output`/`command_result` kommen VOM Agenten, nicht vom Nutzer:
+      # kein `auth`, dafür `router`, um die Ausgabe an genau den anfragenden
+      # Peer zu schicken (§AP1.6: kein Broadcast).
+      - { class: RpcHandlerBase, instance: run_on_agent,       sees: [auth, agents, runs, router], implements: [mirror.RpcHandler] }
+      - { class: RpcHandlerBase, instance: command_output,     sees: [agents, runs, router], implements: [mirror.RpcHandler] }
+      - { class: RpcHandlerBase, instance: command_result,     sees: [agents, runs, router], implements: [mirror.RpcHandler] }
+
+      - { class: RpcHandlerBase, instance: create_agent_token, sees: [auth, tokens], implements: [mirror.RpcHandler] }
+      - { class: RpcHandlerBase, instance: list_agent_tokens,  sees: [auth, tokens], implements: [mirror.RpcHandler] }
+      - { class: RpcHandlerBase, instance: revoke_agent_token, sees: [auth, tokens], implements: [mirror.RpcHandler] }
+
+      # provision_agent erzeugt selbst ein Enrollment-Token und fährt die
+      # SSH-Einrichtung — daher auth (Autorisierung), tokens und provisioner.
+      - { class: RpcHandlerBase, instance: provision_agent, sees: [auth, tokens, provisioner, prov_job], implements: [mirror.RpcHandler] }
+      # provision_status: fragt nur den Stand des laufenden Auftrags ab.
+      - { class: RpcHandlerBase, instance: provision_status, sees: [auth, prov_job], implements: [mirror.RpcHandler] }
+      # doc/spec/103 §103.2: die Ausfuehrungskette.  Zugriffsliste minimal
+      # (F93-4): der Lauf-Zustand und die Registry, sonst nichts.
+      # doc/spec/106: Jobs anlegen und starten.
+      - { class: RpcHandlerBase, instance: save_job, sees: [cluster, auth, submitter], implements: [mirror.RpcHandler] }
+      - { class: RpcHandlerBase, instance: run_job,  sees: [cluster, auth, submitter], implements: [mirror.RpcHandler] }
+      # doc/spec/106 §106.6: die Parameter eines Jobs setzen.
+      - { class: RpcHandlerBase, instance: set_job_params, sees: [cluster, auth, submitter], implements: [mirror.RpcHandler] }
+      - { class: RpcHandlerBase, instance: claim_step,   sees: [cluster, agents, runs], implements: [mirror.RpcHandler] }
+      - { class: RpcHandlerBase, instance: report_step,  sees: [cluster, agents, runs], implements: [mirror.RpcHandler] }
+      - { class: RpcHandlerBase, instance: renew_lease,  sees: [cluster, agents], implements: [mirror.RpcHandler] }
+      - { class: RpcHandlerBase, instance: release_step, sees: [cluster, agents], implements: [mirror.RpcHandler] }
+      # aiml spec/62 §5.9: anhalten, weiterlaufen, einen Schritt.  Zugriff
+      # minimal (F93-4): der Lauf-Zustand und die Anmeldung, sonst nichts.
+      - { class: RpcHandlerBase, instance: pause_run,  sees: [cluster, auth], implements: [mirror.RpcHandler] }
+      - { class: RpcHandlerBase, instance: resume_run, sees: [cluster, auth], implements: [mirror.RpcHandler] }
+      - { class: RpcHandlerBase, instance: step_run,   sees: [cluster, auth], implements: [mirror.RpcHandler] }
+      # doc/spec/107 §107.1d: Flaggen an den Rand, und „ab hier nochmal".
+      - { class: RpcHandlerBase, instance: set_break,   sees: [cluster, auth], implements: [mirror.RpcHandler] }
+      - { class: RpcHandlerBase, instance: clear_break, sees: [cluster, auth], implements: [mirror.RpcHandler] }
+      - { class: RpcHandlerBase, instance: rewind_run,  sees: [cluster, auth], implements: [mirror.RpcHandler] }
+      - { class: RpcHandlerBase, instance: deprovision_agent, sees: [auth, tokens, provisioner], implements: [mirror.RpcHandler] }
+
+      # doc/spec/96 §96.13: eingereichte Pipelines pruefen und ausfalten.  Der
+      # Pruefer ist eine eigene Instanz, damit er ohne RPC testbar bleibt.
+      - class: PipelineSubmit
+        instance: submitter
+      - { class: RpcHandlerBase, instance: run_pipeline, sees: [auth, cluster, submitter], implements: [mirror.RpcHandler] }
+
+# Der einzige verbleibende Dienst-Global (§11.3 „runtime-root").  Die RPC-Handler
+# sind freie Funktionen (mirror ruft sie, nicht wir) — ohne Anker auf Modulebene
+# gaebe es keinen Weg zum Zustand.  `singleton: true` erklaert das und nimmt
+# dafuer die Pruefung F21-S2 in Kauf: dieser Zeiger geht an keinen
+# `ptr<T>`-Parameter (aiml spec/21 §6.2).
+- decl: [g_runtime, ptr<CosmosRuntime>, null, { singleton: true }]
+
+- def:
+    name: init_server_state
+    args: [[db_dir, path]]
+    body:
+      - set: [g_runtime, { new: CosmosRuntime, db_dir: db_dir, runs_root: "run_logs", cas_root: "cas", oci_bin: "./cosmos-oci" }]
+      # Demo-Cluster einmal setzen, damit die Browser-Ansicht Daten hat
+      # (idempotent — überschreibt).  Bewusst NICHT im constructor: das ist
+      # Inhalt, nicht Aufbau.
+      - call: [g_runtime.cluster.run]
+      - decl: [tok_num, i32, { call: [g_runtime.tokens.count] }]
+      - if:
+          condition: { eq: [tok_num, 0] }
+          then:
+            - call: [log.warn, "[server_state] kein Agent-Token vorhanden — im Web-UI erzeugen (§AP1.9), bis dahin wird jede Agent-Registrierung abgelehnt"]
+          else:
+            - call: [log.info, "[server_state] ${tok_num} agent enrollment token(s)"]
+      - call: [log.info, "[server_state] runtime bereit (auth, cluster, agents, runs, tokens, cas, actions) db=${db_dir}"]

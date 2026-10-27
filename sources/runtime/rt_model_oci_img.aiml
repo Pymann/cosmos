@@ -1,0 +1,22 @@
+# Manifest, Index, Layout — die drei Dateien, die ein Image zusammenhalten.
+- import: "sources/runtime/rt_model_oci.aiml"
+
+- model:
+    name: OciManifest
+    fields:
+      - [schemaVersion, i32, 2]
+      - [mediaType,     string, "application/vnd.oci.image.manifest.v1+json"]
+      - [config,        OciDesc]
+      - [layers,        list<OciDesc>]
+
+- model:
+    name: OciIndex
+    fields:
+      - [schemaVersion, i32, 2]
+      - [mediaType,     string, "application/vnd.oci.image.index.v1+json"]
+      - [manifests,     list<OciRef>]
+
+- model:
+    name: OciLayout
+    fields:
+      - [imageLayoutVersion, string, "1.0.0"]

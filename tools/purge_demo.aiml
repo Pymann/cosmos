@@ -1,0 +1,81 @@
+# Aufräum-Werkzeug: entfernt GENAU die Beispiel-Daten aus dem Speicher.
+#
+# Anlass (User 2026-10-15): unter „Läuft gerade" standen erfundene Schritte auf
+# `builder-1/2/3` und `arm-box`.  Sie stammten aus `seed_demo_cluster` — das
+# schrieb in DENSELBEN Speicher wie der Betrieb.  Das Saatgut ist inzwischen
+# abgeschaltet (COSMOS_SEED_DEMO=1), die Reste muessen aber noch raus.
+#
+# Loescht NUR diese bekannten Schluessel — keine Pauschal-Loeschung, damit
+# echte Knoten, Jobs und Laeufe unberuehrt bleiben.  Der Server muss dabei
+# STEHEN (ein zweiter Schreiber auf demselben WAL ist keine gute Idee).
+#
+# Expected exit code: 0
+
+- import: "sources/server/demo_purge.aiml"
+- import: "sources/shared/demo_pipeline.aiml"
+
+- def:
+    name: main
+    return: i32
+    body:
+      - decl: [purge, ptr<DemoPurge>, { new: DemoPurge }]
+      - call: [purge.open_all]
+      - decl: [gone, i32, 0]
+      - set: [gone, { +: [gone, { call: [purge.drop_node, "node-control-1"] }] }]
+      - set: [gone, { +: [gone, { call: [purge.drop_node, "node-build-1"] }] }]
+      - set: [gone, { +: [gone, { call: [purge.drop_node, "node-general-1"] }] }]
+      - set: [gone, { +: [gone, { call: [purge.drop_workload, "workload-api"] }] }]
+      - set: [gone, { +: [gone, { call: [purge.drop_workload, "workload-build"] }] }]
+      - set: [gone, { +: [gone, { call: [purge.drop_run, "pipeline-api-main"] }] }]
+      - call: [log.info, "Beispiel-Daten entfernt: ${gone} Eintraege"]
+      # COSMOS_PURGE_PREFIX=<pre> entfernt gezielt Jobs und Laeufe mit diesem
+      # Praefix — fuer Reste von Logik-Tests, die versehentlich gegen den
+      # Betriebsspeicher liefen.
+      - decl: [env0, map<string:string>, { call: [sys.env] }]
+      - if:
+          condition: { gt: [{ call: [env0.contains, "COSMOS_PURGE_PREFIX"] }, 0] }
+          then:
+            - decl: [pre, string, { call: [env0.get, "COSMOS_PURGE_PREFIX"] }]
+            - decl: [pgone, i32, { call: [purge.drop_prefix, pre] }]
+            - call: [log.info, "Praefix '${pre}': ${pgone} Eintraege entfernt"]
+      # COSMOS_REFRESH_SOURCES=1 bringt Beispiel-Quellen in alter Syntax auf
+      # die heutige Form (doc/spec/106 §106.3a).  Eigene Pipelines bleiben
+      # unberuehrt und werden nur benannt.
+      - if:
+          condition: { gt: [{ call: [env0.contains, "COSMOS_REFRESH_SOURCES"] }, 0] }
+          then:
+            - decl: [demo, ptr<DemoPipeline>, { new: DemoPipeline }]
+            - decl: [fixed_n, i32, { call: [purge.refresh_sources, { call: [demo.source] }] }]
+            - call: [log.info, "Quellen auf heutige Form gebracht: ${fixed_n}"]
+      # COSMOS_DROP_UNREADABLE=1 entfernt Laeufe, die sich nach einer
+      # Modellaenderung nicht mehr entschluesseln lassen (doc/spec/102 F102-8).
+      - if:
+          condition: { gt: [{ call: [env0.contains, "COSMOS_DROP_UNREADABLE"] }, 0] }
+          then:
+            - decl: [ugone, i32, { call: [purge.drop_unreadable] }]
+            - call: [log.info, "Unlesbare Laeufe entfernt: ${ugone}"]
+      # COSMOS_CLEAR_REG_THROTTLE=1 setzt die Register-Bremse zurueck.  Auf
+      # dem Entwicklungsrechner loesen die eigenen Proben sie aus (ab der 7.
+      # Registrierung eine Stunde, und der Zaehler sinkt nie) — im Betrieb ist
+      # sie ein Schutz, darum ein ausdruecklicher Schalter und kein Automatismus.
+      - if:
+          condition: { gt: [{ call: [env0.contains, "COSMOS_CLEAR_REG_THROTTLE"] }, 0] }
+          then:
+            - decl: [tgone, i32, { call: [purge.clear_reg_throttle] }]
+            - call: [log.info, "Register-Bremse zurueckgesetzt: ${tgone} Eintrag/Eintraege"]
+
+      # COSMOS_WIPE_RUNS=1 leert zusaetzlich ALLE Laeufe und Jobs.  Nur auf
+      # ausdrueckliche Anforderung: das ist die Arbeitsgeschichte des Nutzers.
+      - decl: [envm, map<string:string>, { call: [sys.env] }]
+      - decl: [want_wipe, i32, 0]
+      - if:
+          condition: { gt: [{ call: [envm.contains, "COSMOS_WIPE_RUNS"] }, 0] }
+          then:
+            - decl: [wipe_txt, string, { call: [envm.get, "COSMOS_WIPE_RUNS"] }]
+            - set: [want_wipe, { call: [wipe_txt.parse_i32] }]
+      - if:
+          condition: { eq: [want_wipe, 1] }
+          then:
+            - decl: [wiped, i32, { call: [purge.wipe_runs_and_jobs] }]
+            - call: [log.info, "Laeufe und Jobs geleert: ${wiped} Eintraege"]
+      - return: 0

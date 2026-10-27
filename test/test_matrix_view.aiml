@@ -1,0 +1,153 @@
+# Abnahme §97.7: das Lane-Gitter in 2D, berechnet aus dem Lauf-Datensatz.
+#
+# Geprueft wird die ABBILDUNG, nicht das Zeichnen — darum ohne Display:
+#   * zwei Achsen -> Spalten und Zeilen (F97-12)
+#   * jede weitere Achse -> Kacheln, nie Farbe oder Groesse (F97-12)
+#   * eine Achse -> EINE Zeile, keine Achse -> EINE Zelle (F97-15)
+#   * eine von exclude entfernte Lane ist eine LUECKE, keine neutrale Zelle
+#     (F97-16) — sonst sieht eine bewusste Auslassung aus wie ein haengender
+#     Schritt
+#   * Stufen sind Schichten, keine zusaetzlichen Spalten (F97-13)
+# Expected exit code: 0
+
+- import: "sources/server/pipeline_submit.aiml"
+- import: "sources/shared/matrix_view.aiml"
+
+- def:
+    name: expect
+    args: [[what, string], [cond, i32]]
+    return: i32
+    body:
+      - if:
+          condition: { eq: [cond, 1] }
+          then: [{ print: ["  ok   ${what}"] }, { return: 0 }]
+      - print: ["  FAIL ${what}"]
+      - return: 1
+
+# Zwei Achsen, ein exclude, eine Stufe.
+- def:
+    name: src_two_axes
+    return: { type: string, lifetime: producer }
+    body:
+      - return: "- pipeline:\n    name: grid_demo\n    params:\n      - [arch, string, [x86_64, arm64]]\n      - [mode, string, [debug, release]]\n    exclude:\n      - { arch: arm64, mode: release }\n    steps:\n      - stage:\n          name: compile\n          steps:\n            - step: { name: build, cache: pure, args: [arch, mode], return: i32, body: [{ return: 0 }] }\n"
+
+# Drei Achsen: die dritte wird zur Kachel.
+- def:
+    name: src_three_axes
+    return: { type: string, lifetime: producer }
+    body:
+      - return: "- pipeline:\n    name: grid3\n    params:\n      - [arch, string, [x86_64, arm64]]\n      - [mode, string, [debug, release]]\n      - [compiler, string, [gcc, clang]]\n    steps:\n      - stage:\n          name: compile\n          steps:\n            - step: { name: build, cache: pure, args: [arch], return: i32, body: [{ return: 0 }] }\n"
+
+# Eine Achse.
+- def:
+    name: src_one_axis
+    return: { type: string, lifetime: producer }
+    body:
+      - return: "- pipeline:\n    name: grid1\n    params:\n      - [arch, string, [x86_64, arm64, riscv64]]\n    steps:\n      - stage:\n          name: compile\n          steps:\n            - step: { name: build, cache: pure, args: [arch], return: i32, body: [{ return: 0 }] }\n"
+
+# Keine Achse: eine Pipeline, die nur einmal laeuft.
+- def:
+    name: src_no_axis
+    return: { type: string, lifetime: producer }
+    body:
+      - return: "- pipeline:\n    name: grid0\n    steps:\n      - stage:\n          name: once\n          steps:\n            - step: { name: shared, per: once, cache: pure, return: i32, body: [{ return: 0 }] }\n"
+
+# Zwei Stufen ueber demselben Gitter.
+- def:
+    name: src_two_stages
+    return: { type: string, lifetime: producer }
+    body:
+      - return: "- pipeline:\n    name: grid_stages\n    params:\n      - [arch, string, [x86_64, arm64]]\n    steps:\n      - stage:\n          name: compile\n          steps:\n            - step: { name: build, cache: pure, args: [arch], return: i32, body: [{ return: 0 }] }\n      - stage:\n          name: test\n          steps:\n            - step: { name: check, cache: pure, args: [arch], return: i32, body: [{ return: 0 }] }\n"
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      - decl: [submit, ptr<PipelineSubmit>, { new: PipelineSubmit }]
+      - decl: [view, ptr<MatrixView>, { new: MatrixView }]
+
+      # ── zwei Achsen: Spalten x Zeilen, exclude als Luecke ───────────────
+      - decl: [run2, PipelineRun, { call: [submit.expand, { call: [src_two_axes] }, "run-grid2", ""] }]
+      - set: [fails, { +: [fails, { call: [expect, "Lauf traegt seine Achsen", { eq: [run2.axes.len, 2] }] }] }]
+      - decl: [grid2, MatrixGrid, { call: [view.build, run2, 0] }]
+      - set: [fails, { +: [fails, { call: [expect, "zwei Spalten (erste Achse)", { eq: [grid2.cols, 2] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "zwei Zeilen (zweite Achse)", { eq: [grid2.rows, 2] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "eine Kachel (keine dritte Achse)", { eq: [grid2.tiles, 1] }] }] }]
+      # 2x2 = vier Plaetze, aber nur drei Zellen: exclude laesst eine LUECKE.
+      - set: [fails, { +: [fails, { call: [expect, "drei Zellen fuer vier Plaetze", { eq: [grid2.cells.len, 3] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "die ausgeschlossene Lane ist eine Luecke", { eq: [{ call: [view.cell_at, grid2, 1, 1, 0] }, -1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und die anderen Plaetze sind belegt", { gt: [{ call: [view.cell_at, grid2, 0, 0, 0] }, -1] }] }] }]
+      - decl: [cell0, MatrixCell, { at: [grid2.cells, { call: [view.cell_at, grid2, 0, 0, 0] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Zelle kennt ihre Bindungen", { gt: [cell0.bindings.len, 10] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Zelle traegt den Status", { eq: [cell0.status, "pending"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Achsenbeschriftung der Spalten", { eq: [grid2.col_axis, "arch"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Achsenbeschriftung der Zeilen", { eq: [grid2.row_axis, "mode"] }] }] }]
+
+      # ── drei Achsen: die dritte wird zur Kachel, nicht zur Farbe ────────
+      - decl: [run3, PipelineRun, { call: [submit.expand, { call: [src_three_axes] }, "run-grid3", ""] }]
+      - decl: [grid3, MatrixGrid, { call: [view.build, run3, 0] }]
+      - set: [fails, { +: [fails, { call: [expect, "drei Achsen: zwei Kacheln", { eq: [grid3.tiles, 2] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Gitter bleibt 2x2", { '&&': [{ eq: [grid3.cols, 2] }, { eq: [grid3.rows, 2] }] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "acht Zellen ueber zwei Kacheln", { eq: [grid3.cells.len, 8] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Kachel ist benannt", { gt: [grid3.tile_axis.len, 0] }] }] }]
+
+      # ── eine Achse: EINE Zeile (F97-15) ────────────────────────────────
+      - decl: [run1, PipelineRun, { call: [submit.expand, { call: [src_one_axis] }, "run-grid1", ""] }]
+      - decl: [grid1, MatrixGrid, { call: [view.build, run1, 0] }]
+      - set: [fails, { +: [fails, { call: [expect, "eine Achse: drei Spalten", { eq: [grid1.cols, 3] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "eine Achse: eine Zeile", { eq: [grid1.rows, 1] }] }] }]
+
+      # ── keine Achse: EINE Zelle, nicht ein leeres Gitter (F97-15) ──────
+      - decl: [run0, PipelineRun, { call: [submit.expand, { call: [src_no_axis] }, "run-grid0", ""] }]
+      - decl: [grid0, MatrixGrid, { call: [view.build, run0, 0] }]
+      - set: [fails, { +: [fails, { call: [expect, "keine Achse: eine Spalte", { eq: [grid0.cols, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "keine Achse: eine Zeile", { eq: [grid0.rows, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "keine Achse: genau eine Zelle", { eq: [grid0.cells.len, 1] }] }] }]
+
+      # ── Stufen sind Schichten, keine Spalten (F97-13) ───────────────────
+      - decl: [runs, PipelineRun, { call: [submit.expand, { call: [src_two_stages] }, "run-grids", ""] }]
+      - decl: [layer0, MatrixGrid, { call: [view.build, runs, 0] }]
+      - decl: [layer1, MatrixGrid, { call: [view.build, runs, 1] }]
+      - set: [fails, { +: [fails, { call: [expect, "zwei Stufen melden zwei Schichten", { eq: [layer0.stage_count, 2] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Schicht 0 heisst compile", { eq: [layer0.stage_name, "compile"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Schicht 1 heisst test", { eq: [layer1.stage_name, "test"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "beide Schichten haben dasselbe Gitter", { eq: [layer0.cols, layer1.cols] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und je Schicht nur ihre Zellen", { eq: [layer0.cells.len, 2] }] }] }]
+
+      # ── rendern: Text und Farben entstehen in EINEM Durchlauf ──────────
+      - decl: [color_runs, list<i32>]
+      - decl: [table, string, { call: [view.render, grid2, color_runs] }]
+      - print: ["--- gerendert ---"]
+      - print: [table]
+      - print: ["--- Ende ---"]
+      - set: [fails, { +: [fails, { call: [expect, "Tabelle nennt die Stufe", { gt: [{ call: [table.index_of, "compile"] }, -1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Tabelle nennt die Achsen", { gt: [{ call: [table.index_of, "arch"] }, -1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Tabelle zeigt die Luecke als --", { gt: [{ call: [table.index_of, "--"] }, -1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Tabelle nennt den Status im Text (F97-17)", { gt: [{ call: [table.index_of, "pending"] }, -1] }] }] }]
+      # Drei Zellen -> drei Farb-Tripel; die Luecke bekommt KEINE Farbe.
+      - set: [fails, { +: [fails, { call: [expect, "ein Farb-Tripel je Zelle, keins fuer die Luecke", { eq: [color_runs.len, 9] }] }] }]
+      # Jeder Lauf muss im Text liegen (sonst faerbt er ins Leere).
+      - decl: [first_start, i32, { at: [color_runs, 0] }]
+      - decl: [first_len, i32, { at: [color_runs, 1] }]
+      - set: [fails, { +: [fails, { call: [expect, "Farblauf liegt im Text", { le: [{ +: [first_start, first_len] }, table.len] }] }] }]
+
+      # ── alle Schichten untereinander, Farben richtig verschoben ────────
+      - decl: [all_runs, list<i32>]
+      - decl: [all_txt, string, { call: [view.render_run, runs, all_runs] }]
+      - set: [fails, { +: [fails, { call: [expect, "beide Stufen stehen im Text", { '&&': [{ gt: [{ call: [all_txt.index_of, "compile"] }, -1] }, { gt: [{ call: [all_txt.index_of, "test"] }, -1] }] }] }] }]
+      # 2 Stufen x 2 Lanes = 4 Zellen -> 12 Zahlen
+      - set: [fails, { +: [fails, { call: [expect, "vier Farb-Tripel ueber beide Schichten", { eq: [all_runs.len, 12] }] }] }]
+      # Der LETZTE Lauf muss noch im Text liegen — sonst waere die Verschiebung falsch.
+      - decl: [last_start, i32, { at: [all_runs, 9] }]
+      - decl: [last_len, i32, { at: [all_runs, 10] }]
+      - set: [fails, { +: [fails, { call: [expect, "auch der letzte Farblauf liegt im Text", { le: [{ +: [last_start, last_len] }, all_txt.len] }] }] }]
+      # Und er muss in der ZWEITEN Haelfte liegen (also verschoben worden sein).
+      - set: [fails, { +: [fails, { call: [expect, "die zweite Schicht ist verschoben", { gt: [last_start, { call: [all_txt.index_of, "test"] }] }] }] }]
+
+      - if:
+          condition: { neq: [fails, 0] }
+          then: [{ print: ["test_matrix_view FAIL (${fails})"] }, { return: 1 }]
+      - print: ["test_matrix_view PASS"]
+      - return: 0

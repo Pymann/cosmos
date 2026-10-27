@@ -1,0 +1,441 @@
+# SessionState — Verbindung und Anmeldung als Member statt als acht Globals
+# (doc/spec/105 Schritt 4, Muster des 9rooms-Clients).
+#
+# Das war der groesste und riskanteste Schnitt: `token` liest JEDER Bildschirm,
+# `connected` fast jeder RPC-Aufruf.  Darum zuletzt — ein Fehler hier legt alles
+# lahm, nicht nur eine Ansicht.
+#
+# `token` und `email` liegen bewusst NUR hier und werden ueber `save_token`
+# bzw. `clear_stored_token` persistiert; kein anderer Teil schreibt den Speicher.
+
+- import: "sources/models/server_list.aiml"
+
+
+- import: "sources/models/auth_reqs.aiml"
+- import: "sources/models/auth_profile_reqs.aiml"
+- import: "sources/models/auth_result.aiml"
+
+- import: "sources/models/auth_result.aiml"
+
+- class:
+    name: SessionState
+    members:
+      - [conn,          mirror_session]
+      - [server_url,    string, "ws://127.0.0.1:8765"]
+      # 1 = der Mensch hat im Picker gewaehlt → connect nimmt server_url unveraendert
+      - [server_pinned, i32]
+      - [token,         string]
+      - [email,         string]
+      - [nick,          string]   # Anzeigename
+      - [pid,           string]   # opake Konten-Identitaet
+      - [connected,     i32]
+      # Wiederaufnahme nach einem Server-Neustart (Robustheits-Analyse
+      # 2026-10-15): ohne sie blieb der Client bis zum manuellen Neuladen tot —
+      # „dann habe ich den Client neu gestartet, dann war er wieder da".
+      - [retry_ms,      i64]    # fruehester naechster Versuch
+      - [retry_gap,     i64, 1000]
+    methods:
+      - def:
+          name: load_stored_token
+          access: public
+          return: string
+          body:
+            - if: { condition: { eq: [{ call: [storage.has, "cosmos_token"] }, 0] }, then: [{ return: "" }] }
+            - return: { call: [storage.get, "cosmos_token"] }
+
+      - def:
+          name: load_stored_email
+          access: public
+          return: string
+          body:
+            - if: { condition: { eq: [{ call: [storage.has, "cosmos_email"] }, 0] }, then: [{ return: "" }] }
+            - return: { call: [storage.get, "cosmos_email"] }
+
+      - def:
+          name: save_token
+          access: public
+          args: [[tok, string], [em_addr, string]]
+          body:
+            - call: [storage.set, "cosmos_token", tok]
+            - call: [storage.set, "cosmos_email", em_addr]
+
+      - def:
+          name: clear_stored_token
+          access: public
+          body:
+            - call: [storage.set, "cosmos_token", ""]
+            - call: [storage.set, "cosmos_email", ""]
+
+      # net_connect: eine WS-Verbindung zum <.server_url öffnen.  Blockiert
+      # bis timeout_ms Millisekunden.  Return 1 = ok, 0 = fail.
+      # net_fetch_server_list: holt GET /servers.json (same-origin) und deserialisiert
+      # sie in ein ServerList-Model.  null wenn keine/ungültige Liste.  Nur Web sinnvoll
+      # (relatives "/servers.json"); nativ hat keinen Page-Origin → fetch "" → null.
+      # Der Login-Screen nutzt das, um den Server-Picker zu befüllen.
+      - def:
+          name: fetch_server_list
+          access: public
+          args: []
+          return: { type: ptr<ServerList>, lifetime: producer }
+          body:
+            - decl: [raw, string, { call: [http.fetch_text, "/servers.json"] }]
+            - if: { condition: { lt: [{ call: [raw.index_of, "servers"] }, 0] }, then: [{ return: null }] }
+            - decl: [list, ptr<ServerList>, { call: [sys.deserialize, raw, "ServerList"] }]
+            - return: list
+
+      # discover_server: URL des ersten "up"-Servers aus der Liste ("" wenn keiner).
+      - def:
+          name: discover
+          access: public
+          args: []
+          return: string
+          body:
+            - decl: [list, ptr<ServerList>, { call: [<.fetch_server_list] }]
+            - if: { condition: { eq: [list, null] }, then: [{ return: "" }] }
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, list.servers.len] }
+                body:
+                  - decl: [entry, ServerEntry, { at: [list.servers, idx] }]
+                  - if:
+                      condition: { eq: [entry.status, ServerStatus.up] }
+                      then:
+                        - return: entry.url
+                  - set: [idx, { +: [idx, 1] }]
+            - return: ""
+
+      # net_connect_derive_url: leitet <.server_url ab, wenn der User NICHT explizit
+      # gewählt hat — Web aus Page (Discovery bzw. same-origin), nativ aus Env/Default.
+      - def:
+          name: derive_url
+          access: public
+          args: []
+          body:
+            # Browser (WASM): Server-Host aus der Page-URL ableiten (storage.host).
+            # Schema folgt dem Seiten-Protokoll: eine per HTTPS ausgelieferte Seite MUSS
+            # wss:// nutzen (Browser blocken ws:// als Mixed-Content) → storage.is_secure.
+            # Nativ: <.server_url per Env COSMOS_SERVER überschreibbar (z.B. wss://…),
+            # sonst Default ws://127.0.0.1:8765.
+            - if:
+                condition: { eq: [{ call: [engine.is_web] }, 1] }
+                then:
+                  - decl: [web_host, string, { call: [storage.host] }]
+                  - decl: [scheme, string, "ws"]
+                  - if: { condition: { eq: [{ call: [storage.is_secure] }, 1] }, then: [{ set: [scheme, "wss"] }] }
+                  # Zuerst die Serverliste vom Static-Host (/servers.json) abfragen und den
+                  # ersten "up"-Server nehmen; schlägt das fehl → same-origin-Fallback.
+                  - decl: [picked, string, { call: [<.discover] }]
+                  - if:
+                      condition: { gt: [picked.len, 0] }
+                      then:
+                        - set: [<.server_url, picked]
+                        - call: [log.info, "[net] server from /servers.json: ${<.server_url}"]
+                      else:
+                        - set: [<.server_url, "${scheme}://${web_host}:8765"]
+                        - call: [log.info, "[net] web build — server url from page: ${<.server_url}"]
+                else:
+                  # map.get → null bei fehlendem Key; mit contains guarden (sonst .len-Crash).
+                  - decl: [envm, map<string:string>, { call: [sys.env] }]
+                  - if:
+                      condition: { gt: [{ call: [envm.contains, "COSMOS_SERVER"] }, 0] }
+                      then:
+                        - set: [<.server_url, { call: [envm.get, "COSMOS_SERVER"] }]
+                        - call: [log.info, "[net] server url from COSMOS_SERVER: ${<.server_url}"]
+
+      - def:
+          name: connect
+          access: public
+          args: [[timeout_ms, i32]]
+          return: i32
+          body:
+            - if:
+                condition: { neq: [<.connected, 0] }
+                then: [{ return: 1 }]
+            # Hat der User im Server-Picker explizit gewählt, <.server_url unverändert nehmen.
+            - if:
+                condition: { eq: [<.server_pinned, 1] }
+                then:
+                  - call: [log.info, "[net] using picked server ${<.server_url}"]
+                else:
+                  - call: [<.derive_url]
+            - call: [log.info, "[net] connecting to ${<.server_url} (${timeout_ms}ms)"]
+            - set: [<.conn, { call: [mirror.connect_timeout, <.server_url, timeout_ms] }]
+            - if:
+                condition: { eq: [<.conn, null] }
+                then:
+                  - call: [log.error, "[net] mirror.connect_timeout failed — server unreachable"]
+                  - return: 0
+            - call: [time.sleep_ms, 120]
+            - call: [<.conn.update]
+            - set: [<.connected, 1]
+            - call: [log.info, "[net] connected"]
+            - return: 1
+
+      # net_pump: drain the WebSocket into the RPC queue ONCE per frame (non-blocking).
+      # The client frame loop must call this so async requests (send_rpc + poll_rpc)
+      # get their responses without a blocking send_and_await poll-loop (which does
+      # emscripten_sleep and stalls the whole frame in WASM).  No-op if disconnected.
+      - def:
+          name: pump
+          access: public
+          body:
+            - if: { condition: { eq: [<.connected, 0] }, then: [{ return: [] }] }
+            - if: { condition: { peq: [<.conn, null] }, then: [{ return: [] }] }
+            - call: [<.conn.update]
+            # Bricht die Verbindung weg, merkt es sonst NIEMAND: `connected` wurde
+            # bis 2026-10-15 nur beim Abmelden zurueckgesetzt, die Fusszeile sagte
+            # also weiter „verbunden" und die Ansichten zeigten eingefrorene Daten
+            # als waeren sie frisch.  Ein stiller Abbruch ist der gefaehrlichste
+            # Zustand: alles sieht normal aus.
+            - if:
+                condition: { eq: [{ call: [<.conn.is_connected] }, 0] }
+                then:
+                  - call: [log.warn, "[net] Verbindung weg — Anzeige auf „nicht verbunden“"]
+                  - set: [<.conn, null]
+                  - set: [<.connected, 0]
+
+      # reconnect: EIN Versuch, die Sitzung wiederaufzunehmen — mit Wartezeit,
+      # damit ein toter Server nicht jeden Rahmen angeklopft bekommt.
+      # Das Anmelde-Merkmal bleibt gueltig; `validate_token` nimmt es wieder an,
+      # solange der Server es kennt.  Scheitert das, muss der Mensch sich neu
+      # anmelden — aber das sagt die Oberflaeche dann auch.
+      - def:
+          name: reconnect
+          access: public
+          static_off: ["str_cmp"]
+          return: i32
+          body:
+            - if: { condition: { neq: [<.connected, 0] }, then: [{ return: 1 }] }
+            - if: { condition: { eq: [<.token.len, 0] }, then: [{ return: 0 }] }
+            - decl: [nowm, i64, { call: [time.now] }]
+            - if: { condition: { lt: [nowm, <.retry_ms] }, then: [{ return: 0 }] }
+            - set: [<.retry_ms, { +: [nowm, <.retry_gap] }]
+            - set: [<.retry_gap, { '*': [<.retry_gap, 2] }]
+            - if: { condition: { gt: [<.retry_gap, 10000] }, then: [{ set: [<.retry_gap, 10000] }] }
+            - decl: [keep_token, string, <.token]
+            - if: { condition: { neq: [{ call: [<.connect, 2000] }, 1] }, then: [{ return: 0 }] }
+            - decl: [res, AuthResult, { call: [<.validate_token, keep_token] }]
+            - if:
+                condition: { neq: [res.success, 1] }
+                then:
+                  - call: [log.warn, "[net] Sitzung nicht mehr gueltig: ${res.message}"]
+                  - call: [<.close_session]
+                  - return: 0
+            - set: [<.retry_gap, 1000]
+            - call: [log.info, "[net] Sitzung wieder aufgenommen"]
+            - return: 1
+
+      - def:
+          name: close_session
+          access: public
+          body:
+            - if:
+                condition: { eq: [<.connected, 0] }
+                then: [{ return: [] }]
+            - call: [<.conn.close]
+            - set: [<.conn, null]
+            - set: [<.connected, 0]
+            - call: [log.info, "[net] closed"]
+
+      - def:
+          name: login
+          access: public
+          args: [[email, string], [pass, string]]
+          return: { type: AuthResult, lifetime: producer }
+          body:
+            - decl: [res, AuthResult]
+            - if:
+                condition: { eq: [<.connected, 0] }
+                then:
+                  - set: [res.success, 0]
+                  - set: [res.message, "no server connection"]
+                  - return: res
+            - decl: [req, LoginReq]
+            - set: [req.email,    email]
+            - set: [req.password, pass]
+            - decl: [got, i32, { call: [<.conn.send_and_await, 0, "submit_login", req, res, 4000] }]
+            - if:
+                condition: { eq: [got, 0] }
+                then:
+                  - set: [res.success, 0]
+                  - set: [res.message, "server did not respond"]
+                  - return: res
+            - if:
+                condition: { eq: [res.success, 1] }
+                then:
+                  - set: [<.token, res.token]
+                  - set: [<.email, res.email]
+                  - set: [<.nick,  res.display_name]
+                  - set: [<.pid,   res.player_id]
+                  - call: [<.save_token, res.token, res.email]
+            - return: res
+
+      - def:
+          name: register
+          access: public
+          args: [[email, string], [pass, string], [display_name, string]]
+          return: { type: AuthResult, lifetime: producer }
+          body:
+            - decl: [res, AuthResult]
+            - if:
+                condition: { eq: [<.connected, 0] }
+                then:
+                  - set: [res.success, 0]
+                  - set: [res.message, "no server connection"]
+                  - return: res
+            - decl: [req, RegisterReq]
+            - set: [req.email,        email]
+            - set: [req.password,     pass]
+            - set: [req.display_name, display_name]
+            - decl: [got, i32, { call: [<.conn.send_and_await, 0, "submit_register", req, res, 4000] }]
+            - if:
+                condition: { eq: [got, 0] }
+                then:
+                  - set: [res.success, 0]
+                  - set: [res.message, "server did not respond"]
+                  - return: res
+            - if:
+                condition: { eq: [res.success, 1] }
+                then:
+                  - set: [<.token, res.token]
+                  - set: [<.email, res.email]
+                  - set: [<.nick,  res.display_name]
+                  - set: [<.pid,   res.player_id]
+                  - call: [<.save_token, res.token, res.email]
+            - return: res
+
+      - def:
+          name: validate_token
+          access: public
+          args: [[tok, string]]
+          return: { type: AuthResult, lifetime: producer }
+          body:
+            - decl: [res, AuthResult]
+            - if:
+                condition: { eq: [<.connected, 0] }
+                then:
+                  - set: [res.success, 0]
+                  - set: [res.message, "no server connection"]
+                  - return: res
+            - decl: [req, TokenReq]
+            - set: [req.token, tok]
+            - decl: [got, i32, { call: [<.conn.send_and_await, 0, "validate_token", req, res, 4000] }]
+            - if:
+                condition: { eq: [got, 0] }
+                then:
+                  - set: [res.success, 0]
+                  - set: [res.message, "server did not respond"]
+                  - return: res
+            - if:
+                condition: { eq: [res.success, 1] }
+                then:
+                  - set: [<.token, tok]
+                  - set: [<.email, res.email]
+                  - set: [<.nick,  res.display_name]
+                  - set: [<.pid,   res.player_id]
+            - return: res
+
+      - def:
+          name: set_nickname
+          access: public
+          args: [[new_nick, string]]
+          return: { type: AuthResult, lifetime: producer }
+          body:
+            - decl: [res, AuthResult]
+            - if:
+                condition: { eq: [<.connected, 0] }
+                then:
+                  - set: [res.success, 0]
+                  - set: [res.message, "no server connection"]
+                  - return: res
+            - decl: [req, SetNicknameReq]
+            - set: [req.token,    <.token]
+            - set: [req.new_nick, new_nick]
+            - decl: [got, i32, { call: [<.conn.send_and_await, 0, "set_nickname", req, res, 4000] }]
+            - if:
+                condition: { eq: [got, 0] }
+                then:
+                  - set: [res.success, 0]
+                  - set: [res.message, "server did not respond"]
+                  - return: res
+            - if: { condition: { eq: [res.success, 1] }, then: [{ set: [<.nick, res.display_name] }] }
+            - return: res
+
+      # net_change_password: altes + neues Passwort → change_password-RPC.  Ändert keine
+      # Client-Globals (Session/Token bleiben); nur res.message ist interessant.
+      - def:
+          name: change_password
+          access: public
+          args: [[old_pw, string], [new_pw, string]]
+          return: { type: AuthResult, lifetime: producer }
+          body:
+            - decl: [res, AuthResult]
+            - if:
+                condition: { eq: [<.connected, 0] }
+                then:
+                  - set: [res.success, 0]
+                  - set: [res.message, "no server connection"]
+                  - return: res
+            - decl: [req, ChangePasswordReq]
+            - set: [req.token,        <.token]
+            - set: [req.old_password, old_pw]
+            - set: [req.new_password, new_pw]
+            - decl: [got, i32, { call: [<.conn.send_and_await, 0, "change_password", req, res, 4000] }]
+            - if:
+                condition: { eq: [got, 0] }
+                then:
+                  - set: [res.success, 0]
+                  - set: [res.message, "server did not respond"]
+                  - return: res
+            - return: res
+
+      # net_change_email: neue Email + Passwort → change_email-RPC.  Bei Erfolg <.email
+      # aktualisieren + neu persistieren (Token bleibt gültig, server-seitig umgeschlüsselt).
+      - def:
+          name: change_email
+          access: public
+          args: [[new_email, string], [pwd, string]]
+          return: { type: AuthResult, lifetime: producer }
+          body:
+            - decl: [res, AuthResult]
+            - if:
+                condition: { eq: [<.connected, 0] }
+                then:
+                  - set: [res.success, 0]
+                  - set: [res.message, "no server connection"]
+                  - return: res
+            - decl: [req, ChangeEmailReq]
+            - set: [req.token,     <.token]
+            - set: [req.new_email, new_email]
+            - set: [req.password,  pwd]
+            - decl: [got, i32, { call: [<.conn.send_and_await, 0, "change_email", req, res, 4000] }]
+            - if:
+                condition: { eq: [got, 0] }
+                then:
+                  - set: [res.success, 0]
+                  - set: [res.message, "server did not respond"]
+                  - return: res
+            - if:
+                condition: { eq: [res.success, 1] }
+                then:
+                  - set: [<.email, res.email]
+                  - call: [<.save_token, <.token, res.email]
+            - return: res
+
+      - def:
+          name: logout
+          access: public
+          body:
+            # Best-effort serverseitiges Logout (Token invalidieren), dann lokale Globals leeren.
+            - if:
+                condition: { '&&': [{ neq: [<.connected, 0] }, { gt: [<.token.len, 0] }] }
+                then:
+                  - decl: [req, TokenReq]
+                  - set: [req.token, <.token]
+                  - decl: [res, AuthResult]
+                  - decl: [got, i32, { call: [<.conn.send_and_await, 0, "logout", req, res, 2000] }]
+            - set: [<.token, ""]
+            - set: [<.email, ""]
+            - set: [<.nick,  ""]
+            - set: [<.pid,   ""]
+            - call: [<.clear_stored_token]

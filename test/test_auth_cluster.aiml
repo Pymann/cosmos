@@ -1,0 +1,189 @@
+# Cosmos auth + cluster logic test (no network): register/login/validate/logout, token expiry,
+# password policy, per-IP register throttle, and the cluster snapshot.  news AuthService +
+# ClusterBootstrap (external classes → satisfies the main-composition static rule).
+#
+# Expected exit code: 0
+
+- import: "sources/auth/auth_service.aiml"
+- import: "sources/auth/auth_helpers.aiml"
+- import: "sources/server/cluster_bootstrap.aiml"
+- import: "sources/shared/job_record.aiml"
+- import: "sources/shared/job_state.aiml"
+
+- def:
+    name: expect
+    args: [[label, string], [cond, i32]]
+    return: i32
+    body:
+      - if: { condition: { eq: [cond, 1] }, then: [{ return: 0 }] }
+      - print: ["FAIL ${label}"]
+      - return: 1
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      - decl: [auth, ptr<AuthService>, { new: AuthService }]
+      - decl: [db_dir, path, ""]
+      - call: [auth.init, db_dir]
+
+      # register
+      - decl: [rreq, RegisterReq]
+      - set: [rreq.email, "alice@example.com"]
+      - set: [rreq.password, "hunter2pw"]
+      - set: [rreq.display_name, "alice"]
+      - decl: [rres, AuthResult, { call: [auth.handle_register, rreq, "10.0.0.1"] }]
+      - set: [fails, { +: [fails, { call: [expect, "register ok", { eq: [rres.success, 1] }] }] }]
+
+      # password policy: < 6 chars rejected
+      - decl: [sreq, RegisterReq]
+      - set: [sreq.email, "bob@example.com"]
+      - set: [sreq.password, "x"]
+      - set: [sreq.display_name, "bobby"]
+      - decl: [sres, AuthResult, { call: [auth.handle_register, sreq, "10.0.0.2"] }]
+      - set: [fails, { +: [fails, { call: [expect, "short pw rejected", { eq: [sres.success, 0] }] }] }]
+
+      # login by nickname
+      - decl: [lreq, LoginReq]
+      - set: [lreq.email, "alice"]
+      - set: [lreq.password, "hunter2pw"]
+      - decl: [lres, AuthResult, { call: [auth.handle_login, lreq, "10.0.0.1"] }]
+      - set: [fails, { +: [fails, { call: [expect, "login ok", { eq: [lres.success, 1] }] }] }]
+      - decl: [tok, string, lres.token]
+
+      # validate ok
+      - decl: [vreq, TokenReq]
+      - set: [vreq.token, tok]
+      - decl: [vres, AuthResult, { call: [auth.handle_validate, vreq] }]
+      - set: [fails, { +: [fails, { call: [expect, "validate ok", { eq: [vres.success, 1] }] }] }]
+
+      # logout → validate fails
+      - decl: [lores, AuthResult, { call: [auth.handle_logout, tok] }]
+      - decl: [vres2, AuthResult, { call: [auth.handle_validate, vreq] }]
+      - set: [fails, { +: [fails, { call: [expect, "token dead after logout", { eq: [vres2.success, 0] }] }] }]
+
+      # wrong password rejected
+      - decl: [wreq, LoginReq]
+      - set: [wreq.email, "alice"]
+      - set: [wreq.password, "nope"]
+      - decl: [wres, AuthResult, { call: [auth.handle_login, wreq, "10.0.0.1"] }]
+      - set: [fails, { +: [fails, { call: [expect, "wrong pw rejected", { eq: [wres.success, 0] }] }] }]
+
+      # cluster snapshot
+      - decl: [clb, ptr<ClusterBootstrap>, { new: ClusterBootstrap }]
+      - call: [clb.init]
+      # Die Beispiel-Daten AUSDRUECKLICH anlegen: `run` legt sie nicht mehr von
+      # selbst an (sie landeten sonst im Betriebs-Speicher und standen als
+      # erfundene Knoten in der Oberflaeche).  Der Test will sie — also fragt er.
+      - call: [clb.seed_demo_cluster]
+      - call: [clb.run]
+      - decl: [view, ClusterView, { call: [clb.snapshot] }]
+      - set: [fails, { +: [fails, { call: [expect, "cluster nodes>=3", { ge: [view.nodes.len, 3] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "cluster workloads>=2", { ge: [view.workloads.len, 2] }] }] }]
+      # Schritt 2: ein durable Job im geteilten jobs-KV erscheint im Snapshot + Pipeline-Link.
+      - decl: [jobs_kv, Kv<string:JobRecord>, { call: [db.open_kv, "jobs", {persist: true}] }]
+      - decl: [jrec, JobRecord]
+      - set: [jrec.job_id, "job-deploy-api"]
+      - set: [jrec.command, "echo deploy"]
+      - set: [jrec.state, JobState.running]
+      - set: [jrec.pid, 4242]
+      - call: [jobs_kv.set, "job-deploy-api", jrec]
+      - decl: [view2, ClusterView, { call: [clb.snapshot] }]
+      - set: [fails, { +: [fails, { call: [expect, "snapshot includes job", { ge: [view2.jobs.len, 1] }] }] }]
+      - decl: [pfound, i32, 0]
+      - decl: [ppi, i32, 0]
+      - while:
+          condition: { lt: [ppi, view2.pipelines.len] }
+          body:
+            - decl: [prow, PipelineRun, { at: [view2.pipelines, ppi] }]
+            - if: { condition: { eq: [prow.produced_job_id, "job-deploy-api"] }, then: [{ set: [pfound, 1] }] }
+            - set: [ppi, { +: [ppi, 1] }]
+      - set: [fails, { +: [fails, { call: [expect, "pipeline links to job", { eq: [pfound, 1] }] }] }]
+
+      # ── doc/spec/108 C5/C6: Level-System ────────────────────────────────────
+      # Der Level liegt in einem EIGENEN KV (F108-2): ein Feld an `User` haette den
+      # Schema-Fingerprint gebrochen und jedes bestehende Konto unlesbar gemacht.
+      # Hier wird deshalb beides geprueft: die Umrechnung UND dass `users` noch geht.
+
+      # C5: kein Eintrag = am stärksten eingeschränkt (255), nicht 0 und nicht Admin.
+      - set: [fails, { +: [fails, { call: [expect, "no entry = 255",
+          { eq: [{ call: [auth.clearance_for_email, "alice@example.com"] }, 255] }] }] }]
+
+      # C5: ein gespeicherter Wert ausserhalb 1..255 ist ebenfalls 255 — ein
+      # vergessenes Feld im UserLevel-Blob liefert 0, und 0 darf nie Admin heissen.
+      - set: [fails, { +: [fails, { call: [expect, "clearance_of(0) = 255",
+          { eq: [{ call: [clearance_of, 0] }, 255] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "clearance_of(300) = 255",
+          { eq: [{ call: [clearance_of, 300] }, 255] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "clearance_of(-5) = 255",
+          { eq: [{ call: [clearance_of, -5] }, 255] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "clearance_of(1) = 1 (Admin)",
+          { eq: [{ call: [clearance_of, 1] }, 1] }] }] }]
+
+      # Setzen durch den Betrieb (F108-3): kein Aufrufer-Konto, also unbeschränkt.
+      - set: [fails, { +: [fails, { call: [expect, "grant 7 ok",
+          { eq: [{ call: [auth.grant_level, "alice@example.com", 7] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "level 7 gelesen",
+          { eq: [{ call: [auth.clearance_for_email, "alice@example.com"] }, 7] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "grant 0 abgelehnt",
+          { neq: [{ call: [auth.grant_level, "alice@example.com", 0] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "nach Ablehnung unverändert 7",
+          { eq: [{ call: [auth.clearance_for_email, "alice@example.com"] }, 7] }] }] }]
+
+      # C6: niemand vergibt eine Freigabe, die STÄRKER ist als die eigene (F108-4).
+      # alice hat 7; sie darf 9 vergeben (schwächer) und nicht 3 (stärker) — und
+      # erst gar nicht 7 an sich selbst erhöhen.
+      - decl: [clreq, RegisterReq]
+      - set: [clreq.email, "carl@example.com"]
+      - set: [clreq.password, "hunter2pw"]
+      - set: [clreq.display_name, "carl"]
+      - decl: [clres, AuthResult, { call: [auth.handle_register, clreq, "10.0.0.9"] }]
+      - set: [fails, { +: [fails, { call: [expect, "carl registriert", { eq: [clres.success, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "alice darf 9 vergeben",
+          { eq: [{ call: [auth.set_level, "alice@example.com", "carl@example.com", 9] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "carl hat 9",
+          { eq: [{ call: [auth.clearance_for_email, "carl@example.com"] }, 9] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "alice darf 3 NICHT vergeben",
+          { neq: [{ call: [auth.set_level, "alice@example.com", "carl@example.com", 3] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "carl bleibt 9",
+          { eq: [{ call: [auth.clearance_for_email, "carl@example.com"] }, 9] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "alice darf sich selbst nicht heben",
+          { neq: [{ call: [auth.set_level, "alice@example.com", "alice@example.com", 1] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "alice bleibt 7",
+          { eq: [{ call: [auth.clearance_for_email, "alice@example.com"] }, 7] }] }] }]
+
+      # C5 zweite Hälfte: das users-KV ist nach Einführung des Levels noch lesbar.
+      - decl: [lvl_pid, string, { call: [auth.pid_for, "alice@example.com"] }]
+      - set: [fails, { +: [fails, { call: [expect, "users-KV weiter lesbar",
+          { gt: [lvl_pid.len, 0] }] }] }]
+
+      # Freigabe über die pid — der Weg, den ein RPC-Handler nimmt.
+      - set: [fails, { +: [fails, { call: [expect, "clearance über pid",
+          { eq: [{ call: [auth.clearance_for_pid, lvl_pid] }, 7] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "unbekannte pid = 255",
+          { eq: [{ call: [auth.clearance_for_pid, "u_doesnotexist"] }, 255] }] }] }]
+
+      # ── doc/spec/108 §2: Nutzer-Index fuer die Verwaltung ───────────────────
+      # aiondb kann ein KV nicht aufzaehlen (aiml spec/31 §11.2), also wird beim
+      # Registrieren und beim Login mitgeschrieben.  Der Login-Pfad ist die Lazy-
+      # Migration fuer Konten, die es VOR dem Index gab.
+      - decl: [ucnt, i32, { call: [auth.user_count] }]
+      - set: [fails, { +: [fails, { call: [expect, "Index hat beide Konten", { ge: [ucnt, 2] }] }] }]
+      - decl: [u_first, string, { call: [auth.user_at, 0] }]
+      - set: [fails, { +: [fails, { call: [expect, "erster Eintrag nicht leer", { gt: [u_first.len, 0] }] }] }]
+      # `.len` geht nicht direkt auf einem Aufruf-Ausdruck — erst binden.
+      - decl: [u_oob, string, { call: [auth.user_at, 9999] }]
+      - set: [fails, { +: [fails, { call: [expect, "ausserhalb = leer", { eq: [u_oob.len, 0] }] }] }]
+      - decl: [u_neg, string, { call: [auth.user_at, -1] }]
+      - set: [fails, { +: [fails, { call: [expect, "negativ = leer", { eq: [u_neg.len, 0] }] }] }]
+      # Idempotent: zweimal dasselbe Konto ergibt keine zweite Zeile — sonst saehe die
+      # Verwaltung zwei Konten, wo eines ist.
+      - call: [auth.index_user, "alice@example.com"]
+      - set: [fails, { +: [fails, { call: [expect, "index_user idempotent",
+          { eq: [{ call: [auth.user_count] }, ucnt] }] }] }]
+
+      - if: { condition: { gt: [fails, 0] }, then: [{ print: ["test_auth_cluster: ${fails} failed"] }, { return: 1 }] }
+      - print: ["test_auth_cluster PASS (nodes=${view.nodes.len} workloads=${view.workloads.len})"]
+      - return: 0

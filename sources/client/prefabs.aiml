@@ -1,0 +1,1254 @@
+# Cosmos client prefabs: login, main menu, account settings, terms, cluster view.
+# LoginScene / TermsOverlay reused from 9rooms (verbatim geometry);
+# MainMenuScene + ClusterScene are cosmos-specific (control-plane, not a card game).
+
+- prefab:
+    name: LoginScene
+    width: 1280
+    height: 720
+    children:
+      - { name: bg_layer, type: rect, x: 0, y: 0, width: 1280, height: 720, color: 0x00000000, bg_color: 0x0A0F1AFF }
+      - { name: logo_img, type: sprite, x: 40, y: 18, width: 200, height: 112 }
+      - { name: card_bg, type: rect, x: 440, y: 360, width: 400, height: 300,
+          color: 0x00000000, bg_color: 0x0A0F1AEE,
+          border_color: 0x6688AAFF, border_width: 2.0, corner_radius: 10.0 }
+      - { name: title, type: label, x: 440, y: 368, width: 400, height: 24, anchor: center,
+          valign: center, font_size: 20, color: 0xEECC88FF, label: "Login" }
+      - { name: email_lbl, type: label, x: 460, y: 420, anchor: left,
+          font_size: 12, color: 0xCCCCCCFF, label: "Email oder Nickname" }
+      - { name: email_input, type: text_input, x: 460, y: 440, width: 360, height: 32,
+          bg_color: 0x1A2030FF, border_color: 0x6688AAFF, border_width: 1.5,
+          corner_radius: 4.0, color: 0xFFFFFFFF, font_size: 14 }
+      - { name: pw_lbl, type: label, x: 460, y: 480, anchor: left,
+          font_size: 12, color: 0xCCCCCCFF, label: "Password" }
+      - { name: pw_input, type: text_input, x: 460, y: 500, width: 360, height: 32,
+          secret: true, bg_color: 0x1A2030FF, border_color: 0x6688AAFF,
+          border_width: 1.5, corner_radius: 4.0, color: 0xFFFFFFFF, font_size: 14 }
+      - { name: keep_chk, type: checkbox, x: 460, y: 538, width: 220, height: 20,
+          font_size: 12, color: 0xCCCCCCFF, label: "Keep logged in" }
+      - { name: login_btn, type: button, x: 460, y: 570, width: 170, height: 40,
+          bg_texture: "stone_tileable_button_texture", tile_size: 64,
+          frame_border_texture: "mini_border_button2", frame_border_size: 6,
+          hover_color: 0xFFCC88FF, active_color: 0xFF9944FF,
+          color: 0xFFFFFFFF, font_size: 15, label: "Login",
+          outline_color: 0x66AAFFFF, outline_px: 1.0 }
+      - { name: register_btn, type: button, x: 650, y: 570, width: 170, height: 40,
+          bg_texture: "stone_tileable_button_texture", tile_size: 64,
+          frame_border_texture: "mini_border_button2", frame_border_size: 6,
+          hover_color: 0xFFCC88FF, active_color: 0xFF9944FF,
+          color: 0xFFFFFFFF, font_size: 15, label: "Register",
+          outline_color: 0x66AAFFFF, outline_px: 1.0 }
+      - { name: status_lbl, type: textbox, x: 450, y: 616, width: 380, height: 40,
+          font_size: 12, color: 0xFFAA88FF }
+      # Build-Stempel (unten links) — zeigt, welchen Client-Build dieses Gerät
+      # geladen hat.  Diagnostiziert Cache-/Versions-Mismatch auf einen Blick.
+      # Text wird in LoginScreen.init aus dem Asset build_version gesetzt.
+      - { name: build_lbl, type: label, x: 8, y: 704, anchor: left,
+          font_size: 10, color: 0x668899FF, label: "build ?" }
+
+      # ── Server-Picker (über der Karte): Label + Cycle-Button.  Der Button zeigt
+      #    den aktuell gewählten Server; Klick wechselt zum nächsten "up"-Server
+      #    aus /servers.json.  Von LoginScreen befüllt/verdrahtet. ───────────────
+      - { name: server_lbl, type: label, x: 460, y: 348, anchor: left,
+          font_size: 11, color: 0xAADDFFFF, label: "Server:" }
+      - { name: server_btn, type: button, x: 528, y: 340, width: 292, height: 22,
+          bg_color: 0x1A2030DD, border_color: 0x6688AAFF, border_width: 1.0,
+          corner_radius: 4.0, hover_color: 0xFFFFFFFF, active_color: 0xAADDFFFF,
+          color: 0xAADDFFFF, font_size: 12, label: "(auto)" }
+
+      # ── Register-Overlay (modal) — startet versteckt (LoginScreen.init hidet
+      #    alle reg_*), erscheint bei Klick auf "Register".  Nickname ist der
+      #    öffentliche Name, Email bleibt privat (Datenschutz). ────────────────
+      - { name: reg_bg, type: rect, x: 400, y: 168, width: 480, height: 452,
+          color: 0x00000000, bg_color: 0x0A0F1AF7,
+          border_color: 0x88AACCFF, border_width: 2.0, corner_radius: 12.0 }
+      - { name: reg_title, type: label, x: 640, y: 192, anchor: center,
+          font_size: 20, color: 0xEECC88FF, label: "Konto erstellen" }
+      - { name: reg_nick_lbl, type: label, x: 430, y: 224, anchor: left,
+          font_size: 12, color: 0xAADDFFFF, label: "Nickname" }
+      - { name: reg_nick_input, type: text_input, x: 430, y: 244, width: 420, height: 32,
+          bg_color: 0x1A2030FF, border_color: 0x6688AAFF, border_width: 1.5,
+          corner_radius: 4.0, color: 0xFFFFFFFF, font_size: 14 }
+      - { name: reg_email_lbl, type: label, x: 430, y: 288, anchor: left,
+          font_size: 12, color: 0xCCCCCCFF, label: "Email" }
+      - { name: reg_email_input, type: text_input, x: 430, y: 308, width: 420, height: 32,
+          bg_color: 0x1A2030FF, border_color: 0x6688AAFF, border_width: 1.5,
+          corner_radius: 4.0, color: 0xFFFFFFFF, font_size: 14 }
+      - { name: reg_pw_lbl, type: label, x: 430, y: 352, anchor: left,
+          font_size: 12, color: 0xCCCCCCFF, label: "Password" }
+      - { name: reg_pw_input, type: text_input, x: 430, y: 372, width: 420, height: 32,
+          secret: true, bg_color: 0x1A2030FF, border_color: 0x6688AAFF,
+          border_width: 1.5, corner_radius: 4.0, color: 0xFFFFFFFF, font_size: 14 }
+      - { name: reg_disc_chk, type: checkbox, x: 430, y: 420, width: 250, height: 20,
+          font_size: 12, color: 0xCCCCCCFF,
+          label: "Ich akzeptiere die Bedingungen" }
+      - { name: reg_terms_link, type: button, x: 690, y: 417, width: 160, height: 24,
+          bg_color: 0x1A2030CC, border_color: 0x6688AAFF, border_width: 1.0,
+          corner_radius: 4.0, hover_color: 0xFFFFFFFF, active_color: 0xAADDFFFF,
+          color: 0xAADDFFFF, font_size: 12, label: "» anzeigen" }
+      - { name: reg_submit_btn, type: button, x: 430, y: 462, width: 195, height: 40,
+          bg_texture: "stone_tileable_button_texture", tile_size: 64,
+          frame_border_texture: "mini_border_button2", frame_border_size: 6,
+          hover_color: 0xFFCC88FF, active_color: 0xFF9944FF,
+          color: 0xFFFFFFFF, font_size: 15, label: "Registrieren",
+          outline_color: 0x66AAFFFF, outline_px: 1.0 }
+      - { name: reg_cancel_btn, type: button, x: 655, y: 462, width: 195, height: 40,
+          bg_texture: "stone_tileable_button_texture", tile_size: 64,
+          frame_border_texture: "mini_border_button2", frame_border_size: 6,
+          hover_color: 0xAAAAAAFF, active_color: 0x888888FF,
+          color: 0xFFFFFFFF, font_size: 15, label: "Abbrechen",
+          outline_color: 0x66AAFFFF, outline_px: 1.0 }
+      - { name: reg_status, type: label, x: 640, y: 560, anchor: center,
+          font_size: 12, color: 0xFFAA88FF, label: "" }
+
+
+- prefab:
+    name: TermsOverlay
+    width: 1280
+    height: 720
+    children:
+      - { name: dim_veil, type: rect, x: 0, y: 0, width: 1280, height: 720,
+          color: 0x00000000, bg_color: 0x000000D8 }
+      - { name: panel, type: rect, x: 240, y: 50, width: 800, height: 620,
+          color: 0x00000000, bg_color: 0x0A0F1AF8,
+          border_color: 0x6688AAFF, border_width: 2.0, corner_radius: 10.0 }
+      - { name: title, type: label, x: 240, y: 60, width: 800, height: 32,
+          anchor: center, valign: center, font_size: 22, color: 0xEECC88FF,
+          label: "Cosmos — Terms & Privacy" }
+      - { name: close_btn, type: button, x: 992, y: 60, width: 40, height: 40,
+          texture: "icon_remove_cross",
+          hover_color: 0xDDDDDDFF, active_color: 0xAAAAAAFF,
+          border_color: 0x88BBEEFF, border_width: 1.0, corner_radius: 6.0 }
+      - { name: terms_tab, type: button, x: 264, y: 108, width: 240, height: 34,
+          bg_texture: "stone_tileable_button_texture", tile_size: 64,
+          frame_border_texture: "mini_border_button2", frame_border_size: 6,
+          hover_color: 0xFFCC88FF, active_color: 0xFF9944FF,
+          color: 0xFFFFFFFF, font_size: 14, label: "Nutzungsbedingungen" }
+      - { name: privacy_tab, type: button, x: 520, y: 108, width: 240, height: 34,
+          bg_texture: "stone_tileable_button_texture", tile_size: 64,
+          frame_border_texture: "mini_border_button2", frame_border_size: 6,
+          hover_color: 0xFFCC88FF, active_color: 0xFF9944FF,
+          color: 0xFFFFFFFF, font_size: 14, label: "Datenschutz" }
+      - { name: terms_body, type: textbox, x: 264, y: 154, width: 752, height: 500,
+          scrollable: true, tail: false, font_size: 13, color: 0xDDDDDDFF, label: "" }
+
+# ── RbTocRow — eine klickbare Kapitel-Zeile im Regelbuch-Inhaltsverzeichnis ──
+
+# ── AccountScene (doc/spec/107 F107-3 + §107.6) ────────────────────────────
+# Das eigene Konto: E-Mail und Passwort aendern.
+#
+# Ein BEREICH, kein Overlay (F107-28).  Der Knopf dafuer sitzt oben rechts im Kopf
+# der Huelle — die STELLE sagt „Verwaltung, nicht Arbeit", der WEG ist derselbe
+# Bereichswechsel wie bei jedem Reiter.
+- prefab:
+    name: AccountScene
+    width: 1280
+    height: 720
+    children:
+      - { name: bg_layer, type: rect, x: 0, y: 0, width: 1280, height: 720,
+          color: 0x00000000, bg_color: 0x080B12FF }
+      - { name: title, type: label, x: 20, y: 92, width: 300, height: 34, anchor: left,
+          valign: center, font_size: 20, color: 0xEECC88FF, label: "Konto" }
+      - { name: cur_email_lbl, type: label, x: 32, y: 134, width: 700, height: 20,
+          anchor: left, valign: center, font_size: 13, color: 0x99AABBFF, label: "" }
+
+      # ── E-Mail ändern ──
+      - { name: sec_email_lbl, type: label, x: 32, y: 176, width: 536, height: 22,
+          anchor: left, valign: center, font_size: 15, color: 0xEECC88FF, label: "E-Mail ändern" }
+      - { name: us_email_lbl, type: label, x: 32, y: 206, width: 536, height: 18,
+          anchor: left, valign: center, font_size: 13, color: 0xCCCCCCFF, label: "Neue E-Mail:" }
+      - { name: us_email_input, type: text_input, x: 32, y: 226, width: 536, height: 30,
+          bg_color: 0x1A2030FF, border_color: 0x6688AAFF, border_width: 1.5,
+          corner_radius: 4.0, color: 0xFFFFFFFF, font_size: 14 }
+      - { name: us_email_pw_lbl, type: label, x: 32, y: 262, width: 360, height: 18,
+          anchor: left, valign: center, font_size: 13, color: 0xCCCCCCFF, label: "Passwort (Bestätigung):" }
+      - { name: us_email_pw, type: text_input, x: 32, y: 282, width: 360, height: 30, secret: true,
+          bg_color: 0x1A2030FF, border_color: 0x6688AAFF, border_width: 1.5,
+          corner_radius: 4.0, color: 0xFFFFFFFF, font_size: 14 }
+      - { name: us_email_btn, type: button, x: 404, y: 282, width: 164, height: 30,
+          bg_texture: "stone_tileable_button_texture", tile_size: 64,
+          frame_border_texture: "mini_border_button2", frame_border_size: 6,
+          hover_color: 0xFFCC88FF, active_color: 0xFF9944FF,
+          color: 0xFFFFFFFF, font_size: 13, label: "E-Mail ändern",
+          outline_color: 0x66AAFFFF, outline_px: 1.0 }
+
+      # ── Passwort ändern ──
+      - { name: sec_pw_lbl, type: label, x: 32, y: 340, width: 536, height: 22,
+          anchor: left, valign: center, font_size: 15, color: 0xEECC88FF, label: "Passwort ändern" }
+      - { name: us_old_pw_lbl, type: label, x: 32, y: 370, width: 536, height: 18,
+          anchor: left, valign: center, font_size: 13, color: 0xCCCCCCFF, label: "Aktuelles Passwort:" }
+      - { name: us_old_pw, type: text_input, x: 32, y: 390, width: 536, height: 30, secret: true,
+          bg_color: 0x1A2030FF, border_color: 0x6688AAFF, border_width: 1.5,
+          corner_radius: 4.0, color: 0xFFFFFFFF, font_size: 14 }
+      - { name: us_new_pw_lbl, type: label, x: 32, y: 426, width: 260, height: 18,
+          anchor: left, valign: center, font_size: 13, color: 0xCCCCCCFF, label: "Neues Passwort (min. 6):" }
+      - { name: us_new_pw, type: text_input, x: 32, y: 446, width: 260, height: 30, secret: true,
+          bg_color: 0x1A2030FF, border_color: 0x6688AAFF, border_width: 1.5,
+          corner_radius: 4.0, color: 0xFFFFFFFF, font_size: 14 }
+      - { name: us_new_pw2_lbl, type: label, x: 308, y: 426, width: 260, height: 18,
+          anchor: left, valign: center, font_size: 13, color: 0xCCCCCCFF, label: "Wiederholen:" }
+      - { name: us_new_pw2, type: text_input, x: 308, y: 446, width: 260, height: 30, secret: true,
+          bg_color: 0x1A2030FF, border_color: 0x6688AAFF, border_width: 1.5,
+          corner_radius: 4.0, color: 0xFFFFFFFF, font_size: 14 }
+      - { name: us_pw_btn, type: button, x: 404, y: 496, width: 164, height: 32,
+          bg_texture: "stone_tileable_button_texture", tile_size: 64,
+          frame_border_texture: "mini_border_button2", frame_border_size: 6,
+          hover_color: 0xFFCC88FF, active_color: 0xFF9944FF,
+          color: 0xFFFFFFFF, font_size: 13, label: "Passwort ändern",
+          outline_color: 0x66AAFFFF, outline_px: 1.0 }
+
+      - { name: us_status, type: label, x: 32, y: 552, width: 800, height: 22,
+          anchor: left, valign: center, font_size: 13, color: 0xFFAA88FF, label: "" }
+
+
+# ── MainMenuScene — Cluster / Account / Logout ──────────────────────────────
+- prefab:
+    name: MainMenuScene
+    width: 1280
+    height: 720
+    children:
+      # doc/spec/107 F107-2: KEIN Startmenue mehr.  Die vier grossen Knoepfe
+      # fuehrten nur weiter und hatten keinen Inhalt — Navigation sitzt im Kopf
+      # der Huelle, hier steht die Arbeit: die Jobs.
+      - { name: bg_layer, type: rect, x: 0, y: 0, width: 1280, height: 720, color: 0x00000000, bg_color: 0x0A0F1AFF }
+      - { name: jobs_hdr, type: label, x: 20, y: 92, width: 500, height: 24, anchor: left,
+          font_size: 16, color: 0xFFCC88FF, label: "Jobs" }
+      # F107-9: ohne diesen Knopf waere der Editor nur ueber einen Job
+      # erreichbar, den es auf einem frischen Server noch gar nicht gibt.
+      - { name: newjob_btn, type: button, x: 1140, y: 88, width: 120, height: 30,
+          bg_color: 0x16202CFF, border_color: 0x88BBEEFF, border_width: 1.0, corner_radius: 4.0,
+          hover_color: 0xFFCC88FF, active_color: 0xFF9944FF, color: 0xFFFFFFFF, font_size: 13,
+          label: "Neuer Job" }
+      # F107-7: solange Zeilen nicht anklickbar sind, NENNT die Ansicht den
+      # fehlenden Weg, statt eine Marke zu zeigen, die nichts tut.
+      # F107-7: echte ZEILEN, kein Textblock.  Ein Textfeld kann man nicht
+      # anklicken, nicht sortieren und nicht mit einem Knopf versehen — damit
+      # war die Liste eine Tabelle zum Ansehen statt die Arbeitsflaeche.
+      - { name: cols_name, type: label, x: 32, y: 122, width: 520, height: 18, anchor: left,
+          font_size: 11, color: 0x6A7889FF, label: "JOB" }
+      - { name: cols_last, type: label, x: 566, y: 122, width: 330, height: 18, anchor: left,
+          font_size: 11, color: 0x6A7889FF, label: "LETZTER LAUF" }
+      # „BILANZ" mit „0/7" wurde als „0 von 7 Laeufen" gelesen (User 2026-10-18) — es
+      # hiess aber „0 gescheitert von 7 FERTIGEN".  Jetzt sagt der WERT, was er zaehlt,
+      # und die Ueberschrift nennt nur noch das Thema.
+      - { name: cols_tall, type: label, x: 906, y: 122, width: 190, height: 18, anchor: left,
+          font_size: 11, color: 0x6A7889FF, label: "LÄUFE" }
+      - { name: jobs_list, type: container, x: 20, y: 144, width: 1240, height: 480,
+          spawn: JobRow, layout: vflow, gap: 4, scrollable: true }
+      - { name: jobs_none, type: label, x: 32, y: 152, width: 880, height: 22, anchor: left,
+          font_size: 13, color: 0x7A8899FF, label: "" }
+      - { name: status_lbl, type: label, x: 20, y: 636, width: 1240, height: 20, anchor: left,
+          font_size: 12, color: 0x7A8899FF, label: "" }
+
+# ── FolderTab — ein Reiter der Ordnerleiste (doc/spec/107 F107-5) ──────────
+- prefab:
+    name: FolderTab
+    width: 150
+    height: 28
+    children:
+      - { name: tab_btnxx, type: button, x: 0, y: 0, width: 150, height: 28,
+          bg_color: 0x141C2AFF, border_color: 0x33415AFF, border_width: 1.0, corner_radius: 4.0,
+          hover_color: 0xFFFFFFFF, active_color: 0xAADDFFFF, color: 0x9FB4CCFF,
+          font_size: 12, label: "" }
+
+# ── JobRow — eine Zeile der Jobliste (doc/spec/107 F107-7) ─────────────────
+# Die ganze Zeile ist der Klick (click_area liegt UNTER den Beschriftungen und
+# faengt den Klick, wie 9rooms ForumCatRow); der Starten-Knopf liegt DARUEBER
+# und faengt seinen Klick selbst ab, damit „starten" nicht aus Versehen
+# „oeffnen" bedeutet.
+- prefab:
+    name: JobRow
+    width: 1220
+    height: 44
+    children:
+      - { name: row_backg, type: rect, x: 0, y: 0, width: 1220, height: 44,
+          color: 0x00000000, bg_color: 0x111826FF, corner_radius: 4.0 }
+      - { name: click_area, type: button, x: 0, y: 0, width: 1220, height: 44,
+          bg_color: 0x00000000, hover_color: 0x1C2A48FF, active_color: 0x24345AFF,
+          corner_radius: 4.0, color: 0x00000000, font_size: 1, label: "" }
+      # F107-7: der Zustand als Farbfleck, nicht als Wort in einer Textspalte.
+      - { name: stat_dotx, type: rect, x: 12, y: 16, width: 12, height: 12,
+          color: 0x00000000, bg_color: 0x667788FF, corner_radius: 6.0 }
+      - { name: name_lblx, type: label, x: 34, y: 0, width: 520, height: 44, anchor: left,
+          valign: center, font_size: 14, color: 0xDDE6F0FF, label: "" }
+      - { name: last_lblx, type: label, x: 566, y: 0, width: 330, height: 44, anchor: left,
+          valign: center, font_size: 12, color: 0xAADDFFFF, label: "" }
+      - { name: tally_lbl, type: label, x: 906, y: 2, width: 190, height: 24, anchor: left,
+          valign: center, font_size: 12, color: 0x7A8899FF, label: "" }
+      # Zweite Zeile NUR fuer Laeufe, die gestartet wurden und nie ein Ergebnis
+      # geliefert haben.  Sie sind der Unterschied zwischen der Lauf-NUMMER und der
+      # Bilanz — und ohne sie sieht die Luecke wie ein Zaehlfehler aus.
+      - { name: tally_sub, type: label, x: 906, y: 24, width: 190, height: 18, anchor: left,
+          valign: center, font_size: 11, color: 0xDDAA44FF, label: "" }
+      - { name: start_btnx, type: button, x: 1104, y: 7, width: 96, height: 30,
+          bg_color: 0x1A2030FF, border_color: 0x88BBEEFF, border_width: 1.0, corner_radius: 4.0,
+          hover_color: 0xFFFFFFFF, active_color: 0xAADDFFFF, color: 0xAADDFFFF,
+          font_size: 12, label: "Starten" }
+
+# ── ClusterScene (doc/spec/107 §107.5) ─────────────────────────────────────
+# Das NETZ, nicht drei Textkaesten.
+#
+# Auftrag (User 2026-10-18): „dort sehen wir eine visualisierung der netzwerke mit den
+# geoeffneten KV, verbundenen agenten und der controller instanz."  Vorher standen hier
+# drei `textbox`-Bloecke nebeneinander — genau das, was F107-1 als letztes Mittel
+# bezeichnet: fuer „wer haengt woran" ist Fliesstext die schlechteste Form, weil die
+# BEZIEHUNG darin gar nicht vorkommt.  Dazu lag das rechte Drittel (ab x=940) brach,
+# seit die rechte Spalte gestrichen wurde (F107-12).
+#
+# Form: ein Knoten-Kanten-Bild.  Der Controller in der Mitte, seine Speicher links, die
+# Agenten rechts; die Linien sind duenne `rect`s (einen Linientyp gibt es nicht).  Jede
+# Zeile bringt ihren eigenen Stummel mit, der Stamm verbindet sie — so liest man die
+# Zugehoerigkeit, ohne je Zeile Geometrie zu rechnen.
+#
+# Farbe: Linien zurueckhaltend, Zustand NUR an den Agenten und nie allein — neben dem
+# Punkt steht das Wort.
+- prefab:
+    name: ClusterScene
+    width: 1280
+    height: 720
+    children:
+      - { name: bg_layer, type: rect, x: 0, y: 0, width: 1280, height: 720,
+          color: 0x00000000, bg_color: 0x080B12FF }
+
+      - { name: title_lbl, type: label, x: 20, y: 92, width: 420, height: 30, anchor: left,
+          font_size: 20, color: 0xDDE6F0FF, label: "Cluster" }
+      - { name: stand_lbl, type: label, x: 440, y: 92, width: 460, height: 30, anchor: left,
+          font_size: 12, color: 0x6A7889FF, label: "" }
+      - { name: refresh_btn, type: button, x: 1140, y: 90, width: 120, height: 32,
+          label: "Aktualisieren", font_size: 13, color: 0xDDE6F0FF,
+          bg_color: 0x1A2230FF, border_color: 0x3D5A77FF, border_width: 1.0,
+          corner_radius: 4.0 }
+
+      - { name: kv_hdr, type: label, x: 20, y: 132, width: 338, height: 18, anchor: left,
+          font_size: 11, color: 0x6A7889FF, label: "GEÖFFNETE SPEICHER" }
+      - { name: ctl_hdr, type: label, x: 378, y: 132, width: 380, height: 18, anchor: left,
+          font_size: 11, color: 0x6A7889FF, label: "NETZ" }
+      # Ohne diesen Hinweis bleibt das Bild ein Bild: dass man es drehen kann,
+      # sieht man nicht (doc/spec/107 §107.5a).
+      - { name: space_hint, type: label, x: 758, y: 132, width: 144, height: 18, anchor: right,
+          font_size: 10, color: 0x56657AFF, label: "ziehen · Rad zoomt" }
+      - { name: agt_hdr, type: label, x: 922, y: 132, width: 338, height: 18, anchor: left,
+          font_size: 11, color: 0x6A7889FF, label: "VERBUNDENE AGENTEN" }
+
+      # Die Stammlinien tragen die Zugehoerigkeit der ZEILEN zur Mitte; die
+      # Kanten im Netz selbst sind Rohre im Raum (doc/spec/107 §107.5a).
+      - { name: kv_trunk, type: rect, x: 358, y: 170, width: 2, height: 450,
+          color: 0x00000000, bg_color: 0x2D3642FF }
+      - { name: agt_trunk, type: rect, x: 920, y: 170, width: 2, height: 450,
+          color: 0x00000000, bg_color: 0x2D3642FF }
+
+      # Der Ausschnitt des raeumlichen Bildes: x 378, y 160, 524x400.  Der
+      # Rahmen wird vom Prefab-Pass gezeichnet, das Bild danach HINEIN —
+      # der 3D-Pass kennt keine Oberflaeche (vgl. JobRunsScene).
+      - { name: space_box, type: rect, x: 378, y: 160, width: 524, height: 400,
+          color: 0x00000000, bg_color: 0x0A0E18FF, border_color: 0x2D3642FF,
+          border_width: 1.0, corner_radius: 6.0 }
+      - { name: space_none, type: label, x: 378, y: 350, width: 524, height: 20, anchor: center,
+          font_size: 12, color: 0x7A8899FF, label: "" }
+
+      # Die Zahlen zum Controller stehen UNTER dem Bild, nicht darin: der
+      # 3D-Pass zeichnet ueber den Prefab-Pass, Text im Ausschnitt waere weg.
+      - { name: ctl_card, type: rect, x: 378, y: 572, width: 524, height: 118,
+          color: 0x00000000, bg_color: 0x101823FF, border_color: 0x3D5A77FF,
+          border_width: 1.5, corner_radius: 6.0 }
+      - { name: ctl_name, type: label, x: 396, y: 580, width: 300, height: 24, anchor: left,
+          font_size: 15, color: 0xDDE6F0FF, label: "cosmosd" }
+      - { name: ctl_bind, type: label, x: 696, y: 582, width: 190, height: 20, anchor: right,
+          font_size: 11, color: 0x8FA6BDFF, label: "" }
+      - { name: ctl_load, type: label, x: 396, y: 606, width: 490, height: 22, anchor: left,
+          font_size: 13, color: 0xAADDFFFF, label: "" }
+      - { name: ctl_conn, type: label, x: 396, y: 632, width: 490, height: 20, anchor: left,
+          font_size: 12, color: 0x8FA6BDFF, label: "" }
+      - { name: ctl_note, type: label, x: 396, y: 656, width: 490, height: 20, anchor: left,
+          font_size: 11, color: 0x6A7889FF, label: "" }
+
+      - { name: kv_list, type: container, x: 20, y: 170, width: 338, height: 450,
+          spawn: KvNode, layout: vflow, gap: 6, scrollable: true }
+      - { name: agt_list, type: container, x: 922, y: 170, width: 338, height: 450,
+          spawn: AgentNode, layout: vflow, gap: 6, scrollable: true }
+
+      - { name: kv_none, type: label, x: 32, y: 176, width: 320, height: 20, anchor: left,
+          font_size: 12, color: 0x7A8899FF, label: "" }
+      - { name: agt_none, type: label, x: 934, y: 176, width: 320, height: 20, anchor: left,
+          font_size: 12, color: 0x7A8899FF, label: "" }
+
+# Ein geoeffneter Speicher.  Der Stummel rechts trifft den Stamm — dadurch gehoert die
+# Zeile sichtbar zum Controller und nicht nur raeumlich daneben.
+- prefab:
+    name: KvNode
+    width: 338
+    height: 44
+    children:
+      - { name: kv_bg, type: rect, x: 0, y: 0, width: 324, height: 44,
+          color: 0x00000000, bg_color: 0x0E141CFF, border_color: 0x1E2733FF,
+          border_width: 1.0, corner_radius: 4.0 }
+      - { name: kv_stub, type: rect, x: 324, y: 21, width: 14, height: 2,
+          color: 0x00000000, bg_color: 0x2D3642FF }
+      - { name: kv_name, type: label, x: 12, y: 2, width: 200, height: 22, anchor: left,
+          font_size: 13, color: 0xDDE6F0FF, label: "" }
+      - { name: kv_meta, type: label, x: 12, y: 22, width: 300, height: 18, anchor: left,
+          font_size: 11, color: 0x6A7889FF, label: "" }
+
+# Ein verbundener Agent.  Punkt UND Wort: eine Farbe allein traegt keinen Zustand.
+- prefab:
+    name: AgentNode
+    width: 338
+    height: 44
+    children:
+      - { name: ag_stub, type: rect, x: 0, y: 21, width: 14, height: 2,
+          color: 0x00000000, bg_color: 0x2D3642FF }
+      - { name: ag_bg, type: rect, x: 14, y: 0, width: 324, height: 44,
+          color: 0x00000000, bg_color: 0x0E141CFF, border_color: 0x1E2733FF,
+          border_width: 1.0, corner_radius: 4.0 }
+      - { name: ag_dot, type: rect, x: 28, y: 16, width: 10, height: 10,
+          color: 0x00000000, bg_color: 0x667788FF, corner_radius: 5.0 }
+      - { name: ag_name, type: label, x: 46, y: 2, width: 200, height: 22, anchor: left,
+          font_size: 13, color: 0xDDE6F0FF, label: "" }
+      - { name: ag_meta, type: label, x: 46, y: 22, width: 280, height: 18, anchor: left,
+          font_size: 11, color: 0x6A7889FF, label: "" }
+
+- prefab:
+    name: AgentsScene
+    width: 1280
+    height: 720
+    children:
+      # doc/spec/107 F107-8 + User 2026-10-15: hier werden KEINE Laeufe mehr
+      # gestartet — das ist Agenten-VERWALTUNG.  Ad-hoc-Befehle gehoerten nie
+      # hierher: ein Lauf ohne Job ist Geschichte, die niemandem gehoert
+      # (doc/spec/106 G4).  Der RPC dafuer bleibt (Abnahme), der Weg ueber die
+      # Oberflaeche faellt weg.
+      - { name: bg_layer, type: rect, x: 0, y: 0, width: 1280, height: 720,
+          color: 0x00000000, bg_color: 0x080B12FF }
+      - { name: title_lbl, type: label, x: 20, y: 92, width: 300, height: 34, anchor: left,
+          valign: center, font_size: 20, color: 0xEECC88FF, label: "Agenten" }
+      - { name: token_btn, type: button, x: 520, y: 92, width: 200, height: 34,
+          bg_color: 0x1A2030FF, border_color: 0x88BBEEFF, border_width: 1.0, corner_radius: 4.0,
+          hover_color: 0xFFFFFFFF, active_color: 0xAADDFFFF, color: 0xAADDFFFF, font_size: 13,
+          label: "Token verwalten" }
+      - { name: prov_btn, type: button, x: 730, y: 92, width: 210, height: 34,
+          bg_color: 0x16202CFF, border_color: 0x88BBEEFF, border_width: 1.0, corner_radius: 4.0,
+          hover_color: 0xFFCC88FF, active_color: 0xFF9944FF, color: 0xFFFFFFFF, font_size: 13,
+          label: "Agent einrichten" }
+
+      - { name: cols_name, type: label, x: 32, y: 134, width: 250, height: 18, anchor: left,
+          font_size: 11, color: 0x6A7889FF, label: "AGENT" }
+      - { name: cols_labs, type: label, x: 296, y: 134, width: 220, height: 18, anchor: left,
+          font_size: 11, color: 0x6A7889FF, label: "ETIKETTEN" }
+      - { name: cols_seen, type: label, x: 524, y: 134, width: 160, height: 18, anchor: left,
+          font_size: 11, color: 0x6A7889FF, label: "ZULETZT GESEHEN" }
+      - { name: cols_work, type: label, x: 690, y: 134, width: 200, height: 18, anchor: left,
+          font_size: 11, color: 0x6A7889FF, label: "TUT GERADE" }
+      # doc/spec/109 R4: eine Spalte braucht eine Ueberschrift, sonst raet der Leser,
+      # was „34% · 180 MB" bedeutet.
+      - { name: cols_load, type: label, x: 920, y: 134, width: 160, height: 18, anchor: left,
+          font_size: 11, color: 0x6A7889FF, label: "LAST (CPU · RAM)" }
+      - { name: agents_list, type: container, x: 20, y: 156, width: 1240, height: 396,
+          spawn: AgentRow, layout: vflow, gap: 4, scrollable: true }
+      - { name: agents_none, type: label, x: 32, y: 164, width: 880, height: 22, anchor: left,
+          font_size: 13, color: 0x7A8899FF, label: "" }
+
+      - { name: detail_hdr, type: label, x: 20, y: 562, width: 1240, height: 20, anchor: left,
+          font_size: 14, color: 0xAADDFFFF, label: "Ausgewählter Agent" }
+      - { name: detail_box, type: textbox, font: "mono", bg_color: 0x0D1218FF,
+          border_color: 0x2D3642FF, border_width: 1.0, corner_radius: 4.0,
+          x: 20, y: 584, width: 1240, height: 66, font_size: 12, color: 0xDDE6F0FF }
+      - { name: status_lbl, type: label, x: 20, y: 654, width: 1240, height: 20, anchor: left,
+          valign: center, font_size: 12, color: 0xFFAA88FF, label: "" }
+
+# ── AgentRow — eine Zeile der Agentenliste ─────────────────────────────────
+- prefab:
+    name: AgentRow
+    width: 1220
+    height: 38
+    children:
+      - { name: row_backg, type: rect, x: 0, y: 0, width: 1220, height: 38,
+          color: 0x00000000, bg_color: 0x111826FF, corner_radius: 4.0 }
+      - { name: click_area, type: button, x: 0, y: 0, width: 1220, height: 38,
+          bg_color: 0x00000000, hover_color: 0x1C2A48FF, active_color: 0x24345AFF,
+          corner_radius: 4.0, color: 0x00000000, font_size: 1, label: "" }
+      - { name: stat_dotx, type: rect, x: 12, y: 13, width: 12, height: 12,
+          color: 0x00000000, bg_color: 0x667788FF, corner_radius: 6.0 }
+      - { name: name_lblx, type: label, x: 34, y: 0, width: 250, height: 38, anchor: left,
+          valign: center, font_size: 13, color: 0xDDE6F0FF, label: "" }
+      - { name: labs_lblx, type: label, x: 288, y: 0, width: 220, height: 38, anchor: left,
+          valign: center, font_size: 12, color: 0xAADDFFFF, label: "" }
+      - { name: seen_lblx, type: label, x: 512, y: 0, width: 160, height: 38, anchor: left,
+          valign: center, font_size: 12, color: 0x7A8899FF, label: "" }
+      # doc/spec/109 R4: die gemeldete Last des Agenten.  Eigene Spalte, damit sie
+      # nicht mit „was laeuft gerade" verwechselt wird — Auslastung und Auftrag sind
+      # zwei Aussagen.
+      - { name: load_lblx, type: label, x: 900, y: 0, width: 150, height: 38, anchor: left,
+          font_size: 12, color: 0x8FA6BDFF, label: "k. A." }
+      - { name: work_lblx, type: label, x: 676, y: 0, width: 110, height: 38, anchor: left,
+          valign: center, font_size: 12, color: 0xFFCC88FF, label: "" }
+      # Erneuern GEHOERT in die Zeile: ein Knopf unten, der sich auf eine
+      # Auswahl bezieht, laesst offen, WEN er trifft (User 2026-10-15).
+      # Liegt ueber click_area und faengt seinen Klick selbst ab.
+      - { name: updat_btn, type: button, x: 790, y: 5, width: 98, height: 28,
+          bg_color: 0x16202CFF, border_color: 0x88BBEEFF, border_width: 1.0, corner_radius: 4.0,
+          hover_color: 0xFFCC88FF, active_color: 0xFF9944FF, color: 0xFFFFFFFF,
+          font_size: 12, label: "Erneuern" }
+
+- prefab:
+    name: AgentTokenOverlay
+    width: 1280
+    height: 720
+    children:
+      - { name: shade, type: rect, x: 0, y: 0, width: 1280, height: 720,
+          color: 0x00000000, bg_color: 0x000000CC }
+      - { name: panel_bg, type: rect, x: 240, y: 90, width: 800, height: 540,
+          color: 0x00000000, bg_color: 0x0A0F1AF7,
+          border_color: 0x6688AAFF, border_width: 2.0, corner_radius: 10.0 }
+      - { name: panel_title, type: label, x: 240, y: 104, width: 800, height: 28, anchor: center,
+          valign: center, font_size: 19, color: 0xEECC88FF, label: "Agent-Tokens" }
+      - { name: close_btn, type: button, x: 940, y: 100, width: 80, height: 30,
+          bg_color: 0x2A1420FF, border_color: 0xCC88EEFF, border_width: 1.0, corner_radius: 4.0,
+          hover_color: 0xFFAACCFF, active_color: 0xDD6699FF, color: 0xFFFFFFFF, font_size: 13, label: "Zu" }
+      - { name: hint_lbl, type: textbox, x: 270, y: 142, width: 740, height: 34,
+          font_size: 12, color: 0xAADDFFFF }
+      - { name: label_lbl, type: label, x: 270, y: 186, anchor: left,
+          font_size: 12, color: 0xCCCCCCFF, label: "Bezeichnung (z.B. builder-1)" }
+      - { name: label_input, type: text_input, x: 270, y: 206, width: 460, height: 30,
+          bg_color: 0x1A2030FF, border_color: 0x6688AAFF, border_width: 1.5,
+          corner_radius: 4.0, color: 0xFFFFFFFF, font_size: 13 }
+      - { name: create_btn, type: button, x: 750, y: 204, width: 160, height: 34,
+          bg_color: 0x1A2030FF, border_color: 0x88BBEEFF, border_width: 1.5, corner_radius: 6.0,
+          hover_color: 0xFFCC88FF, active_color: 0xFF9944FF, color: 0xFFFFFFFF, font_size: 14, label: "Erzeugen" }
+      # Die FERTIGE Startzeile (echter Host, echtes Token) — beim Erzeugen
+      # vorausgewählt, damit ein Ctrl+C genau das liefert, was ins Terminal
+      # gehört.  Keine Platzhalter zum Selbst-Ersetzen.
+      - { name: secret_box, type: textbox, x: 270, y: 246, width: 740, height: 52,
+          bg_color: 0x12221AFF, border_color: 0x66AA88FF, border_width: 1.5,
+          corner_radius: 4.0, font_size: 12, color: 0x99FFBBFF }
+      - { name: start_box, type: textbox, x: 270, y: 302, width: 740, height: 46,
+          font_size: 11, color: 0x88CCAAFF }
+      - { name: list_hdr, type: label, x: 270, y: 354, width: 500, height: 20, anchor: left,
+          font_size: 14, color: 0xAADDFFFF, label: "Vorhandene Tokens" }
+      - { name: list_box, type: textbox, x: 270, y: 378, width: 740, height: 160,
+          font_size: 12, color: 0xDDE6F0FF }
+      - { name: revoke_lbl, type: label, x: 270, y: 548, anchor: left,
+          font_size: 12, color: 0xCCCCCCFF, label: "Token-ID widerrufen" }
+      - { name: revoke_input, type: text_input, x: 270, y: 568, width: 460, height: 30,
+          bg_color: 0x1A2030FF, border_color: 0x6688AAFF, border_width: 1.5,
+          corner_radius: 4.0, color: 0xFFFFFFFF, font_size: 13 }
+      - { name: revoke_btn, type: button, x: 750, y: 566, width: 160, height: 34,
+          bg_color: 0x2A1420FF, border_color: 0xCC88EEFF, border_width: 1.5, corner_radius: 6.0,
+          hover_color: 0xFFAACCFF, active_color: 0xDD6699FF, color: 0xFFFFFFFF, font_size: 14, label: "Widerrufen" }
+
+# ── ProvisionOverlay (doc/spec/94 §94.5a) — Agent auf einem Knoten einrichten.
+#    Zweistufig: erst den Host-Key holen und ANZEIGEN, dann nach Bestätigung
+#    einrichten.  Der Fingerprint muss gesehen werden, bevor das sudo-Passwort
+#    das Haus verlässt — sonst bekäme ihn ein Zwischenmann (§94.3 S4). ─────────
+- prefab:
+    name: ProvisionOverlay
+    width: 1280
+    height: 720
+    children:
+      - { name: shade, type: rect, x: 0, y: 0, width: 1280, height: 720,
+          color: 0x00000000, bg_color: 0x000000CC }
+      - { name: panel_bg, type: rect, x: 220, y: 70, width: 840, height: 580,
+          color: 0x00000000, bg_color: 0x0A0F1AF7,
+          border_color: 0x6688AAFF, border_width: 2.0, corner_radius: 10.0 }
+      - { name: panel_title, type: label, x: 220, y: 84, width: 840, height: 28, anchor: center,
+          valign: center, font_size: 19, color: 0xEECC88FF, label: "Agent einrichten" }
+      - { name: close_btn, type: button, x: 960, y: 80, width: 80, height: 30,
+          bg_color: 0x2A1420FF, border_color: 0xCC88EEFF, border_width: 1.0, corner_radius: 4.0,
+          hover_color: 0xFFAACCFF, active_color: 0xDD6699FF, color: 0xFFFFFFFF, font_size: 13, label: "Zu" }
+      - { name: hint_lbl, type: textbox, x: 250, y: 120, width: 780, height: 46,
+          font_size: 12, color: 0xAADDFFFF }
+
+      - { name: host_lbl, type: label, x: 250, y: 176, anchor: left,
+          font_size: 12, color: 0xCCCCCCFF, label: "Host" }
+      - { name: host_input, type: text_input, x: 250, y: 196, width: 420, height: 30,
+          bg_color: 0x1A2030FF, border_color: 0x6688AAFF, border_width: 1.5,
+          corner_radius: 4.0, color: 0xFFFFFFFF, font_size: 13 }
+      - { name: port_lbl, type: label, x: 690, y: 176, anchor: left,
+          font_size: 12, color: 0xCCCCCCFF, label: "Port" }
+      - { name: port_input, type: text_input, x: 690, y: 196, width: 110, height: 30,
+          bg_color: 0x1A2030FF, border_color: 0x6688AAFF, border_width: 1.5,
+          corner_radius: 4.0, color: 0xFFFFFFFF, font_size: 13 }
+      # Der Name IST die Kennung des Agenten (`--agent-id`) und zugleich die
+      # Beschriftung seines Tokens — zwei Felder fuer dieselbe Sache waeren
+      # zwei Gelegenheiten, sie verschieden zu fuellen.
+      - { name: label_lbl, type: label, x: 820, y: 176, anchor: left,
+          font_size: 12, color: 0xCCCCCCFF, label: "Name des Agenten" }
+      - { name: label_input, type: text_input, x: 820, y: 196, width: 190, height: 30,
+          bg_color: 0x1A2030FF, border_color: 0x6688AAFF, border_width: 1.5,
+          corner_radius: 4.0, color: 0xFFFFFFFF, font_size: 13 }
+
+      - { name: labs_lbl, type: label, x: 250, y: 296, anchor: left,
+          font_size: 12, color: 0xCCCCCCFF, label: "Etiketten (komma)" }
+      - { name: labs_input, type: text_input, x: 250, y: 316, width: 420, height: 30,
+          bg_color: 0x1A2030FF, border_color: 0x6688AAFF, border_width: 1.5,
+          corner_radius: 4.0, color: 0xFFFFFFFF, font_size: 13 }
+      - { name: user_lbl, type: label, x: 250, y: 236, anchor: left,
+          font_size: 12, color: 0xCCCCCCFF, label: "SSH-Konto" }
+      - { name: user_input, type: text_input, x: 250, y: 256, width: 240, height: 30,
+          bg_color: 0x1A2030FF, border_color: 0x6688AAFF, border_width: 1.5,
+          corner_radius: 4.0, color: 0xFFFFFFFF, font_size: 13 }
+      - { name: pw_lbl, type: label, x: 510, y: 236, anchor: left,
+          font_size: 12, color: 0xCCCCCCFF, label: "SSH-Passwort (leer = Schlüssel)" }
+      - { name: pw_input, type: text_input, x: 510, y: 256, width: 240, height: 30, secret: true,
+          bg_color: 0x1A2030FF, border_color: 0x6688AAFF, border_width: 1.5,
+          corner_radius: 4.0, color: 0xFFFFFFFF, font_size: 13 }
+      - { name: sudo_lbl, type: label, x: 770, y: 236, anchor: left,
+          font_size: 12, color: 0xFFCC88FF, label: "sudo-Passwort (leer = wie SSH)" }
+      - { name: sudo_input, type: text_input, x: 770, y: 256, width: 240, height: 30, secret: true,
+          bg_color: 0x2A2010FF, border_color: 0xCCAA66FF, border_width: 1.5,
+          corner_radius: 4.0, color: 0xFFFFFFFF, font_size: 13 }
+
+      # Schritt 1
+      - { name: probe_btn, type: button, x: 250, y: 358, width: 250, height: 36,
+          bg_color: 0x1A2030FF, border_color: 0x88BBEEFF, border_width: 1.5, corner_radius: 6.0,
+          hover_color: 0xFFFFFFFF, active_color: 0xAADDFFFF, color: 0xAADDFFFF, font_size: 14,
+          label: "1. Host-Key holen" }
+      # Der Fingerprint zum Hinsehen — nicht zum Wegklicken.
+      - { name: fp_box, type: textbox, x: 250, y: 402, width: 760, height: 40,
+          bg_color: 0x12221AFF, border_color: 0x66AA88FF, border_width: 1.5,
+          corner_radius: 4.0, font_size: 12, color: 0x99FFBBFF }
+      # Schritt 2
+      - { name: install_btn, type: button, x: 250, y: 452, width: 320, height: 38,
+          bg_color: 0x1A2030FF, border_color: 0x88BBEEFF, border_width: 1.5, corner_radius: 6.0,
+          hover_color: 0xFFCC88FF, active_color: 0xFF9944FF, color: 0xFFFFFFFF, font_size: 14,
+          label: "2. Bestätigen und einrichten" }
+      # Rückbau: nimmt alles wieder weg, was die Einrichtung angelegt hat, und
+      # widerruft das Token am Server.  Die Token-ID wird nach einer
+      # erfolgreichen Einrichtung vorbelegt — ohne sie bleibt das Token gültig,
+      # und genau das ist der Punkt, den man leicht vergisst (§94.5b).
+      - { name: tokid_lbl, type: label, x: 600, y: 456, anchor: left,
+          font_size: 11, color: 0xCCCCCCFF, label: "Token-ID (wird widerrufen)" }
+      - { name: tokid_input, type: text_input, x: 600, y: 474, width: 200, height: 26,
+          bg_color: 0x1A2030FF, border_color: 0x6688AAFF, border_width: 1.5,
+          corner_radius: 4.0, color: 0xFFFFFFFF, font_size: 12 }
+      - { name: teardown_btn, type: button, x: 820, y: 452, width: 190, height: 38,
+          bg_color: 0x2A1420FF, border_color: 0xCC88EEFF, border_width: 1.5, corner_radius: 6.0,
+          hover_color: 0xFFAACCFF, active_color: 0xDD6699FF, color: 0xFFFFFFFF, font_size: 14,
+          label: "Rückbau" }
+      - { name: status_box, type: textbox, x: 250, y: 500, width: 760, height: 140,
+          font_size: 12, color: 0xDDE6F0FF }
+
+
+# ── PipelineScene (doc/spec/98) — Quell-Betrachter + Befundliste.
+#    src_box ist heute ein textbox (mehrzeilig, scrollbar, NUR LESBAR): das ist
+#    der Stand, bis ui.text_area Gutter + Farb-Läufe hat (98 F98-2/F98-3).
+- prefab:
+    name: PipelineScene
+    width: 1280
+    height: 720
+    children:
+      # doc/spec/107 F107-8: die Huelle besitzt Kopf (y<84), rechte Spalte
+      # (x>=960) und Fusszeile (y>=684) — hier wird NUR in x 20..940 / y 92..676
+      # gezeichnet.  Vorher lag der ganze Kopf dieser Szene (inkl. Start-Knopf)
+      # unter der Navigationsleiste und war nicht erreichbar.
+      - { name: bg_layer, type: rect, x: 0, y: 0, width: 1280, height: 720,
+          color: 0x00000000, bg_color: 0x080B12FF }
+
+      # ── Kopf der Job-Seite ────────────────────────────────────────────────
+      - { name: title_lbl, type: label, x: 20, y: 92, width: 170, height: 40, anchor: left,
+          valign: center, font_size: 18, color: 0xEECC88FF, label: "Job" }
+      - { name: name_input, type: text_input, x: 196, y: 92, width: 230, height: 40,
+          bg_color: 0x0D1218FF, border_color: 0x2D3642FF, border_width: 1.0,
+          corner_radius: 4.0, color: 0xFFFFFFFF, font_size: 14 }
+      # doc/spec/106 G2: der Auslöser gehoert ins Formular — ohne dieses Feld
+      # konnte `interval_s` niemand setzen und der Zeitplan nie greifen.
+      - { name: intvl_lbl, type: label, x: 436, y: 92, width: 92, height: 40, anchor: right,
+          valign: center, font_size: 12, color: 0x9FB4CCFF, label: "alle … s:" }
+      - { name: intvl_inpt, type: text_input, x: 536, y: 92, width: 66, height: 40,
+          bg_color: 0x0D1218FF, border_color: 0x2D3642FF, border_width: 1.0,
+          corner_radius: 4.0, color: 0xFFFFFFFF, font_size: 14 }
+      # doc/spec/106 §106.3a: das Beispiel ERREICHBAR machen.  Es stand nur
+      # beim Anlegen eines neuen Jobs im Feld; wer eine aeltere Quelle vor sich
+      # hatte, musste die neue Form abschreiben, statt sie einsetzen zu koennen.
+      # Der Rueckweg.  Ohne ihn war die Quelle eine Sackgasse: hinein kam man
+      # ueber „Quelle…" in der Job-Ansicht, hinaus nur ueber die Navigation —
+      # und die fuehrte zur Job-LISTE, nicht zu dem Job, den man gerade vor
+      # sich hatte (gemeldet 22.10.2026).
+      - { name: tojob_btn, type: button, x: 700, y: 92, width: 110, height: 40,
+          bg_color: 0x1A2230FF, border_color: 0x3C5A7AFF, border_width: 1.0, corner_radius: 6.0,
+          font_size: 14, color: 0xBFD8EEFF, label: "← Job" }
+      # doc/spec/106 §106.6a: der dritte Reiter.  Er steht hier NEBEN „← Job",
+      # weil dieser Kopf ein Formular traegt (Name, Intervall) und keine freie
+      # Leiste — drei gleich aussehende Reiter haetten das Formular verdeckt.
+      - { name: tab_prmx, type: button, x: 608, y: 92, width: 86, height: 40,
+          bg_color: 0x1A2030FF, border_color: 0x3D5A77FF, border_width: 1.0, corner_radius: 6.0,
+          hover_color: 0xFFFFFFFF, active_color: 0xAADDFFFF, color: 0x9FB4CCFF, font_size: 12,
+          label: "Param." }
+      - { name: sample_btn, type: button, x: 820, y: 92, width: 104, height: 40,
+          bg_color: 0x1A2030FF, border_color: 0x6A7889FF, border_width: 1.0, corner_radius: 6.0,
+          hover_color: 0xFFFFFFFF, active_color: 0xAADDFFFF, color: 0x9FB4CCFF, font_size: 13,
+          label: "Beispiel" }
+      - { name: save_btn, type: button, x: 934, y: 92, width: 104, height: 40,
+          bg_color: 0x16202CFF, border_color: 0x88BBEEFF, border_width: 1.5, corner_radius: 6.0,
+          hover_color: 0xFFCC88FF, active_color: 0xFF9944FF, color: 0xFFFFFFFF, font_size: 14,
+          label: "Speichern" }
+      - { name: check_btn, type: button, x: 1048, y: 92, width: 96, height: 40,
+          bg_color: 0x1A2030FF, border_color: 0x88BBEEFF, border_width: 1.5, corner_radius: 6.0,
+          hover_color: 0xFFFFFFFF, active_color: 0xAADDFFFF, color: 0xAADDFFFF, font_size: 14,
+          label: "Prüfen" }
+      - { name: start_btn, type: button, x: 1154, y: 92, width: 106, height: 40,
+          bg_color: 0x16301EFF, border_color: 0x88EEAAFF, border_width: 1.5, corner_radius: 6.0,
+          hover_color: 0xFFFFFFFF, active_color: 0xAAFFCCFF, color: 0xAAFFCCFF, font_size: 14,
+          label: "Starten" }
+      - { name: status_lbl, type: label, x: 20, y: 136, width: 1240, height: 20, anchor: left,
+          valign: center, font_size: 12, color: 0xFFAA88FF, label: "" }
+
+      # ── Quelle ────────────────────────────────────────────────────────────
+      - { name: src_hdr, type: label, x: 20, y: 162, width: 1240, height: 22, anchor: left,
+          font_size: 15, color: 0xAADDFFFF, label: "Quelle" }
+      # Editierbares Codefeld: text_input ist ab ~1.8 Zeilenhoehen mehrzeilig
+      # (spec/44_6 §5g) — gutter fuer Zeilennummern, Farben ueber set_color_runs.
+      # Kein Umbruch (aiml spec/44_6 §5f): YAML hat Einrueckung und Spalten —
+      # eine umgebrochene Zeile zerstoert genau das, was man beim Lesen braucht.
+      - { name: src_box, type: text_input, font: "mono", gutter: true, wrap: false,
+          bg_color: 0x0D1218FF, border_color: 0x2D3642FF, border_width: 1.0, corner_radius: 4.0,
+          x: 20, y: 186, width: 1240, height: 380, font_size: 13, color: 0xDDE6F0FF }
+
+      # Die LAEUFE stehen nicht mehr hier: sie haben seit F107-10 ihre eigene
+      # Spalte auf der Lauf-Ansicht.  Diese Seite ist der Quelltext — und
+      # waehrend man ihn schreibt, zaehlen die Befunde, nicht die Geschichte.
+      - { name: diag_hdr, type: label, x: 20, y: 576, width: 1240, height: 22, anchor: left,
+          font_size: 15, color: 0xAADDFFFF, label: "Befunde" }
+      - { name: diag_box, type: textbox, font: "mono", bg_color: 0x0D1218FF,
+          border_color: 0x2D3642FF, border_width: 1.0, corner_radius: 4.0,
+          x: 20, y: 600, width: 1240, height: 72, font_size: 12, color: 0xFFBBAAFF }
+
+# ── UsersScene (doc/spec/108 §2, Bereich seit doc/spec/107 §107.6) ─────────
+# Rechtevergabe: wer ist da, was darf er, und eine Zeile zum Aendern.
+#
+# Ein BEREICH wie Agenten und Jobs (F107-28), kein Overlay: wer Freigaben setzt,
+# arbeitet hier.  Darum voller Platz, undurchsichtiger Hintergrund, Rueckweg
+# ueber den Kopf — und kein X, das neben einer Reiterleiste ein zweiter Rueckweg
+# waere.
+#
+# Eine LISTE, kein Textkasten (doc/spec/107 F107-1): Konten mit Zustand sind genau
+# der Fall, fuer den ein Textfeld die Notloesung ist.
+#
+# Die Richtung steht als Hinweis im Kopf, weil sie sich jeder merken muss und niemand
+# sie sich merkt: KLEINER = MEHR Recht (spec/65 F65-4, `clearance <= level`).
+- prefab:
+    name: UsersScene
+    width: 1280
+    height: 720
+    children:
+      - { name: bg_layer, type: rect, x: 0, y: 0, width: 1280, height: 720,
+          color: 0x00000000, bg_color: 0x080B12FF }
+      - { name: title, type: label, x: 20, y: 92, width: 360, height: 34, anchor: left,
+          valign: center, font_size: 20, color: 0xEECC88FF, label: "Konten und Freigaben" }
+      - { name: hint_lbl, type: label, x: 390, y: 92, width: 860, height: 34, anchor: left,
+          valign: center, font_size: 12, color: 0x8FA6BDFF,
+          label: "Kleinere Zahl = mehr Recht.  1 = Admin, 255 = am stärksten eingeschränkt." }
+
+      # Drei Beschriftungen, GENAU ueber den Spalten von `UserRow` (x + 32 des
+      # Kastens).  Eine einzige mit Leerzeichen dazwischen sitzt bei jeder
+      # Schriftbreite woanders — gemessen am ersten Rendering.
+      - { name: head_lbl, type: label, x: 42, y: 136, width: 400, height: 18, anchor: left,
+          font_size: 12, color: 0x6A7B8CFF, label: "Konto" }
+      - { name: head_nick, type: label, x: 618, y: 136, width: 300, height: 18, anchor: left,
+          font_size: 12, color: 0x6A7B8CFF, label: "Name" }
+      - { name: head_lvl, type: label, x: 1014, y: 136, width: 200, height: 18, anchor: left,
+          font_size: 12, color: 0x6A7B8CFF, label: "Freigabe" }
+      - { name: rows_box, type: container, x: 32, y: 160, width: 1216, height: 420,
+          bind_list: "users", spawn: UserRow, layout: vflow, gap: 4, scrollable: true }
+
+      - { name: tgt_lbl, type: label, x: 32, y: 600, width: 200, height: 24, anchor: left,
+          font_size: 13, color: 0xAADDFFFF, label: "Konto" }
+      - { name: tgt_input, type: text_input, x: 32, y: 624, width: 420, height: 32,
+          bg_color: 0x1A2030FF, border_color: 0x6688AAFF, border_width: 1.5,
+          corner_radius: 4.0, font_size: 13, color: 0xDDE6F0FF }
+      - { name: lvl_lbl, type: label, x: 470, y: 600, width: 120, height: 24, anchor: left,
+          font_size: 13, color: 0xAADDFFFF, label: "Freigabe" }
+      - { name: lvl_input, type: text_input, x: 470, y: 624, width: 100, height: 32,
+          bg_color: 0x1A2030FF, border_color: 0x6688AAFF, border_width: 1.5,
+          corner_radius: 4.0, font_size: 13, color: 0xDDE6F0FF }
+      - { name: apply_btn, type: button, x: 588, y: 624, width: 192, height: 32,
+          label: "Freigabe setzen", font_size: 13, color: 0xDDE6F0FF,
+          bg_color: 0x1E4F7AFF, border_color: 0x88BBEEFF, border_width: 1.0,
+          corner_radius: 4.0 }
+      - { name: msg_lbl, type: label, x: 800, y: 624, width: 448, height: 32, anchor: left,
+          valign: center, font_size: 12, color: 0xFFBBAAFF, label: "" }
+
+# Eine Zeile der Kontenliste.
+- prefab:
+    name: UserRow
+    width: 1200
+    height: 28
+    children:
+      - { name: row_bg, type: rect, x: 0, y: 0, width: 1200, height: 28,
+          color: 0x00000000, bg_color: 0x121A24FF, corner_radius: 3.0 }
+      - { name: pick_area, type: button, x: 0, y: 0, width: 1200, height: 28,
+          label: "", bg_color: 0x00000000, border_color: 0x00000000, border_width: 0.0 }
+      - { name: mail_lbl, type: label, x: 10, y: 0, width: 560, height: 28, anchor: left,
+          font_size: 12, color: 0xDDE6F0FF, label: "" }
+      - { name: nick_lbl, type: label, x: 586, y: 0, width: 380, height: 28, anchor: left,
+          font_size: 12, color: 0x8FA6BDFF, label: "" }
+      - { name: lvl_cell, type: label, x: 982, y: 0, width: 200, height: 28, anchor: left,
+          font_size: 12, color: 0xAADDFFFF, label: "" }
+
+# ── ControllerScene (doc/spec/108 + 109) ───────────────────────────────────
+# Der Reiter des CONTROLLERS: was er gerade tut, und die Skript-Konsole.
+#
+# Anlass (User 2026-10-18): „die ressourcen des controller unten in der leiste bei den
+# agenten ist sehr verwirrend" und „wo die script-console zu finden ist, weiss ich
+# generell nicht".  Beides hatte dieselbe Ursache — die Last stand in der Fusszeile
+# zwischen Agenten-Zahlen, und der Konsolen-Reiter war fuer Nicht-Admins AUSGEBLENDET.
+# Ein Bedienelement, das man nur sieht, wenn man schon das Recht hat, kann niemand
+# finden, der es noch nicht hat.
+#
+# Darum: der Reiter ist IMMER da, und ohne Freigabe erklaert er, was fehlt.
+#
+# Die vier Zahlen sind Stat-Tiles, kein Diagramm: eine einzelne Kennzahl braucht keine
+# Achse.  Beschriftung in gedaempftem Text, Wert in Haupttext — Statusfarben bleiben
+# dem ZUSTAND vorbehalten und stehen nie allein (immer mit Wort daneben).
+- prefab:
+    name: ControllerScene
+    width: 1280
+    height: 720
+    children:
+      - { name: bg_layer, type: rect, x: 0, y: 0, width: 1280, height: 720,
+          color: 0x00000000, bg_color: 0x080B12FF }
+
+      - { name: title_lbl, type: label, x: 20, y: 92, width: 420, height: 32, anchor: left,
+          font_size: 20, color: 0xDDE6F0FF, label: "Controller" }
+      - { name: host_lbl, type: label, x: 440, y: 92, width: 600, height: 32, anchor: left,
+          font_size: 12, color: 0x6A7889FF, label: "" }
+
+      # ── Kennzahlen ────────────────────────────────────────────────────────
+      - { name: tile_cpu, type: rect, x: 20, y: 128, width: 302, height: 64,
+          color: 0x00000000, bg_color: 0x0E141CFF, border_color: 0x1E2733FF,
+          border_width: 1.0, corner_radius: 5.0 }
+      - { name: cpu_cap, type: label, x: 36, y: 134, width: 270, height: 16, anchor: left,
+          font_size: 11, color: 0x6A7889FF, label: "PROZESSOR" }
+      - { name: cpu_val, type: label, x: 36, y: 152, width: 270, height: 32, anchor: left,
+          font_size: 20, color: 0xDDE6F0FF, label: "—" }
+
+      - { name: tile_ram, type: rect, x: 332, y: 128, width: 302, height: 64,
+          color: 0x00000000, bg_color: 0x0E141CFF, border_color: 0x1E2733FF,
+          border_width: 1.0, corner_radius: 5.0 }
+      - { name: ram_cap, type: label, x: 348, y: 134, width: 270, height: 16, anchor: left,
+          font_size: 11, color: 0x6A7889FF, label: "ARBEITSSPEICHER" }
+      - { name: ram_val, type: label, x: 348, y: 152, width: 270, height: 32, anchor: left,
+          font_size: 20, color: 0xDDE6F0FF, label: "—" }
+
+      - { name: tile_agt, type: rect, x: 644, y: 128, width: 302, height: 64,
+          color: 0x00000000, bg_color: 0x0E141CFF, border_color: 0x1E2733FF,
+          border_width: 1.0, corner_radius: 5.0 }
+      - { name: agt_cap, type: label, x: 660, y: 134, width: 270, height: 16, anchor: left,
+          font_size: 11, color: 0x6A7889FF, label: "AGENTEN VERBUNDEN" }
+      - { name: agt_val, type: label, x: 660, y: 152, width: 270, height: 32, anchor: left,
+          font_size: 20, color: 0xDDE6F0FF, label: "—" }
+
+      - { name: tile_run, type: rect, x: 956, y: 128, width: 302, height: 64,
+          color: 0x00000000, bg_color: 0x0E141CFF, border_color: 0x1E2733FF,
+          border_width: 1.0, corner_radius: 5.0 }
+      - { name: run_cap, type: label, x: 972, y: 134, width: 270, height: 16, anchor: left,
+          font_size: 11, color: 0x6A7889FF, label: "LÄUFE AKTIV" }
+      - { name: run_val, type: label, x: 972, y: 152, width: 270, height: 32, anchor: left,
+          font_size: 20, color: 0xDDE6F0FF, label: "—" }
+
+      # ── Skript-Konsole ────────────────────────────────────────────────────
+      - { name: cons_hdr, type: label, x: 20, y: 206, width: 260, height: 24, anchor: left,
+          font_size: 15, color: 0xAADDFFFF, label: "Skript-Konsole" }
+      # Die Freigabe steht SICHTBAR da — und wenn sie nicht reicht, steht hier auch,
+      # was zu tun ist.  Level sind nicht geheim (spec/65 F65-16), und eine Sperre
+      # ohne Weg heraus ist eine Sackgasse.
+      - { name: clear_lbl, type: label, x: 288, y: 206, width: 740, height: 24, anchor: left,
+          font_size: 12, color: 0x8FA6BDFF, label: "Freigabe: ·" }
+
+      - { name: run_btn, type: button, x: 1048, y: 200, width: 96, height: 32,
+          label: "Ausführen", font_size: 14, color: 0xDDE6F0FF,
+          bg_color: 0x1E6F3AFF, border_color: 0x2D8A4BFF, border_width: 1.0,
+          corner_radius: 4.0 }
+      - { name: clear_btn, type: button, x: 1154, y: 200, width: 104, height: 32,
+          label: "Leeren", font_size: 14, color: 0xDDE6F0FF,
+          bg_color: 0x1A2230FF, border_color: 0x2D3642FF, border_width: 1.0,
+          corner_radius: 4.0 }
+
+      - { name: status_lbl, type: label, x: 20, y: 238, width: 1240, height: 18, anchor: left,
+          font_size: 12, color: 0x88A0B8FF, label: "bereit" }
+
+      # Derselbe Editor wie in der PipelineScene: `text_input`, mono, mit Gutter
+      # (aiml spec/44_6 §5g).  Zwei Code-Felder mit zwei Verhalten waeren die
+      # eigentliche Verschwendung.
+      # Kein Umbruch (aiml spec/44_6 §5f): YAML hat Einrueckung und Spalten —
+      # eine umgebrochene Zeile zerstoert genau das, was man beim Lesen braucht.
+      - { name: src_box, type: text_input, font: "mono", gutter: true, wrap: false,
+          bg_color: 0x0D1218FF, border_color: 0x2D3642FF, border_width: 1.0, corner_radius: 4.0,
+          x: 20, y: 260, width: 1240, height: 236, font_size: 13, color: 0xDDE6F0FF }
+
+      - { name: out_hdr, type: label, x: 20, y: 506, width: 610, height: 20, anchor: left,
+          font_size: 15, color: 0xAADDFFFF, label: "Ausgabe" }
+      - { name: out_box, type: textbox, font: "mono", bg_color: 0x0D1218FF,
+          border_color: 0x2D3642FF, border_width: 1.0, corner_radius: 4.0,
+          x: 20, y: 528, width: 610, height: 144, font_size: 12, color: 0xDDE6F0FF }
+
+      - { name: diag_hdr, type: label, x: 650, y: 506, width: 610, height: 20, anchor: left,
+          font_size: 15, color: 0xAADDFFFF, label: "Befunde" }
+      - { name: diag_box, type: textbox, font: "mono", bg_color: 0x0D1218FF,
+          border_color: 0x2D3642FF, border_width: 1.0, corner_radius: 4.0,
+          x: 650, y: 528, width: 610, height: 144, font_size: 12, color: 0xFFBBAAFF }
+
+# ── JobRunsScene (doc/spec/107 §107.1a, F107-10) ───────────────────────────
+# Die Job-Seite IST die Lauf-Ansicht: links die Laeufe, in der Mitte die
+# Ausgabe, rechts die Pipeline.  Der Reiter „Laeufe" ist damit weg — ein Lauf
+# ohne seinen Job war die Trennung, die wir loswerden wollten (F107-9).
+#
+# Gezeichnet wird nur in der Inhaltsflaeche x 20..940 / y 92..676 (F107-8);
+# Kopf, rechte Spalte und Fusszeile gehoeren der Huelle.
+- prefab:
+    name: JobRunsScene
+    width: 1280
+    height: 720
+    children:
+      - { name: bg_layer, type: rect, x: 0, y: 0, width: 1280, height: 720,
+          color: 0x00000000, bg_color: 0x080B12FF }
+
+      # ── Kopf: welcher Job, und was man mit ihm tun kann ─────────────────
+      - { name: title_lbl, type: label, x: 20, y: 92, width: 620, height: 40, anchor: left,
+          valign: center, font_size: 18, color: 0xEECC88FF, label: "Job" }
+      - { name: start_btn, type: button, x: 916, y: 96, width: 106, height: 34,
+          bg_color: 0x16301EFF, border_color: 0x88EEAAFF, border_width: 1.5, corner_radius: 6.0,
+          hover_color: 0xFFFFFFFF, active_color: 0xAAFFCCFF, color: 0xAAFFCCFF, font_size: 14,
+          label: "Starten" }
+      # Der Quelltext ist eine eigene Seite (§107.1a): drei Spalten UND ein
+      # Editor auf 584 px hiesse, beides zu quetschen.  Seit doc/spec/106
+      # §106.6a ist der Weg dorthin ein REITER und kein Knopf: es gibt drei
+      # Sichten auf denselben Job, und eine Leiste sagt, in welcher man steht.
+      # Der aktive Reiter traegt den helleren Rahmen.
+      - { name: tab_runsx, type: button, x: 556, y: 96, width: 106, height: 34,
+          bg_color: 0x16202CFF, border_color: 0x88BBEEFF, border_width: 1.5, corner_radius: 6.0,
+          hover_color: 0xFFFFFFFF, active_color: 0xAADDFFFF, color: 0xCFE4FFFF, font_size: 13,
+          label: "Läufe" }
+      - { name: tab_srcx, type: button, x: 670, y: 96, width: 106, height: 34,
+          bg_color: 0x1A2030FF, border_color: 0x3D5A77FF, border_width: 1.0, corner_radius: 6.0,
+          hover_color: 0xFFFFFFFF, active_color: 0xAADDFFFF, color: 0x9FB4CCFF, font_size: 13,
+          label: "Quelle" }
+      - { name: tab_prmx, type: button, x: 784, y: 96, width: 120, height: 34,
+          bg_color: 0x1A2030FF, border_color: 0x3D5A77FF, border_width: 1.0, corner_radius: 6.0,
+          hover_color: 0xFFFFFFFF, active_color: 0xAADDFFFF, color: 0x9FB4CCFF, font_size: 13,
+          label: "Parameter" }
+      - { name: back_btnx, type: button, x: 1148, y: 96, width: 112, height: 34,
+          bg_color: 0x1A2030FF, border_color: 0x3D5A77FF, border_width: 1.0, corner_radius: 6.0,
+          hover_color: 0xFFFFFFFF, active_color: 0xAADDFFFF, color: 0x9FB4CCFF, font_size: 13,
+          label: "← Jobs" }
+
+      # ── Spalte 1: die Laeufe dieses Jobs, neueste oben ─────────────────
+      # Die Flaechen liegen HINTER den Listen, damit die drei Spalten auch
+      # dann als Struktur lesbar sind, wenn eine davon leer ist.
+      - { name: runs_pane, type: rect, x: 20, y: 162, width: 250, height: 504,
+          color: 0x00000000, bg_color: 0x0A0E14FF, border_color: 0x2D3642FF,
+          border_width: 1.0, corner_radius: 4.0 }
+      - { name: graph_pane, type: rect, x: 902, y: 162, width: 358, height: 504,
+          color: 0x00000000, bg_color: 0x0A0E14FF, border_color: 0x2D3642FF,
+          border_width: 1.0, corner_radius: 4.0 }
+      - { name: runs_hdr, type: label, x: 20, y: 140, width: 250, height: 20, anchor: left,
+          font_size: 13, color: 0xAADDFFFF, label: "Läufe" }
+      - { name: runs_list, type: container, x: 24, y: 168, width: 242, height: 492,
+          spawn: RunRow, layout: vflow, gap: 4, scrollable: true }
+      - { name: runs_none, type: label, x: 26, y: 172, width: 240, height: 20, anchor: left,
+          font_size: 12, color: 0x7A8899FF, label: "" }
+
+      # ── Spalte 2: die Ausgabe des gewaehlten Schritts (F103-19) ────────
+      - { name: log_hdr, type: label, x: 286, y: 140, width: 600, height: 20, anchor: left,
+          font_size: 13, color: 0xAADDFFFF, label: "Ausgabe" }
+      # `wrap: false`: eine Zeile bleibt eine Zeile (aiml spec/44_6 §5f).  Ein
+      # Bau-Protokoll hat Spalten — Umbruch macht daraus Brei.  Dafuer scrollt
+      # die Box seitwaerts und zeigt zwei Balken.
+      - { name: log_box, type: textbox, font: "mono", tail: true, wrap: false,
+          bg_color: 0x0A0E14FF, border_color: 0x2D3642FF, border_width: 1.0, corner_radius: 4.0,
+          x: 286, y: 164, width: 600, height: 502, font_size: 12, color: 0xDDE6F0FF }
+      # ── Der BEFEHL der Stufe, einblendbar (User 22.10.2026) ────────────
+      # Er liegt UEBER der Ausgabe und darf sie verdecken: wer ihn sehen will,
+      # will ihn JETZT sehen, und danach ist die Ausgabe wieder da.  Eigene
+      # Box, weil er umbrechen soll (eine Shell-Zeile ist lang) — anders als
+      # die Ausgabe darunter.
+      - { name: cmd_btn, type: button, x: 806, y: 138, width: 80, height: 22,
+          bg_color: 0x16202CFF, border_color: 0x3C5A7AFF, border_width: 1.0, corner_radius: 4.0,
+          font_size: 11, color: 0xBFD8EEFF, label: "Befehl" }
+      # „Ab hier nochmal" fuer die GEWAEHLTE Stufe (doc/spec/101 §101.8).  Die
+      # Schichten der frueheren Stufen bleiben liegen und werden wieder
+      # aufgelegt — es ist eine Wiederholung, kein neuer Lauf.
+      - { name: again_btn, type: button, x: 626, y: 138, width: 172, height: 22,
+          bg_color: 0x20202EFF, border_color: 0x7A6AB0FF, border_width: 1.0, corner_radius: 4.0,
+          hover_color: 0xFFFFFFFF, active_color: 0xD8C8FFFF,
+          font_size: 11, color: 0xC9BEEBFF, label: "Stufe waehlen" }
+      # `visible: false`: erst auf Knopfdruck.  Eine Einblendung, die beim
+      # Start schon da ist, verdeckt die Ausgabe, ohne dass jemand sie wollte
+      # (gemessen 22.10.2026 an JobRunsScene.png — die obere Haelfte der
+      # Ausgabe war zugedeckt und sah leer aus).
+      - { name: cmd_box, type: textbox, font: "mono", visible: false,
+          bg_color: 0x0C1620F0, border_color: 0x4C7AA8FF, border_width: 1.0, corner_radius: 4.0,
+          x: 286, y: 164, width: 600, height: 150, font_size: 11, color: 0xCFE4FFFF }
+
+      # ── Spalte 3: die Pipeline, klickbar (F107-11) ─────────────────────
+      - { name: graph_hdr, type: label, x: 902, y: 140, width: 300, height: 20, anchor: left,
+          font_size: 13, color: 0xAADDFFFF, label: "Pipeline" }
+      # Der Raum ist in der Spalte 350 px breit — zum Drehen und Lesen zu wenig.
+      # Dieser Schalter gibt ihm die ganze Inhaltsflaeche (doc/spec/107 F107-15).
+      - { name: wide_btn, type: button, x: 1204, y: 138, width: 56, height: 22,
+          bg_color: 0x1A2030FF, border_color: 0x3D5A77FF, border_width: 1.0, corner_radius: 4.0,
+          hover_color: 0xFFFFFFFF, active_color: 0xAADDFFFF, color: 0x9FB4CCFF, font_size: 11,
+          label: "groß" }
+      - { name: graph_rows, type: container, x: 906, y: 168, width: 350, height: 436,
+          spawn: LaneRow, layout: vflow, gap: 8, scrollable: true }
+      - { name: graph_none, type: label, x: 908, y: 172, width: 348, height: 20, anchor: left,
+          font_size: 12, color: 0x7A8899FF, label: "" }
+      - { name: sel_lbl, type: label, x: 908, y: 610, width: 348, height: 52, anchor: left,
+          valign: top, font_size: 11, color: 0x9FB4CCFF, label: "" }
+
+# ── NodeTag — der Name einer Kugel im Raum (doc/spec/107 F107-16) ─────────
+# Eine EIGENE Instanz, kein Kind der Szene: Kinder lassen sich nicht bewegen
+# (`set_child_pos` gibt es nicht), Instanzen schon.  Sie schwebt ueber dem
+# 3D-Bild und wird je Rahmen an die projizierte Lage ihrer Kugel gesetzt.
+- prefab:
+    name: NodeTag
+    width: 120
+    height: 18
+    children:
+      - { name: tag_lblx, type: label, x: 0, y: 0, width: 120, height: 18, anchor: center,
+          valign: center, font_size: 11, color: 0xDDE6F0FF, label: "" }
+
+# ── RunRow — ein Lauf: Nummer und Datum (F107-10) ──────────────────────────
+- prefab:
+    name: RunRow
+    width: 242
+    height: 40
+    children:
+      - { name: row_backg, type: rect, x: 0, y: 0, width: 242, height: 40,
+          color: 0x00000000, bg_color: 0x111826FF, corner_radius: 4.0 }
+      - { name: click_area, type: button, x: 0, y: 0, width: 242, height: 40,
+          bg_color: 0x00000000, hover_color: 0x1C2A48FF, active_color: 0x24345AFF,
+          corner_radius: 4.0, color: 0x00000000, font_size: 1, label: "" }
+      - { name: stat_dotx, type: rect, x: 10, y: 14, width: 12, height: 12,
+          color: 0x00000000, bg_color: 0x667788FF, corner_radius: 6.0 }
+      - { name: num_lblx, type: label, x: 30, y: 0, width: 60, height: 40, anchor: left,
+          valign: center, font_size: 14, color: 0xDDE6F0FF, label: "" }
+      - { name: when_lblx, type: label, x: 92, y: 0, width: 144, height: 40, anchor: left,
+          valign: center, font_size: 11, color: 0xAADDFFFF, label: "" }
+
+# ── LaneRow — eine Lane des Gitters, ihre Schritte als Knoten ─────────────
+- prefab:
+    name: LaneRow
+    width: 350
+    height: 60
+    children:
+      - { name: lane_lblx, type: label, x: 2, y: 0, width: 346, height: 16, anchor: left,
+          font_size: 11, color: 0x7A8899FF, label: "" }
+      - { name: lane_nodes, type: container, x: 0, y: 20, width: 350, height: 40,
+          spawn: StageNode, layout: hflow, gap: 6 }
+
+# ── StageNode — ein Schritt im Graphen; ANKLICKBAR (F107-11) ──────────────
+# Ein Klick darauf fuellt die Mitte mit der Ausgabe genau dieses Schritts.
+- prefab:
+    name: StageNode
+    width: 76
+    height: 40
+    children:
+      - { name: node_bg, type: rect, x: 0, y: 0, width: 76, height: 40,
+          color: 0x00000000, bg_color: 0x1A2030FF, border_color: 0x3D5A77FF,
+          border_width: 1.0, corner_radius: 4.0 }
+      - { name: node_hit, type: button, x: 0, y: 0, width: 76, height: 40,
+          bg_color: 0x00000000, hover_color: 0x24345AFF, active_color: 0x2E4470FF,
+          corner_radius: 4.0, color: 0x00000000, font_size: 1, label: "" }
+      - { name: node_lblx, type: label, x: 0, y: 0, width: 76, height: 40, anchor: center,
+          valign: center, font_size: 11, color: 0xDDE6F0FF, label: "" }
+
+- prefab:
+    name: ShellScene
+    width: 1280
+    height: 720
+    children:
+      - { name: top_bar, type: rect, x: 0, y: 0, width: 1280, height: 48,
+          color: 0x00000000, bg_color: 0x141A22FF, border_color: 0x2D3642FF, border_width: 1.0 }
+      - { name: brand_lbl, type: label, x: 20, y: 0, width: 160, height: 48, anchor: left,
+          valign: center, font_size: 18, color: 0xEECC88FF, label: "cosmos" }
+      # doc/spec/107 F107-9: „Jobs" ist die Startflaeche; die Job-Seite erreicht
+      # man ueber ihren Job, nicht ueber einen gleichrangigen Reiter daneben.
+      - { name: pipes_btn, type: button, x: 180, y: 8, width: 140, height: 32,
+          bg_color: 0x1A2030FF, border_color: 0x88BBEEFF, border_width: 1.0, corner_radius: 4.0,
+          hover_color: 0xFFFFFFFF, active_color: 0xAADDFFFF, color: 0xAADDFFFF, font_size: 14, label: "Jobs" }
+      # F107-10: der Reiter „Laeufe" ist gestrichen.  Ein Lauf gehoert zu
+      # seinem Job (F107-9), und „was laeuft gerade?" steht ohnehin dauerhaft
+      # in der rechten Spalte (F107-4) — der Reiter war eine zweite Antwort auf
+      # eine beantwortete Frage.
+      - { name: clust_btn, type: button, x: 330, y: 8, width: 140, height: 32,
+          bg_color: 0x1A2030FF, border_color: 0x88BBEEFF, border_width: 1.0, corner_radius: 4.0,
+          hover_color: 0xFFFFFFFF, active_color: 0xAADDFFFF, color: 0xAADDFFFF, font_size: 14, label: "Cluster" }
+      - { name: agent_btn, type: button, x: 480, y: 8, width: 140, height: 32,
+          bg_color: 0x1A2030FF, border_color: 0x88BBEEFF, border_width: 1.0, corner_radius: 4.0,
+          hover_color: 0xFFFFFFFF, active_color: 0xAADDFFFF, color: 0xAADDFFFF, font_size: 14, label: "Agenten" }
+      # doc/spec/108: die Skript-Konsole.  Der Knopf ist nur fuer Admin-Konten
+      # SICHTBAR — Verbergen ist Komfort, nicht Sicherheit (doc/spec/91 §AP2.C);
+      # der Server lehnt ohnehin ab, aber ein Knopf, der nie etwas tut, ist schlechter
+      # als keiner.
+      - { name: cons_btn, type: button, x: 630, y: 8, width: 140, height: 32,
+          label: "Controller", font_size: 14, color: 0x8FA6BDFF,
+          bg_color: 0x1A2030FF, border_color: 0x3D5A77FF, border_width: 1.0,
+          corner_radius: 4.0 }
+      # doc/spec/108 §2: Rechtevergabe.  Wie der Konsolen-Knopf nur fuer Admin-Konten
+      # sichtbar — und wie dort gilt: Verbergen ist Komfort, der Server prueft selbst.
+      - { name: users_btn, type: button, x: 780, y: 8, width: 140, height: 32,
+          label: "Konten", font_size: 14, color: 0x8FA6BDFF,
+          bg_color: 0x1A2030FF, border_color: 0x3D5A77FF, border_width: 1.0,
+          corner_radius: 4.0 }
+      - { name: accnt_btn, type: button, x: 1000, y: 8, width: 120, height: 32,
+          bg_color: 0x1A2030FF, border_color: 0x88BBEEFF, border_width: 1.0, corner_radius: 4.0,
+          hover_color: 0xFFFFFFFF, active_color: 0xAADDFFFF, color: 0xAADDFFFF, font_size: 14, label: "Account" }
+      - { name: logout_btn, type: button, x: 1132, y: 8, width: 120, height: 32,
+          bg_color: 0x2A1420FF, border_color: 0xCC88EEFF, border_width: 1.0, corner_radius: 4.0,
+          hover_color: 0xFFAACCFF, active_color: 0xDD6699FF, color: 0xFFCCDDFF, font_size: 14, label: "Logout" }
+      # Statuszeile (F98-17): Verbindung, Agentenzahl, aktiver Lauf — dauerhaft sichtbar.
+      # doc/spec/107 F107-5: Ordnerleiste.  Ein Ordner ist ein Namenspraefix,
+      # kein eigenes Modell — ein Baum ohne Ordner-Verwaltung waere ein leerer Baum.
+      - { name: folder_bar, type: rect, x: 0, y: 48, width: 1280, height: 36,
+          color: 0x00000000, bg_color: 0x0E1420FF }
+      # Die Reiter entstehen AUS DEN DATEN: „alle" plus jedes Praefix, das
+      # wirklich vorkommt.  Erfundene Ordner waeren Zierde.
+      - { name: folder_tabs, type: container, x: 12, y: 52, width: 1250, height: 28,
+          spawn: FolderTab, layout: hflow, gap: 6 }
+
+      # F107-12: hier lagen „Laeuft gerade" und „Ausfuehrende" — 320 px auf
+      # JEDEM Schirm, meist leer, waehrend die Lauf-Ansicht sich auf 920 px
+      # draengte.  Die Fusszeile sagt, ob etwas laeuft; welcher Lauf und welche
+      # Stufe, sagt die Job-Seite; wer ausfuehrt, der Reiter Agenten.
+
+      - { name: stat_bar, type: rect, x: 0, y: 684, width: 1280, height: 36,
+          color: 0x00000000, bg_color: 0x141A22FF, border_color: 0x2D3642FF, border_width: 1.0 }
+      - { name: conn_dot, type: rect, x: 20, y: 696, width: 12, height: 12,
+          color: 0x00000000, bg_color: 0x667788FF, corner_radius: 6.0 }
+      - { name: conn_lbl, type: label, x: 42, y: 684, width: 200, height: 36, anchor: left,
+          valign: center, font_size: 12, color: 0xDDE6F0FF, label: "nicht verbunden" }
+      - { name: agent_lbl, type: label, x: 250, y: 684, width: 190, height: 36, anchor: left,
+          valign: center, font_size: 12, color: 0xAADDFFFF, label: "0 Agenten" }
+      - { name: run_lbl, type: label, x: 448, y: 684, width: 210, height: 36, anchor: left,
+          valign: center, font_size: 12, color: 0xFFAA88FF, label: "kein Lauf aktiv" }
+      # doc/spec/104 F104-6: der STAND des Schnappschusses gehoert in die
+      # Fusszeile — ohne ihn sieht der Leser nicht, ob er gerade frische Daten
+      # liest oder ein eingefrorenes Bild.  Tickt jede Sekunde weiter.
+      - { name: stand_lbl, type: label, x: 666, y: 684, width: 190, height: 36, anchor: left,
+          valign: center, font_size: 12, color: 0x7A8899FF, label: "Stand: unbekannt" }
+      # Die Last des Controllers stand hier und war zwischen den Agenten-Zahlen nicht
+      # als seine zu erkennen (User 2026-10-18).  Sie hat jetzt einen eigenen Reiter.
+      - { name: msg_lbl, type: label, x: 864, y: 684, width: 246, height: 36, anchor: right,
+          valign: center, font_size: 12, color: 0xFFAA88FF, label: "" }
+      # Der Build-Stempel gilt fuer die ganze Anwendung, nicht fuer einen Bildschirm —
+      # deshalb steht er in der Huelle und nicht (wie vorher) im Startmenue.
+      - { name: build_lbl, type: label, x: 1116, y: 684, width: 148, height: 36, anchor: right,
+          valign: center, font_size: 11, color: 0x5A6878FF, label: "" }
+
+
+# ── JobParamsScene — die Parameter EINES Jobs (doc/spec/106 §106.6a) ───────
+#
+# Dieselbe Kopfzeile wie die Lauf-Ansicht, damit die Reiter an derselben
+# Stelle stehen: eine Leiste, die beim Wechsel springt, liest sich wie zwei
+# verschiedene Seiten.
+- prefab:
+    name: JobParamsScene
+    width: 1280
+    height: 720
+    children:
+      - { name: bg_layer, type: rect, x: 0, y: 0, width: 1280, height: 720,
+          color: 0x00000000, bg_color: 0x080B12FF }
+      - { name: title_lbl, type: label, x: 20, y: 92, width: 520, height: 40, anchor: left,
+          valign: center, font_size: 18, color: 0xEECC88FF, label: "Job" }
+      # Die Reiterleiste (F106-14): Laeufe | Quelle | Parameter.
+      - { name: tab_runsx, type: button, x: 556, y: 96, width: 106, height: 34,
+          bg_color: 0x1A2030FF, border_color: 0x3D5A77FF, border_width: 1.0, corner_radius: 6.0,
+          hover_color: 0xFFFFFFFF, active_color: 0xAADDFFFF, color: 0x9FB4CCFF, font_size: 13,
+          label: "Läufe" }
+      - { name: tab_srcx, type: button, x: 670, y: 96, width: 106, height: 34,
+          bg_color: 0x1A2030FF, border_color: 0x3D5A77FF, border_width: 1.0, corner_radius: 6.0,
+          hover_color: 0xFFFFFFFF, active_color: 0xAADDFFFF, color: 0x9FB4CCFF, font_size: 13,
+          label: "Quelle" }
+      # Der AKTIVE Reiter ist heller und hat keinen Knopf-Rahmen: er ist kein
+      # Ziel, er ist der Ort, an dem man steht.
+      - { name: tab_prmx, type: button, x: 784, y: 96, width: 120, height: 34,
+          bg_color: 0x16202CFF, border_color: 0x88BBEEFF, border_width: 1.5, corner_radius: 6.0,
+          hover_color: 0xFFFFFFFF, active_color: 0xAADDFFFF, color: 0xCFE4FFFF, font_size: 13,
+          label: "Parameter" }
+      - { name: start_btn, type: button, x: 940, y: 96, width: 106, height: 34,
+          bg_color: 0x16301EFF, border_color: 0x88EEAAFF, border_width: 1.5, corner_radius: 6.0,
+          hover_color: 0xFFFFFFFF, active_color: 0xAAFFCCFF, color: 0xAAFFCCFF, font_size: 14,
+          label: "Starten" }
+      - { name: back_btnp, type: button, x: 1148, y: 96, width: 112, height: 34,
+          bg_color: 0x1A2030FF, border_color: 0x3D5A77FF, border_width: 1.0, corner_radius: 6.0,
+          hover_color: 0xFFFFFFFF, active_color: 0xAADDFFFF, color: 0x9FB4CCFF, font_size: 13,
+          label: "← Jobs" }
+
+      # doc/spec/101 §101.9: der Vorrang gehoert zur Zuteilung dieses Jobs und
+      # wird hier gesetzt — auf derselben Seite, die ihn zeigt.
+      - { name: prio_hdr, type: label, x: 20, y: 140, width: 160, height: 20, anchor: left,
+          font_size: 13, color: 0xAADDFFFF, label: "Zuteilung" }
+      - { name: prio_lbl, type: label, x: 120, y: 140, width: 80, height: 20, anchor: right,
+          font_size: 12, color: 0x9FB4CCFF, label: "Vorrang:" }
+      - { name: prio_inp, type: text_input, x: 208, y: 136, width: 56, height: 26,
+          bg_color: 0x0C1220FF, border_color: 0x2D3642FF, border_width: 1.0, corner_radius: 4.0,
+          font_size: 13, color: 0xDDE6F0FF }
+      - { name: prio_hint, type: label, x: 276, y: 140, width: 520, height: 20, anchor: left,
+          font_size: 11, color: 0x7A8899FF,
+          label: "0 = normal · höher = früher dran · bei gleichem Vorrang zuerst der ältere Lauf" }
+      - { name: prm_hdr, type: label, x: 20, y: 176, width: 300, height: 20, anchor: left,
+          font_size: 13, color: 0xAADDFFFF, label: "Parameter" }
+      - { name: save_btnp, type: button, x: 1000, y: 174, width: 120, height: 24,
+          bg_color: 0x16301EFF, border_color: 0x88EEAAFF, border_width: 1.0, corner_radius: 4.0,
+          hover_color: 0xFFFFFFFF, active_color: 0xAAFFCCFF, color: 0xAAFFCCFF, font_size: 12,
+          label: "Speichern" }
+      - { name: add_btnp, type: button, x: 1132, y: 174, width: 128, height: 24,
+          bg_color: 0x1A2030FF, border_color: 0x3D5A77FF, border_width: 1.0, corner_radius: 4.0,
+          hover_color: 0xFFFFFFFF, active_color: 0xAADDFFFF, color: 0x9FB4CCFF, font_size: 12,
+          label: "+ neu" }
+      # Spaltenkoepfe: ohne sie muss man raten, was das mittlere Feld ist.
+      - { name: col_name, type: label, x: 32, y: 200, width: 240, height: 18, anchor: left,
+          font_size: 11, color: 0x7A8899FF, label: "Name" }
+      - { name: col_kind, type: label, x: 280, y: 200, width: 120, height: 18, anchor: left,
+          font_size: 11, color: 0x7A8899FF, label: "Typ" }
+      - { name: col_val, type: label, x: 408, y: 200, width: 300, height: 18, anchor: left,
+          font_size: 11, color: 0x7A8899FF, label: "Wert" }
+      - { name: prm_pane, type: rect, x: 20, y: 220, width: 1240, height: 360,
+          color: 0x00000000, bg_color: 0x0A0E14FF, border_color: 0x2D3642FF,
+          border_width: 1.0, corner_radius: 4.0 }
+      - { name: prm_rows, type: container, x: 24, y: 226, width: 1232, height: 348,
+          spawn: PrmRow, layout: vflow, gap: 4, scrollable: true }
+      - { name: prm_none, type: label, x: 32, y: 232, width: 600, height: 20, anchor: left,
+          font_size: 12, color: 0x7A8899FF, label: "" }
+      # Der Hinweis gehoert NEBEN die Liste, nicht in eine Hilfe: wer einen
+      # Parameter anlegt, will wissen, wie er ihn liest.
+      - { name: prm_hint, type: textbox, x: 20, y: 590, width: 1240, height: 48,
+          bg_color: 0x0C1620FF, border_color: 0x2D3642FF, border_width: 1.0, corner_radius: 4.0,
+          font_size: 12, color: 0x9FB4CCFF }
+      - { name: prm_stat, type: label, x: 20, y: 648, width: 1240, height: 24, anchor: left,
+          font_size: 12, color: 0xDDE6F0FF, label: "" }
+
+# ── PrmRow — eine Zeile: Name, Typ, Wert ──────────────────────────────────
+# Der Typ ist ein KNOPF, der durchschaltet, keine Auswahlliste: fuenf Werte
+# und ein Klick sind weniger Bedienteile als eine Liste, die aufklappt.
+- prefab:
+    name: PrmRow
+    width: 1232
+    height: 40
+    children:
+      - { name: prow_bg, type: rect, x: 0, y: 0, width: 1232, height: 40,
+          color: 0x00000000, bg_color: 0x111826FF, corner_radius: 4.0 }
+      - { name: name_inp, type: text_input, x: 8, y: 4, width: 244, height: 32,
+          bg_color: 0x0C1220FF, border_color: 0x2D3642FF, border_width: 1.0, corner_radius: 4.0,
+          font_size: 13, color: 0xDDE6F0FF }
+      - { name: kind_btn, type: button, x: 260, y: 4, width: 120, height: 32,
+          bg_color: 0x1A2030FF, border_color: 0x3D5A77FF, border_width: 1.0, corner_radius: 4.0,
+          hover_color: 0xFFFFFFFF, active_color: 0xAADDFFFF, color: 0x9FB4CCFF, font_size: 12,
+          label: "Text" }
+      - { name: val_inp, type: text_input, x: 388, y: 4, width: 740, height: 32,
+          bg_color: 0x0C1220FF, border_color: 0x2D3642FF, border_width: 1.0, corner_radius: 4.0,
+          font_size: 13, color: 0xDDE6F0FF }
+      # Nur bei `bool` sichtbar — ein Schalter ist kein Textfeld.
+      - { name: val_chk, type: checkbox, x: 388, y: 8, width: 240, height: 24,
+          font_size: 13, color: 0xDDE6F0FF, label: "ja" }
+      # Nur bei `datei` sichtbar: der Knopf waehlt, das Etikett zeigt.
+      - { name: file_btn, type: button, x: 388, y: 4, width: 180, height: 32,
+          bg_color: 0x1A2030FF, border_color: 0x3D5A77FF, border_width: 1.0, corner_radius: 4.0,
+          hover_color: 0xFFFFFFFF, active_color: 0xAADDFFFF, color: 0x9FB4CCFF, font_size: 12,
+          label: "Datei wählen…" }
+      - { name: file_lbl, type: label, x: 580, y: 4, width: 540, height: 32, anchor: left,
+          valign: center, font_size: 12, color: 0x9FB4CCFF, label: "" }
+      - { name: del_btnp, type: button, x: 1180, y: 4, width: 44, height: 32,
+          bg_color: 0x2A1620FF, border_color: 0x7A3D4AFF, border_width: 1.0, corner_radius: 4.0,
+          hover_color: 0xFFFFFFFF, active_color: 0xFFAABBFF, color: 0xCC8899FF, font_size: 14,
+          label: "×" }

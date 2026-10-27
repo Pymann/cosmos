@@ -1,0 +1,61 @@
+# PeerSubscribers — Abonnenten eines Live-Pushs als peer_id-Menge.
+#
+# Ersetzt die nackten Globals `g_cluster_subs` / `g_agent_subs`.  Die waren bloße
+# `list<i32>`, weshalb die Dedupe-Schleife in `subscribe_cluster` UND
+# `subscribe_agents` **identisch doppelt** stand und das Entfernen beim
+# Disconnect zweimal als Schleife im Daemon lag.  Als Klasse steht beides einmal.
+#
+# Zwei Instanzen davon (cluster_subs, agent_subs) hängen in der CosmosRuntime —
+# derselbe Code, getrennter Zustand.
+
+- class:
+    name: PeerSubscribers
+    members:
+      - [peers, list<i32>]
+    methods:
+      # add: aufnehmen, wenn noch nicht vorhanden.  1 = neu, 0 = war schon da.
+      - def:
+          name: add
+          access: public
+          args: [[peer_id, i32]]
+          return: i32
+          body:
+            - if: { condition: { le: [peer_id, 0] }, then: [{ return: 0 }] }
+            - if: { condition: { gt: [{ call: [<.peers.contains, peer_id] }, 0] }, then: [{ return: 0 }] }
+            - call: [<.peers.push, peer_id]
+            - return: 1
+
+      # drop: entfernen (beim Disconnect).  1 = war drin.
+      - def:
+          name: drop
+          access: public
+          args: [[peer_id, i32]]
+          return: i32
+          body:
+            - return: { call: [<.peers.remove_value, peer_id] }
+
+      - def:
+          name: has
+          access: public
+          args: [[peer_id, i32]]
+          return: i32
+          body:
+            - if: { condition: { gt: [{ call: [<.peers.contains, peer_id] }, 0] }, then: [{ return: 1 }] }
+            - return: 0
+
+      - def:
+          name: count
+          access: public
+          return: i32
+          body: [{ return: <.peers.len }]
+
+      # at: peer_id an Position idx (-1 wenn ausserhalb) — für die Push-Schleife.
+      - def:
+          name: at
+          access: public
+          args: [[idx, i32]]
+          return: i32
+          body:
+            - if: { condition: { lt: [idx, 0] }, then: [{ return: -1 }] }
+            - if: { condition: { ge: [idx, <.peers.len] }, then: [{ return: -1 }] }
+            - return: { at: [<.peers, idx] }

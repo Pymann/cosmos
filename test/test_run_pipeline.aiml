@@ -1,0 +1,152 @@
+# Abnahme §96.13: eingereichter Pipeline-Quelltext wird GEPRUEFT, dann
+# AUSGEFALTET, und erst dann entsteht ein Lauf.
+#
+# Der Controller fuehrt den Quelltext dabei NICHT aus (F96-28) — geprueft wird
+# strukturell mit yaml.parse, ausgefaltet wird das Kreuzprodukt der Achsen.
+# Darum ist dieser Test auch ohne Agenten und ohne Netz aussagekraeftig.
+#
+# Geprueft wird vor allem die Kehrseite: scheitert die Pruefung, entsteht KEIN
+# Lauf (F96-30).  Ein Lauf, der nie laufen kann, waere eine Zeile, die jemand
+# aufraeumen muss, und eine Statusfarbe, die nichts bedeutet.
+# Expected exit code: 0
+
+- import: "sources/server/pipeline_submit.aiml"
+- import: "sources/shared/demo_pipeline.aiml"
+
+- def:
+    name: expect
+    args: [[what, string], [cond, i32]]
+    return: i32
+    body:
+      - if:
+          condition: { eq: [cond, 1] }
+          then: [{ print: ["  ok   ${what}"] }, { return: 0 }]
+      - print: ["  FAIL ${what}"]
+      - return: 1
+
+- def:
+    name: good_source
+    return: { type: string, lifetime: producer }
+    body:
+      - return: "- pipeline:\n    name: demo_build\n    params:\n      - [arch, string, [x86_64, arm64]]\n      - [mode, string, [debug, release]]\n    exclude:\n      - { arch: arm64, mode: release }\n    steps:\n      - stage:\n          name: compile\n          steps:\n            - step:\n                name: build\n                cache: pure\n                args: [arch, mode]\n                return: i32\n                body:\n                  - return: 0\n"
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      - decl: [submit, ptr<PipelineSubmit>, { new: PipelineSubmit }]
+
+      # ── gueltige Quelle: angenommen, Matrix ausgefaltet ─────────────────
+      - decl: [src_ok, string, { call: [good_source] }]
+      - decl: [chk, SubmitCheck, { call: [submit.check, src_ok, ""] }]
+      - set: [fails, { +: [fails, { call: [expect, "gueltige Quelle wird angenommen", { eq: [chk.accepted, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Name wird gelesen", { eq: [chk.name, "demo_build"] }] }] }]
+      # 2x2 minus ein exclude = drei Lanes
+      - set: [fails, { +: [fails, { call: [expect, "drei Lanes nach exclude", { eq: [chk.lane_count, 3] }] }] }]
+
+      - decl: [run, PipelineRun, { call: [submit.expand, src_ok, "run-0001", ""] }]
+      - set: [fails, { +: [fails, { call: [expect, "Lauf traegt seine Kennung", { eq: [run.run_id, "run-0001"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Lauf traegt den Namen", { eq: [run.pipeline_name, "demo_build"] }] }] }]
+      # Eine Stufe je (Lane, Stufe): drei Lanes x eine Stufe
+      - set: [fails, { +: [fails, { call: [expect, "je (Lane, Stufe) ein Eintrag", { eq: [run.stages.len, 3] }] }] }]
+      - decl: [first_stage, PipelineStage, { at: [run.stages, 0] }]
+      - set: [fails, { +: [fails, { call: [expect, "Eintrag ist pending", { eq: [first_stage.status, "pending"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Eintrag nennt seine Bindungen", { gt: [first_stage.name.len, 7] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Lauf ist pending", { eq: [run.status, "pending"] }] }] }]
+
+      # ── Negativfaelle: jede Pruefung einzeln (F96-29) ───────────────────
+      - decl: [no_name, SubmitCheck, { call: [submit.check, "- pipeline:\n    params:\n      - [arch, string, [x86_64]]\n    steps: []\n", ""] }]
+      - set: [fails, { +: [fails, { call: [expect, "fehlender Name wird abgelehnt", { eq: [no_name.accepted, 0] }] }] }]
+
+      - decl: [empty_axis, SubmitCheck, { call: [submit.check, "- pipeline:\n    name: demo\n    params:\n      - [arch, string, []]\n    steps: []\n", ""] }]
+      - set: [fails, { +: [fails, { call: [expect, "leere Achse wird abgelehnt", { eq: [empty_axis.accepted, 0] }] }] }]
+
+      - decl: [dup_src, string, "- pipeline:\n    name: demo\n    params:\n      - [arch, string, [x86_64]]\n    steps:\n      - stage:\n          name: one\n          steps:\n            - step: { name: twice, return: i32, body: [{ return: 0 }] }\n            - step: { name: twice, return: i32, body: [{ return: 0 }] }\n"]
+      - decl: [dup, SubmitCheck, { call: [submit.check, dup_src, ""] }]
+      - set: [fails, { +: [fails, { call: [expect, "doppelter Schrittname wird abgelehnt", { eq: [dup.accepted, 0] }] }] }]
+
+      - decl: [bad_need_src, string, "- pipeline:\n    name: demo\n    params:\n      - [arch, string, [x86_64]]\n    steps:\n      - stage:\n          name: one\n          steps:\n            - step: { name: first, needs: [gibtsnicht], return: i32, body: [{ return: 0 }] }\n"]
+      - decl: [bad_need, SubmitCheck, { call: [submit.check, bad_need_src, ""] }]
+      - set: [fails, { +: [fails, { call: [expect, "needs auf Unbekanntes wird abgelehnt", { eq: [bad_need.accepted, 0] }] }] }]
+
+      - decl: [once_src, string, "- pipeline:\n    name: demo\n    params:\n      - [arch, string, [x86_64]]\n    steps:\n      - stage:\n          name: one\n          steps:\n            - step: { name: shared, per: once, args: [arch], return: i32, body: [{ return: 0 }] }\n"]
+      - decl: [once_axis, SubmitCheck, { call: [submit.check, once_src, ""] }]
+      - set: [fails, { +: [fails, { call: [expect, "per: once mit Achse wird abgelehnt", { eq: [once_axis.accepted, 0] }] }] }]
+
+      - decl: [bad_cls_src, string, "- pipeline:\n    name: demo\n    params:\n      - [arch, string, [x86_64]]\n    steps:\n      - stage:\n          name: one\n          steps:\n            - step: { name: first, cache: haeufig, return: i32, body: [{ return: 0 }] }\n"]
+      - decl: [bad_cls, SubmitCheck, { call: [submit.check, bad_cls_src, ""] }]
+      - set: [fails, { +: [fails, { call: [expect, "unbekannte Klasse wird abgelehnt", { eq: [bad_cls.accepted, 0] }] }] }]
+
+      # ── doc/spec/106 §106.3a: die ALTE Schreibweise wird benannt ────────
+      # Diese Meldungen sind die Migrationshilfe.  Zwei Schreibweisen gleich-
+      # zeitig zuzulassen waere die Redundanz, die spaeter niemand aufloest —
+      # also muss die Ablehnung den Ersatz nennen, sonst raet der Leser.
+      - decl: [old_stages, SubmitCheck, { call: [submit.check, "- pipeline:\n    name: demo\n    stages:\n      - stage:\n          name: one\n          run: \"true\"\n", ""] }]
+      - set: [fails, { +: [fails, { call: [expect, "`stages:` wird abgelehnt", { eq: [old_stages.accepted, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und nennt `steps:` als Ersatz", { ge: [{ call: [old_stages.message.index_of, "steps:"] }, 0] }] }] }]
+
+      - decl: [old_label, SubmitCheck, { call: [submit.check, "- pipeline:\n    name: demo\n    label: linux\n    steps:\n      - stage:\n          name: one\n          run: \"true\"\n", ""] }]
+      - set: [fails, { +: [fails, { call: [expect, "`label:` wird abgelehnt", { eq: [old_label.accepted, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und nennt `agent:` als Ersatz", { ge: [{ call: [old_label.message.index_of, "agent:"] }, 0] }] }] }]
+
+      # Und die Umbenennung vom 25.10.2026 selbst: `runs_on:` → `agent:`,
+      # `runs_in:` → `steplayer:` (aiml spec/62 §18.5).  Abgewiesen, nicht
+      # nebenher verstanden — zwei Schreibweisen sind die Redundanz, die
+      # spaeter niemand aufloest.
+      - decl: [old_on, SubmitCheck, { call: [submit.check, "- pipeline:\n    name: demo\n    steps:\n      - stage:\n          name: one\n          runs_on: linux\n          run: \"echo\"\n", ""] }]
+      - set: [fails, { +: [fails, { call: [expect, "`runs_on:` wird abgelehnt", { eq: [old_on.accepted, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und nennt `agent:`", { ge: [{ call: [old_on.message.index_of, "agent:"] }, 0] }] }] }]
+      - decl: [old_in, SubmitCheck, { call: [submit.check, "- pipeline:\n    name: demo\n    steps:\n      - stage:\n          name: one\n          runs_in: node\n          run: \"echo\"\n", ""] }]
+      - set: [fails, { +: [fails, { call: [expect, "`runs_in:` wird abgelehnt", { eq: [old_in.accepted, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und nennt `steplayer:`", { ge: [{ call: [old_in.message.index_of, "steplayer:"] }, 0] }] }] }]
+
+      - decl: [old_tmo, SubmitCheck, { call: [submit.check, "- pipeline:\n    name: demo\n    steps:\n      - stage:\n          name: one\n          timeout_s: 5\n          run: \"true\"\n", ""] }]
+      - set: [fails, { +: [fails, { call: [expect, "`timeout_s:` wird abgelehnt", { eq: [old_tmo.accepted, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und nennt die Millisekunden", { ge: [{ call: [old_tmo.message.index_of, "MILLISEKUNDEN"] }, 0] }] }] }]
+
+      - decl: [old_params, SubmitCheck, { call: [submit.check, "- pipeline:\n    name: demo\n    params:\n      arch: [x86_64]\n    steps: []\n", ""] }]
+      - set: [fails, { +: [fails, { call: [expect, "params als Abbildung wird abgelehnt", { eq: [old_params.accepted, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und nennt die Listenform", { ge: [{ call: [old_params.message.index_of, "LISTE"] }, 0] }] }] }]
+
+      # Typ der Achse: er zaehlt, sobald Rumpf-Schritte kommen (F62-1).
+      - decl: [bad_type, SubmitCheck, { call: [submit.check, "- pipeline:\n    name: demo\n    params:\n      - [arch, wurst, [x86_64]]\n    steps: []\n", ""] }]
+      - set: [fails, { +: [fails, { call: [expect, "unbekannter Achsen-Typ wird abgelehnt", { eq: [bad_type.accepted, 0] }] }] }]
+
+      # F106-11: `run:` ODER `steps:` an einer Stufe, nie beides.
+      - decl: [both_src, string, "- pipeline:\n    name: demo\n    steps:\n      - stage:\n          name: one\n          run: \"true\"\n          steps:\n            - step: { name: a, return: i32, body: [{ return: 0 }] }\n"]
+      - decl: [both, SubmitCheck, { call: [submit.check, both_src, ""] }]
+      - set: [fails, { +: [fails, { call: [expect, "run UND steps wird abgelehnt", { eq: [both.accepted, 0] }] }] }]
+
+      - decl: [broken, SubmitCheck, { call: [submit.check, "- pipeline:\n  name: [unausgeglichen\n", ""] }]
+      - set: [fails, { +: [fails, { call: [expect, "kaputtes YAML wird abgelehnt", { eq: [broken.accepted, 0] }] }] }]
+
+      # ── F96-30: bei Ablehnung entsteht KEIN Lauf ────────────────────────
+      - decl: [no_run, PipelineRun, { call: [submit.expand, dup_src, "run-0002", ""] }]
+      - set: [fails, { +: [fails, { call: [expect, "abgelehnte Quelle ergibt keinen Lauf", { eq: [no_run.run_id.len, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und keine Stufen", { eq: [no_run.stages.len, 0] }] }] }]
+
+      # ── jede Ablehnung NENNT ihren Grund (F96-30: Meldung an den Anfrager)
+      - set: [fails, { +: [fails, { call: [expect, "Ablehnung nennt einen Grund", { gt: [dup.message.len, 10] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und benennt den Schritt", { gt: [{ call: [dup.message.index_of, "twice"] }, -1] }] }] }]
+
+      # ── Das BEISPIEL des Editors muss laufen (doc/spec/106 G4) ──────────
+      # Es stand frueher als Attrappe im Client und konnte nie geprueft
+      # werden; seitdem es geteilt ist, prueft dieser Test genau die
+      # Zeichenkette, die der Mensch im Editor sieht.
+      - decl: [demo, ptr<DemoPipeline>, { new: DemoPipeline }]
+      - decl: [demo_src, string, { call: [demo.source] }]
+      - decl: [demo_chk, SubmitCheck, { call: [submit.check, demo_src, ""] }]
+      - set: [fails, { +: [fails, { call: [expect, "das Editor-Beispiel wird angenommen", { eq: [demo_chk.accepted, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "drei Lanes (exclude greift)", { eq: [demo_chk.lane_count, 3] }] }] }]
+      - decl: [demo_run, PipelineRun, { call: [submit.expand, demo_src, "demo-1", ""] }]
+      - set: [fails, { +: [fails, { call: [expect, "sechs Eintraege (3 Lanes x 2 Stufen)", { eq: [demo_run.stages.len, 6] }] }] }]
+      - decl: [demo_stage_one, PipelineStage, { at: [demo_run.stages, 0] }]
+      - set: [fails, { +: [fails, { call: [expect, "der Befehl reist mit (sonst nicht ausfuehrbar)", { gt: [demo_stage_one.command.len, 0] }] }] }]
+
+      - if:
+          condition: { neq: [fails, 0] }
+          then: [{ print: ["test_run_pipeline FAIL (${fails})"] }, { return: 1 }]
+      - print: ["test_run_pipeline PASS"]
+      - return: 0

@@ -1,0 +1,31 @@
+# Verzeichnis-Bäume im CAS (doc/spec/92 §92.2).
+#
+# Ein Eintrag trägt bewusst NUR: Name, Art, Ausführbar-Bit und die Inhaltsadresse.
+# Zeitstempel, uid/gid und die übrigen Modi fehlen absichtlich — sie machen Builds
+# unreproduzierbar (gleicher Inhalt müsste dieselbe Adresse ergeben), während das
+# Ausführbar-Bit das Verhalten ändert und daher dazugehört.
+
+- enum:
+    name: TreeKind
+    values:
+      - file
+      - dir
+      - symlink
+
+- model:
+    name: TreeEntry
+    fields:
+      - [name, string]     # Blattname, ohne Pfad
+      - [kind, i32]        # TreeKind
+      - [exec, i32]        # 0/1 — nur das Ausführbar-Bit
+      - [addr, string]     # blob_id (file), tree_id (dir), blob_id des Linkziels (symlink)
+
+- model:
+    name: Tree
+    fields:
+      # Immer nach `name` byte-weise sortiert — die Reihenfolge ist Teil der
+      # Inhaltsadresse (§92.2) und darf nicht von der Einlese-Reihenfolge abhängen.
+      - [entries, list<TreeEntry>]
+
+# Gilt nur für Workspace-Bäume.  Systemlayer brauchen uid/gid/mode + Whiteout
+# (doc/spec/96 §96.4, F96-2) — eigenes Modell, nicht dieses erweitern.

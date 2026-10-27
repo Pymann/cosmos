@@ -1,0 +1,374 @@
+# ClusterScreen (cosmos) — live cluster view.  Rendert aus der GELIEHENEN
+# LiveState-Instanz (doc/spec/105 Schritt 1), nicht mehr aus einem Global.
+# pushes (cluster_update) to authenticated subscribers; no fixed-interval polling.  The refresh
+# button does an explicit one-shot get_cluster as a fallback.
+- import: "sources/client/prefabs.aiml"
+- import: "sources/shared/live_table.aiml"
+- import: "sources/client/net/live_state.aiml"
+- import: "sources/shared/job_record.aiml"
+- import: "sources/shared/job_state.aiml"
+
+- import: "sources/shared/presence.aiml"
+- import: "sources/models/agent_list.aiml"
+- import: "sources/client/net/live_state.aiml"
+# doc/spec/107 §107.5a: das Netz RAEUMLICH, mit derselben Maschinerie wie die
+# Pipeline.  Gerechnet wird in PipeScene (ohne Fenster pruefbar), hier nur
+# gezeichnet.
+- import: "sources/client/gfx/pipe3d.aiml"
+
+- class:
+    name: ClusterScreen
+    members:
+      - [live_table,  LiveTable]   # doc/spec/99: rechnen, nicht zeichnen
+      - [paint_ms,    i64]         # Sekundentakt fuer die Alters-Angaben
+      - [pres,        Presence]    # doc/spec/104 F104-8: dieselbe Regel wie der Server
+      - [initialized, i32]
+      - [scene,       prefab_instance]
+      - [is_visible,  i32]
+      - [last_seq,    i32]
+      # Das raeumliche Netzbild (doc/spec/107 §107.5a).
+      - [space,       PipeScene]
+      - [view3d,      Pipe3D]
+      - [bodies,      list<SceneItem>]
+      # Schwebende Namen ueber den Koerpern (F107-16).  Eigene Instanzen, weil
+      # Szenen-KINDER sich nicht bewegen lassen.
+      - [tags,        list<prefab_instance>]
+      # Woraus die Koerper gerechnet wurden.  `apply` laeuft im Sekundentakt
+      # (die Alters-Angabe muss weiterlaufen); ohne diesen Vergleich wuerde die
+      # Kamera jede Sekunde neu eingepasst — also genau dann zurueckspringen,
+      # wenn der Nutzer gerade dreht.
+      - [space_sig,   string]
+    methods:
+      - def:
+          name: init
+          body:
+            - if: { condition: { eq: [<.initialized, 1] }, then: [{ return }] }
+            - set: [<.scene, { call: [engine.instantiate, "ClusterScene"] }]
+            - call: [<.scene.set_pos, 0.0, 0.0]
+            - call: [<.scene.set_z, 0]
+            # Ein Vorrat an Namensschildern; mehr Koerper zeigt das Bild
+            # ohnehin nicht lesbar an.
+            - decl: [tix, i32, 0]
+            - while:
+                condition: { lt: [tix, 16] }
+                body:
+                  - decl: [tag, prefab_instance, { call: [engine.instantiate, "NodeTag"] }]
+                  - call: [tag.set_z, 30]
+                  - call: [tag.set_visible, 0]
+                  - call: [<.tags.push, tag]
+                  - set: [tix, { +: [tix, 1] }]
+            - decl: [gfx_ok, i32, { call: [<.view3d.init] }]
+            - if:
+                condition: { neq: [gfx_ok, 1] }
+                then:
+                  - call: [log.warn, "[cluster] raeumliche Ansicht nicht verfuegbar"]
+                  - call: [<.scene.set_text, "space_none", "(räumliche Ansicht nicht verfügbar)"]
+            - set: [<.initialized, 1]
+            - set: [<.is_visible, 0]
+            - set: [<.last_seq, -1]
+      # apply: das Netzbild fuellen (doc/spec/107 §107.5).
+      #
+      # Gezeichnet wird, was ZUSAMMENHAENGT: der Controller mit seinen Speichern und
+      # seinen Agenten.  Die Zahlen daneben sind Beiwerk — die Aussage ist die Kante.
+      - def:
+          name: apply
+          static_off: ["str_cmp"]
+          args: [[view, ref<ClusterView>], [agents, ref<AgentList>]]
+          body:
+            # ── Die Controller-Instanz ────────────────────────────────────
+            # Die Adresse kommt aus dem Schnappschuss (F107-39).  Fest
+            # eingetragen stand hier 8765 — und log, sobald der Stapel auf
+            # anderen Ports laeuft.
+            - decl: [bind_txt, string, view.srv_bind]
+            - if: { condition: { eq: [bind_txt.len, 0] }, then: [{ set: [bind_txt, "(unbekannt)"] }] }
+            - call: [<.scene.set_text, "ctl_bind", bind_txt]
+            - if:
+                condition: { gt: [view.srv_rss_kb, 0] }
+                then:
+                  - decl: [cpu_pct, i32, { /: [view.srv_cpu_permille, 10] }]
+                  - decl: [rss_mb, i64, { /: [view.srv_rss_kb, 1024] }]
+                  - call: [<.scene.set_text, "ctl_load", "${cpu_pct} % Prozessor · ${rss_mb} MB"]
+                else: [{ call: [<.scene.set_text, "ctl_load", "Last: k. A."] }]
+            - call: [<.scene.set_text, "ctl_conn",
+                     "${view.live.conns.authenticated} angemeldet · ${view.live.conns.unauthenticated} offen"]
+            - call: [<.scene.set_text, "ctl_note",
+                     "${view.live.stores.len} Speicher · ${agents.agents.len} Agenten bekannt"]
+
+            # ── Geoeffnete Speicher ───────────────────────────────────────
+            - call: [<.scene.bind_list, "kv_list", view.live.stores]
+            - decl: [kix, i32, 0]
+            - while:
+                condition: { lt: [kix, view.live.stores.len] }
+                body:
+                  - decl: [krow, prefab_instance, { call: [<.scene.container_row, "kv_list", kix] }]
+                  - if:
+                      condition: { neq: [krow, null] }
+                      then:
+                        - decl: [kv_row, KvStoreInfo, { at: [view.live.stores, kix] }]
+                        - call: [krow.set_text, "kv_name", kv_row.name]
+                        - decl: [wal_mb, i64, { /: [kv_row.wal_used, 1048576] }]
+                        - call: [krow.set_text, "kv_meta",
+                                 "${kv_row.entries} Einträge · ${wal_mb} MB WAL · ${kv_row.writes} Schreibvorgänge"]
+                  - set: [kix, { +: [kix, 1] }]
+            - if:
+                condition: { eq: [view.live.stores.len, 0] }
+                then: [{ call: [<.scene.set_text, "kv_none", "(kein Speicher offen / nicht angemeldet)"] }]
+                else: [{ call: [<.scene.set_text, "kv_none", ""] }]
+
+            # ── Verbundene Agenten ────────────────────────────────────────
+            - call: [<.scene.bind_list, "agt_list", agents.agents]
+            - decl: [aix, i32, 0]
+            - while:
+                condition: { lt: [aix, agents.agents.len] }
+                body:
+                  - decl: [arow, prefab_instance, { call: [<.scene.container_row, "agt_list", aix] }]
+                  - if:
+                      condition: { neq: [arow, null] }
+                      then:
+                        - decl: [ag_row, AgentInfo, { at: [agents.agents, aix] }]
+                        - call: [arow.set_text, "ag_name", ag_row.agent_id]
+                        # Zustand mit WORT, nicht nur mit Farbe — und die Last gleich
+                        # daneben, weil sie zu diesem Agenten gehoert (doc/spec/109).
+                        - decl: [state_txt, string, "nicht verbunden"]
+                        - decl: [dot_col, i32, 0x667788FF]
+                        - if:
+                            condition: { neq: [ag_row.online, 0] }
+                            then:
+                              - set: [state_txt, "verbunden"]
+                              - set: [dot_col, 0x66CC88FF]
+                        - decl: [load_txt, string, "Last: k. A."]
+                        - if:
+                            condition: { neq: [ag_row.res_seen, 0] }
+                            then:
+                              - decl: [a_pct, i32, { /: [ag_row.cpu_permille, 10] }]
+                              - decl: [a_mb, i64, { /: [ag_row.rss_kb, 1024] }]
+                              - set: [load_txt, "${a_pct} % · ${a_mb} MB"]
+                        - call: [arow.set_bg_color, "ag_dot", dot_col]
+                        - call: [arow.set_text, "ag_meta", "${state_txt} · ${load_txt}"]
+                  - set: [aix, { +: [aix, 1] }]
+            - if:
+                condition: { eq: [agents.agents.len, 0] }
+                then: [{ call: [<.scene.set_text, "agt_none", "(kein Agent verbunden)"] }]
+                else: [{ call: [<.scene.set_text, "agt_none", ""] }]
+
+            # ── Dasselbe noch einmal, raeumlich ───────────────────────────
+            # Neu gerechnet wird nur, wenn sich die STRUKTUR geaendert hat.
+            - decl: [sig, string, { call: [<.space_signature, view, agents] }]
+            - if:
+                condition: { neq: [sig, <.space_sig] }
+                then:
+                  - decl: [first, i32, 0]
+                  - if: { condition: { eq: [<.space_sig.len, 0] }, then: [{ set: [first, 1] }] }
+                  - set: [<.space_sig, sig]
+                  - call: [<.rebuild_bodies, view, agents, first]
+
+      # space_signature: woraus das Bild besteht.  Zahlen, die sich dauernd
+      # aendern (Last, Zeitstempel), stehen NICHT darin — sonst waere jede
+      # Sekunde eine Aenderung und der Vergleich sinnlos.
+      - def:
+          name: space_signature
+          static_off: ["str_cmp"]
+          args: [[view, ref<ClusterView>], [agents, ref<AgentList>]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [out, string, ""]
+            - decl: [six, i32, 0]
+            - while:
+                condition: { lt: [six, view.live.stores.len] }
+                body:
+                  - decl: [info, KvStoreInfo, { at: [view.live.stores, six] }]
+                  - decl: [fill, f32, { call: [<.space.fill_height, info.entries] }]
+                  - set: [out, "${out}|${info.name}:${fill}"]
+                  - set: [six, { +: [six, 1] }]
+            - decl: [aix, i32, 0]
+            - while:
+                condition: { lt: [aix, agents.agents.len] }
+                body:
+                  - decl: [row, AgentInfo, { at: [agents.agents, aix] }]
+                  - set: [out, "${out}|${row.agent_id}:${row.online}"]
+                  - set: [aix, { +: [aix, 1] }]
+            # Die Last des Controllers steckt in SEINER Farbe — also gehoert die
+            # Stufe (nicht der Wert) in die Kennung.
+            - decl: [col, i32, { call: [<.space.load_color, view.srv_cpu_permille] }]
+            - return: "${out}|ctl:${col}"
+
+
+      # rebuild_bodies: die Koerper NEU rechnen, nicht fortschreiben.  Ein
+      # Schnappschuss ist ein ganzes Bild; eine Liste, die man nachpflegt,
+      # waere die zweite Wahrheit daneben.
+      - def:
+          name: rebuild_bodies
+          args: [[view, ref<ClusterView>], [agents, ref<AgentList>], [refit, i32]]
+          body:
+            - call: [<.bodies.clear]
+            - decl: [built, list<SceneItem>, { call: [<.space.of_cluster, view, agents] }]
+            - decl: [bix, i32, 0]
+            - while:
+                condition: { lt: [bix, built.len] }
+                body:
+                  - call: [<.bodies.push, { at: [built, bix] }]
+                  - set: [bix, { +: [bix, 1] }]
+            # Einpassen nur beim ERSTEN Bild: danach gehoert die Kamera dem
+            # Nutzer (doc/spec/107 §107.5a).
+            - if: { condition: { eq: [refit, 1] }, then: [{ call: [<.view3d.fit, <.bodies] }] }
+
+      # draw3d: das Bild in SEINEN Ausschnitt, nach der Oberflaeche.  Die
+      # Fenstergroesse kommt vom WIRT — der Fenster-Griff gehoert der Anwendung.
+      - def:
+          name: draw3d
+          access: public
+          args: [[seconds, f32], [win_w, i32], [win_h, i32]]
+          body:
+            - if: { condition: { eq: [<.is_visible, 0] }, then: [{ return }] }
+            - if: { condition: { eq: [<.bodies.len, 0] }, then: [{ return }] }
+            - if: { condition: { le: [win_w, 0] }, then: [{ return }] }
+            - call: [<.view3d.advance, seconds]
+            # Die Szene ist auf 1280x720 entworfen; das Fenster kann groesser
+            # sein.  y zaehlt in GL von UNTEN.
+            - decl: [scale_x, f32, { '/': [{ cast: [win_w, f32] }, 1280.0] }]
+            - decl: [scale_y, f32, { '/': [{ cast: [win_h, f32] }, 720.0] }]
+            - decl: [des_x, f32, 378.0]
+            - decl: [des_w, f32, 524.0]
+            - decl: [des_h, f32, 400.0]
+            - decl: [des_bot, f32, 160.0]
+            - decl: [left, i32, { cast: [{ '*': [des_x, scale_x] }, i32] }]
+            - decl: [wide, i32, { cast: [{ '*': [des_w, scale_x] }, i32] }]
+            - decl: [high, i32, { cast: [{ '*': [des_h, scale_y] }, i32] }]
+            - decl: [bottom, i32, { cast: [{ '*': [des_bot, scale_y] }, i32] }]
+            - call: [<.view3d.draw, <.bodies, left, bottom, wide, high]
+            - call: [<.place_tags, { '/': [des_w, des_h] }, des_x, des_bot, des_w, des_h]
+            # Den Ausschnitt ZURUECKSETZEN, sonst zeichnet der naechste Rahmen
+            # die ganze Oberflaeche in dieses Kaestchen.
+            - call: [gl.viewport, 0, 0, win_w, win_h]
+
+      # place_tags: projiziert, nicht geraten — dieselbe Kamera wie das Bild.
+      # Ohne Namen muesste man jeden Quader anfassen, um zu erfahren, was er ist.
+      - def:
+          name: place_tags
+          static_off: ["str_cmp", "args"]
+          args: [[aspect, f32], [des_x, f32], [des_bot, f32], [des_w, f32], [des_h, f32]]
+          body:
+            - decl: [used, i32, 0]
+            - decl: [bix, i32, 0]
+            - while:
+                condition: { '&&': [{ lt: [bix, <.bodies.len] }, { lt: [used, <.tags.len] }] }
+                body:
+                  - decl: [one, SceneItem, { at: [<.bodies, bix] }]
+                  - set: [bix, { +: [bix, 1] }]
+                  - if:
+                      condition: { gt: [one.label.len, 0] }
+                      then:
+                        - decl: [ndc, vec3, { call: [<.view3d.project, one.pos_x, { +: [one.pos_y, { +: [one.radius, 0.35] }] }, one.pos_z, aspect] }]
+                        - decl: [tag, prefab_instance, { at: [<.tags, used] }]
+                        - if:
+                            condition: { lt: [ndc.z, 0.0] }
+                            then: [{ call: [tag.set_visible, 0] }]
+                            else:
+                              # Bild- in Entwurfskoordinaten: y zaehlt im Bild
+                              # von unten, im Entwurf von oben.
+                              - decl: [scr_x, f32, { +: [des_x, { '*': [{ '*': [{ +: [ndc.x, 1.0] }, 0.5] }, des_w] }] }]
+                              - decl: [scr_y, f32, { -: [{ -: [720.0, des_bot] }, { '*': [{ '*': [{ +: [ndc.y, 1.0] }, 0.5] }, des_h] }] }]
+                              - call: [tag.set_pos, { -: [scr_x, 60.0] }, { -: [scr_y, 9.0] }]
+                              - call: [tag.set_text, "tag_lblx", one.label]
+                              - call: [tag.set_visible, 1]
+                        - set: [used, { +: [used, 1] }]
+            - while:
+                condition: { lt: [used, <.tags.len] }
+                body:
+                  - decl: [spare, prefab_instance, { at: [<.tags, used] }]
+                  - call: [spare.set_visible, 0]
+                  - set: [used, { +: [used, 1] }]
+
+      - def:
+          name: hide_tags
+          body:
+            - decl: [tix, i32, 0]
+            - while:
+                condition: { lt: [tix, <.tags.len] }
+                body:
+                  - decl: [tag, prefab_instance, { at: [<.tags, tix] }]
+                  - call: [tag.set_visible, 0]
+                  - set: [tix, { +: [tix, 1] }]
+
+      # space_input: ziehen dreht, Rad zoomt.  Das Feld ist in ENTWURFS-
+      # Koordinaten bekannt, `engine.mouse_design_*` liefert die Maus darin.
+      # Gewaehlt wird hier NICHT: ein Klick auf einen Agenten hat (noch) kein
+      # Ziel, und ein Klick ohne Wirkung ist eine Luege.
+      - def:
+          name: space_input
+          body:
+            - if: { condition: { eq: [<.is_visible, 0] }, then: [{ return }] }
+            - if: { condition: { eq: [{ call: [<.view3d.is_ready] }, 0] }, then: [{ return }] }
+            - decl: [mouse_x, f32, { call: [engine.mouse_design_x] }]
+            - decl: [mouse_y, f32, { call: [engine.mouse_design_y] }]
+            - decl: [inside, i32, 0]
+            - if:
+                condition: { '&&': [{ ge: [mouse_x, 378.0] }, { '&&': [{ le: [mouse_x, 902.0] }, { '&&': [{ ge: [mouse_y, 160.0] }, { le: [mouse_y, 560.0] }] }] }] }
+                then: [{ set: [inside, 1] }]
+            - if: { condition: { eq: [inside, 0] }, then: [{ return }] }
+            - if:
+                condition: { eq: [{ call: [input.mouse_button, 0] }, 1] }
+                then:
+                  - decl: [drag_x, f32, { call: [input.mouse_delta_x] }]
+                  - decl: [drag_y, f32, { call: [input.mouse_delta_y] }]
+                  - if:
+                      condition: { '||': [{ gt: [drag_x, 0.5] }, { '||': [{ lt: [drag_x, -0.5] }, { '||': [{ gt: [drag_y, 0.5] }, { lt: [drag_y, -0.5] }] }] }] }
+                      then: [{ call: [<.view3d.turn, { '*': [drag_x, 0.35] }, { '*': [drag_y, -0.3] }] }]
+            - decl: [wheel, f32, { call: [input.mouse_scroll_y] }]
+            - if: { condition: { gt: [wheel, 0.1] }, then: [{ call: [<.view3d.zoom, 0.88] }] }
+            - if: { condition: { lt: [wheel, -0.1] }, then: [{ call: [<.view3d.zoom, 1.14] }] }
+
+      # body_count / space_ready: damit eine Probe ohne Fenster pruefen kann,
+      # dass das Bild wirklich Koerper hat.
+      - def:
+          name: body_count
+          access: public
+          return: i32
+          body: [{ return: <.bodies.len }]
+
+      # refresh: der ausdrueckliche Knopf.  Der Normalfall ist der Push (doc/spec/99);
+      # das hier ist der Rueckfall, wenn jemand nicht warten will.
+      - def:
+          name: refresh
+          args: [[live, ref<LiveState>]]
+          body:
+            - decl: [got, i32, { call: [live.fetch_once] }]
+            - set: [<.last_seq, -1]
+
+      - def:
+          name: set_visible
+          # Die Live-Instanz wird GELIEHEN, nicht besessen (doc/spec/105 F105-1).
+          # Die Agentenliste ebenso — sie gehoert dem AgentsState.
+          args: [[vis, i32], [live, ref<LiveState>], [agents, ref<AgentList>]]
+          body:
+            - if: { condition: { eq: [<.initialized, 0] }, then: [{ call: [<.init] }] }
+            - call: [<.scene.set_visible, vis]
+            - set: [<.is_visible, vis]
+            - if: { condition: { eq: [vis, 0] }, then: [{ call: [<.hide_tags] }] }
+            - if:
+                condition: { eq: [vis, 1] }
+                then:
+                  # Live-Sicht anwenden, falls schon ein Push da ist; sonst One-Shot-Fallback.
+                  - if:
+                      condition: { gt: [{ call: [live.has] }, 0] }
+                      then: [{ call: [<.apply, live.view, agents] }, { set: [<.last_seq, { call: [live.revision] }] }]
+                      else: [{ call: [<.refresh, live] }]
+      # back_pressed entfiel: die Navigation sitzt im Kopf der Huelle
+      # (doc/spec/107 F107-2), ein zweiter Weg zurueck hatte keinen Aufrufer.
+      - def:
+          name: render
+          args: [[live, ref<LiveState>], [agents, ref<AgentList>]]
+          body:
+            - if: { condition: { eq: [<.is_visible, 0] }, then: [{ return }] }
+            # Live-Push angekommen? → neu rendern (kein Timer-Poll).
+            - if:
+                # Neue Daten ODER eine Sekunde vergangen: „Stand: vor 3 s" muss
+                # weiterlaufen, sonst behauptet die Ansicht Frische, die sie
+                # nicht pruefen kann — und „VERALTET" waere unerreichbar.
+                condition: { '||': [{ neq: [{ call: [live.revision] }, <.last_seq] }, { ge: [{ -: [{ call: [time.now] }, <.paint_ms] }, 1000] }] }
+                then:
+                  - if: { condition: { gt: [{ call: [live.has] }, 0] }, then: [{ call: [<.apply, live.view, agents] }] }
+                  - set: [<.last_seq, { call: [live.revision] }]
+                  - set: [<.paint_ms, { call: [time.now] }]
+            - if: { condition: { eq: [{ call: [<.scene.child_clicked, "refresh_btn"] }, 1] }, then: [{ call: [<.refresh, live] }] }
+            - call: [<.space_input]

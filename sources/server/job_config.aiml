@@ -1,0 +1,179 @@
+# JobConfig — was NEBEN einem Job gespeichert wird (doc/spec/106 §106.6,
+# doc/spec/101 §101.9).
+#
+# Vier Beiwagen, eine Klasse: die Parameter eines Jobs und die eines Laufs,
+# der Vorrang eines Jobs und der eines Laufs.  Sie liegen neben dem JobDef,
+# weil ein Feld MEHR am gespeicherten Modell jeden Job unlesbar machte
+# (doc/spec/108 F108-2) — und sie liegen in dieser Datei, weil
+# `cluster_bootstrap.aiml` an seiner Zeilengrenze steht.
+#
+# Static-Check (aiml spec/49 §14): 1 class.
+- import: "sources/shared/job_params.aiml"
+- import: "sources/shared/job_policy.aiml"
+
+- class:
+    name: JobConfig
+    members:
+      - [job_params, Kv<string:JobParams>]
+      - [run_params, Kv<string:JobParams>]
+      - [job_policy, Kv<string:JobPolicy>]
+      - [run_policy, Kv<string:JobPolicy>]
+    methods:
+      - def:
+          name: init
+          access: public
+          body:
+            - set: [<.job_params, { call: [db.open_kv, "job_params", {persist: true}] }]
+            - set: [<.run_params, { call: [db.open_kv, "run_params", {persist: true}] }]
+            - set: [<.job_policy, { call: [db.open_kv, "job_policy", {persist: true}] }]
+            - set: [<.run_policy, { call: [db.open_kv, "run_policy", {persist: true}] }]
+
+      - def:
+          name: has_params
+          access: public
+          static_off: ["str_cmp"]
+          args: [[job_id, string]]
+          return: i32
+          body:
+            - return: { call: [<.job_params.has, job_id] }
+
+      - def:
+          name: has_policy
+          access: public
+          static_off: ["str_cmp"]
+          args: [[job_id, string]]
+          return: i32
+          body:
+            - return: { call: [<.job_policy.has, job_id] }
+
+      - def:
+          name: policy_of_job
+          access: public
+          static_off: ["str_cmp"]
+          args: [[job_id, string]]
+          return: { type: JobPolicy, lifetime: producer }
+          body:
+            - decl: [out, JobPolicy]
+            - set: [out.owner_id, job_id]
+            - if: { condition: { eq: [{ call: [<.job_policy.has, job_id] }, 0] }, then: [{ return: out }] }
+            - set: [out, { call: [<.job_policy.get_copy, job_id] }]
+            - return: out
+
+      # Zwei Speicher, EIN Zugriffspaar: `job_params` traegt die Liste des
+      # Jobs, `run_params` den Schnappschuss eines Laufs (F106-14).
+      - def:
+          name: set_job_params
+          access: public
+          static_off: ["str_cmp"]
+          args: [[job_id, string], [bag, JobParams]]
+          return: i32
+          body:
+            - if: { condition: { eq: [job_id.len, 0] }, then: [{ return: 0 }] }
+            - decl: [rec, JobParams, bag]
+            - set: [rec.owner_id, job_id]
+            - call: [<.job_params.set, job_id, rec]
+            - return: 1
+
+      - def:
+          name: params_of_job
+          access: public
+          static_off: ["str_cmp"]
+          args: [[job_id, string]]
+          return: { type: JobParams, lifetime: producer }
+          body:
+            - decl: [out, JobParams]
+            - set: [out.owner_id, job_id]
+            - if: { condition: { eq: [{ call: [<.job_params.has, job_id] }, 0] }, then: [{ return: out }] }
+            - set: [out, { call: [<.job_params.get_copy, job_id] }]
+            - return: out
+
+      # F106-14: beim Start werden die Werte FESTGESCHRIEBEN.  Ohne diesen
+      # Schnappschuss zeigte ein alter Lauf die Werte von heute — sein
+      # Protokoll passte dann nicht mehr zu seinem Ergebnis.
+      - def:
+          name: freeze_run_params
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run_id, string], [bag, JobParams]]
+          return: i32
+          body:
+            - if: { condition: { eq: [run_id.len, 0] }, then: [{ return: 0 }] }
+            - decl: [rec, JobParams, bag]
+            - set: [rec.owner_id, run_id]
+            - call: [<.run_params.set, run_id, rec]
+            - return: 1
+
+      - def:
+          name: params_of_run
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run_id, string]]
+          return: { type: JobParams, lifetime: producer }
+          body:
+            - decl: [out, JobParams]
+            - set: [out.owner_id, run_id]
+            - if: { condition: { eq: [{ call: [<.run_params.has, run_id] }, 0] }, then: [{ return: out }] }
+            - set: [out, { call: [<.run_params.get_copy, run_id] }]
+            - return: out
+
+      # ── doc/spec/101 §101.9: Vorrang lesen, setzen, festschreiben ───────
+      - def:
+          name: set_job_priority
+          access: public
+          static_off: ["str_cmp"]
+          args: [[job_id, string], [prio, i32]]
+          return: i32
+          body:
+            - if: { condition: { eq: [job_id.len, 0] }, then: [{ return: 0 }] }
+            # F101-32: gespeichert wird nur, was von 0 abweicht — ein Job ohne
+            # Eintrag hat 0, und der Beiwagen bleibt klein.
+            - if:
+                condition: { eq: [prio, 0] }
+                then:
+                  - if: { condition: { gt: [{ call: [<.job_policy.has, job_id] }, 0] }, then: [{ call: [<.job_policy.delete, job_id] }] }
+                  - return: 1
+            - decl: [rec, JobPolicy]
+            - set: [rec.owner_id, job_id]
+            - set: [rec.priority, prio]
+            - call: [<.job_policy.set, job_id, rec]
+            - return: 1
+
+      - def:
+          name: priority_of_job
+          access: public
+          static_off: ["str_cmp"]
+          args: [[job_id, string]]
+          return: i32
+          body:
+            - if: { condition: { eq: [{ call: [<.job_policy.has, job_id] }, 0] }, then: [{ return: 0 }] }
+            - decl: [rec, JobPolicy, { call: [<.job_policy.get_copy, job_id] }]
+            - return: rec.priority
+
+      # F101-30: beim Start festschreiben.  Ein Lauf traegt den Vorrang, den er
+      # beim Start hatte — sonst aenderte ein verstellter Regler die
+      # Reihenfolge laufender Laeufe rueckwirkend.
+      - def:
+          name: freeze_run_priority
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run_id, string], [prio, i32]]
+          return: i32
+          body:
+            - if: { condition: { eq: [run_id.len, 0] }, then: [{ return: 0 }] }
+            - if: { condition: { eq: [prio, 0] }, then: [{ return: 1 }] }
+            - decl: [rec, JobPolicy]
+            - set: [rec.owner_id, run_id]
+            - set: [rec.priority, prio]
+            - call: [<.run_policy.set, run_id, rec]
+            - return: 1
+
+      - def:
+          name: priority_of_run
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run_id, string]]
+          return: i32
+          body:
+            - if: { condition: { eq: [{ call: [<.run_policy.has, run_id] }, 0] }, then: [{ return: 0 }] }
+            - decl: [rec, JobPolicy, { call: [<.run_policy.get_copy, run_id] }]
+            - return: rec.priority

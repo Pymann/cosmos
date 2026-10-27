@@ -1,0 +1,46 @@
+# AP1 (doc/spec/90 §AP1.2): Live-Übersicht aller Agenten.
+# status trägt AgentStatus (i32, wie JobRecord.state); current_run "" = idle.
+
+- model:
+    name: AgentInfo
+    fields:
+      - [agent_id,     string]
+      - [status,       i32]
+      - [host,         string]
+      - [os_name,      string]
+      - [labels,       string]
+      # Welches Abbild dieser Agent traegt ("" = das Dateisystem des Knotens).
+      # Zugeteilt wird danach, nicht nach einem Etikett (doc/spec/110 F110-73).
+      - [image,        string]
+      - [last_seen_ms, i64]
+      - [current_run,  string]
+      # Faehigkeiten, wie bei der Anmeldung gemeldet ("steps" = nimmt Schritte).
+      # Leer heisst: dieser Agent kann keine Schritte annehmen.
+      - [caps,         string]
+      # Anwesenheit, ENTSCHIEDEN VOM SERVER (doc/spec/104 F104-3).  Der Client
+      # darf sie nicht aus `last_seen_ms` selbst ausrechnen: seine Kopie altert
+      # zwischen zwei Pushes, und er erklaerte einen lebendigen Agenten fuer weg
+      # (gemeldet 2026-10-15 — ein harter Reload „reparierte" es).  Die
+      # Herzschlaege kommen beim SERVER an; also urteilt er.
+      - [online,       i32]
+      # doc/spec/109: die Last, die der Agent im Heartbeat meldet.  NICHT persistiert
+      # (AgentInfo lebt im Speicher der Registry) — ein Messwert von vor einem Neustart
+      # ist wertlos, und ein neues Feld an einem KV-Modell kostet einen
+      # Schema-Fingerprint (doc/spec/108 F108-2).
+      #
+      # `res_seen` trennt „noch nichts gemeldet" von „gemeldet: null Last" (F109-6 der
+      # Abnahme): ohne das Feld sieht ein Agent, der nichts sagt, aus wie ein Agent,
+      # der nichts tut.
+      - [cpu_permille, i32]
+      - [rss_kb,       i64]
+      - [res_seen,     i32]
+
+- model:
+    name: AgentList
+    fields:
+      - [agents, list<AgentInfo>]
+      # Wann wurde diese Liste aufgenommen (Server-Uhr)?  Ohne den Stempel
+      # muesste der Leser „zuletzt gesehen" gegen seine EIGENE Uhr rechnen —
+      # und eine Uhren-Differenz saehe aus wie ein abwesender Agent
+      # (doc/spec/104 F99-10).
+      - [taken_ms, i64]

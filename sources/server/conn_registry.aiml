@@ -1,0 +1,133 @@
+# conn_registry.aiml — peer→player Verbindungs-Registry für Disconnect-Cleanup
+# (Memory-Lifecycle Befund 1).
+#
+# Jeder authentifizierte RPC toucht (peer_id→player_id, last_seen, disconnected_at=0);
+# peer_disconnected stempelt disconnected_at; der Sweep (im Server-Tick) forfeitet
+# Spieler OHNE lebende Verbindung nach Ablauf der Reconnect-Grace (30s).  Zweit-Tab:
+# mehrere peer-Einträge je player_id → solange EINER lebt, kein Forfeit.
+#
+# Statt jeden Handler anzufassen setzt der Dispatcher `g_current_peer_id` vor
+# handler.run; die zentrale Token-Auflösung (resolve_token*) toucht damit.
+#
+# Static-Check: 1 model + 1 class.
+
+# Eine KONSTANTE, kein Zustand: nie zugewiesen (aiml spec/21 §6.2).
+- decl: [conn_reconnect_grace_ms, i64, 30000, { const: true }]   # 30s Reconnect-Fenster (Befund 1)
+
+# Vom Dispatcher vor jedem handler.run auf rpc.peer_id gesetzt.
+- decl: [g_current_peer_id, i32]
+# g_conn ist entfallen: ConnRegistry ist jetzt die Instanz `conn` der
+# CosmosRuntime (spec/58 §11.3).  Zugriff: g_runtime.conn.
+
+- model:
+    name: ConnEntry
+    fields:
+      - [peer_id,         i32]
+      - [player_id,       string]
+      - [last_seen,       i64]
+      - [disconnected_at, i64]   # 0 = lebend; >0 = Wall-clock-ms des Disconnects
+
+- class:
+    name: ConnRegistry
+    members:
+      - [entries, list<ConnEntry>]
+    methods:
+      - def: { name: init, body: [{ return: [] }] }
+
+      # count: Anzahl bekannter peer-Einträge (für Memory-Lifecycle-Logging).
+      - def: { name: count, return: i32, body: [{ return: <.entries.len }] }
+
+      # touch: Verbindung peer_id als lebend markieren + player_id zuordnen (upsert).
+      - def:
+          name: touch
+          args: [[peer_id, i32], [player_id, string], [now, i64]]
+          body:
+            - if: { condition: { '||': [{ le: [peer_id, 0] }, { eq: [player_id.len, 0] }] }, then: [{ return: [] }] }
+            - decl: [found, i32, 0]
+            - decl: [tci, i32, 0]
+            - while:
+                condition: { lt: [tci, <.entries.len] }
+                body:
+                  - decl: [ent, ConnEntry, { at: [<.entries, tci] }]
+                  - if:
+                      condition: { eq: [ent.peer_id, peer_id] }
+                      then:
+                        - set: [ent.player_id,       player_id]
+                        - set: [ent.last_seen,       now]
+                        - set: [ent.disconnected_at, 0]
+                        - idx: [<.entries, tci, ent]
+                        - set: [found, 1]
+                  - set: [tci, { +: [tci, 1] }]
+            - if:
+                condition: { eq: [found, 0] }
+                then:
+                  - decl: [nent, ConnEntry]
+                  - set: [nent.peer_id,         peer_id]
+                  - set: [nent.player_id,       player_id]
+                  - set: [nent.last_seen,       now]
+                  - set: [nent.disconnected_at, 0]
+                  - call: [<.entries.push, nent]
+
+      # mark_disconnected: Verbindung peer_id als getrennt stempeln (Grace startet).
+      - def:
+          name: mark_disconnected
+          args: [[peer_id, i32], [now, i64]]
+          body:
+            - decl: [mdi, i32, 0]
+            - while:
+                condition: { lt: [mdi, <.entries.len] }
+                body:
+                  - decl: [ent, ConnEntry, { at: [<.entries, mdi] }]
+                  - if:
+                      condition: { '&&': [{ eq: [ent.peer_id, peer_id] }, { eq: [ent.disconnected_at, 0] }] }
+                      then:
+                        - set: [ent.disconnected_at, now]
+                        - idx: [<.entries, mdi, ent]
+                  - set: [mdi, { +: [mdi, 1] }]
+
+      # player_live: 1, wenn player_id mindestens EINE lebende Verbindung hat (Zweit-Tab).
+      - def:
+          name: player_live
+          args: [[player_id, string]]
+          return: i32
+          body:
+            - decl: [pli, i32, 0]
+            - while:
+                condition: { lt: [pli, <.entries.len] }
+                body:
+                  - decl: [ent, ConnEntry, { at: [<.entries, pli] }]
+                  - if: { condition: { '&&': [{ eq: [ent.player_id, player_id] }, { eq: [ent.disconnected_at, 0] }] }, then: [{ return: 1 }] }
+                  - set: [pli, { +: [pli, 1] }]
+            - return: 0
+
+      # take_gone_players: entfernt grace-abgelaufene getrennte Einträge und liefert die
+      # player_ids, die DANACH keine lebende Verbindung mehr haben (→ forfeiten).  Dedup.
+      - def:
+          name: take_gone_players
+          args: [[now, i64]]
+          return: { type: list<string>, lifetime: producer }
+          body:
+            - decl: [gone, list<string>]
+            - decl: [kept, list<ConnEntry>]
+            - decl: [cand, list<string>]   # player_ids mit grace-abgelaufenem Disconnect
+            - decl: [swi, i32, 0]
+            - while:
+                condition: { lt: [swi, <.entries.len] }
+                body:
+                  - decl: [ent, ConnEntry, { at: [<.entries, swi] }]
+                  - decl: [expired, i32, { '&&': [{ gt: [ent.disconnected_at, 0] }, { gt: [{ -: [now, ent.disconnected_at] }, conn_reconnect_grace_ms] }] }]
+                  - if:
+                      condition: { eq: [expired, 1] }
+                      then: [{ if: { condition: { eq: [{ call: [cand.contains, ent.player_id] }, 0] }, then: [{ call: [cand.push, ent.player_id] }] } }]
+                      else: [{ call: [kept.push, ent] }]
+                  - set: [swi, { +: [swi, 1] }]
+            - set: [<.entries, kept]
+            # cand-Spieler sind nur „gone", wenn KEINE lebende Verbindung mehr übrig ist.
+            - decl: [cai, i32, 0]
+            - while:
+                condition: { lt: [cai, cand.len] }
+                body:
+                  - decl: [pid, string, { at: [cand, cai] }]
+                  - if: { condition: { eq: [{ call: [<.player_live, pid] }, 0] }, then: [{ call: [gone.push, pid] }] }
+                  - set: [cai, { +: [cai, 1] }]
+            - return: gone

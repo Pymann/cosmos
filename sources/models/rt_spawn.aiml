@@ -1,0 +1,42 @@
+# Der Auftrag, auf DIESEM Wirt einen Container zu starten (doc/spec/110 §110.36).
+#
+# Der Agent fragt danach (`claim_spawn`), wie er nach Schritten fragt — er hat
+# keinen RPC-Empfang, und eine zweite Richtung im Protokoll waere eine zweite
+# Stelle fuer Anmeldung, Fristen und Wiederholung (F110-123).
+#
+# Das TOKEN des neuen Containers praegt der Controller und schickt es mit: wer
+# Zugaenge vergibt, bleibt eine Stelle (F110-118).
+#
+# Static-Check (aiml spec/49 §14): 2 models.
+
+- model:
+    name: SpawnWant
+    fields:
+      # 0 = nichts zu starten; KEIN Fehler, genau wie bei `claim_step`.
+      - [found,      i32]
+      # Kennung UND Geheimnis des neuen Containers — beides vom Controller.
+      - [agent_id,   string]
+      - [agent_token, string]
+      # WORIN er laufen soll ("" = das Vorgabe-Abbild des Wirts).
+      - [image,      string]
+      # Grenzen der Maschine (aiml spec/62 §18.1a).  0 = Vorgabe des Wirts.
+      - [cpu_cores,  i32]
+      - [mem_mb,     i32]
+      - [pids_max,   i32]
+      # Freigaben (aiml spec/62 §18.1b): "name:/ziel:modus,…".  Aufgeloest wird
+      # auf dem WIRT, der sie einhaengt — der Name reist, der Pfad nie.
+      - [shares,     string]
+      # Woran sich der neue Container anmeldet.  Der Wirt kennt seine eigene
+      # Adresse zum Controller nicht unbedingt (NAT, mehrere Netze), also sagt
+      # sie der Controller.
+      - [exec_url,   string]
+
+- model:
+    name: SpawnReport
+    fields:
+      - [agent_id,   string]
+      # 1 = laeuft, 0 = gescheitert (dann traegt `reason` die Begruendung).
+      - [alive,      i32]
+      - [reason,     string]
+      # Wo das Buendel liegt — fuer das Abraeumen und fuer den Schnitt.
+      - [bundle,     string]

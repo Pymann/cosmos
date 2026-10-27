@@ -1,0 +1,547 @@
+# Die Ausfuehrungskette ohne Netz und ohne Agenten (doc/spec/103).
+#
+# Geprueft wird der Server-Teil: ein Lauf wird angelegt, ein Agent holt einen
+# Schritt, meldet ihn, und der naechste wird zuteilbar.  Genau die Faelle, die
+# im Betrieb weh tun — fremder Melder, abgelaufenes Lehen, Schritt ohne Befehl —
+# sind die, die man sonst nie ausprobiert.
+# Expected exit code: 0
+
+- import: "sources/server/cluster_bootstrap.aiml"
+
+- def:
+    name: expect
+    args: [[what, string], [cond, i32]]
+    return: i32
+    body:
+      - if:
+          condition: { eq: [cond, 1] }
+          then: [{ call: [log.info, "  ok   ${what}"] }, { return: 0 }]
+      - call: [log.info, "  FAIL ${what}"]
+      - return: 1
+
+- def:
+    name: make_stage
+    args: [[stage_id, string], [name, string], [command, string], [label, string]]
+    return: { type: PipelineStage, lifetime: producer }
+    body:
+      - decl: [stg, PipelineStage]
+      - set: [stg.stage_id, stage_id]
+      - set: [stg.name, name]
+      - set: [stg.status, "pending"]
+      - set: [stg.command, command]
+      - set: [stg.required_label, label]
+      - set: [stg.bindings, "arch=x86_64"]
+      - return: stg
+
+# Wer fragt: Kennung, Etiketten, Abbild (doc/spec/110 §110.29).  Als Helfer,
+# weil jeder Anspruch ihn braucht und drei Zeilen je Aufruf den Test unlesbar
+# machten.
+- def:
+    name: asks
+    static_off: ["str_cmp"]
+    args: [[agent_id, string], [labels, string], [image, string]]
+    return: { type: ClaimWho, lifetime: producer }
+    body:
+      - decl: [out, ClaimWho]
+      - set: [out.agent_id, agent_id]
+      - set: [out.labels, labels]
+      - set: [out.image, image]
+      - return: out
+
+# Ein Push-Ziel (doc/spec/110 §110.30): welche Stufe, wohin.
+- def:
+    name: wants_push
+    static_off: ["str_cmp"]
+    args: [[from_stage, string], [target, string]]
+    return: { type: PushTarget, lifetime: producer }
+    body:
+      - decl: [out, PushTarget]
+      - set: [out.from_stage, from_stage]
+      - set: [out.target, target]
+      - set: [out.tag, "probe"]
+      - set: [out.status, "pending"]
+      - return: out
+
+# lay_of: die Schichtzeile einer Stufe im Schnappschuss (doc/spec/107 §107.1c).
+# Leeres `stage` heisst: keine da.
+- def:
+    name: lay_of
+    static_off: ["str_cmp"]
+    args: [[snap, ref<ClusterView>], [who, string]]
+    return: StageLayer
+    body:
+      - decl: [out, StageLayer]
+      - decl: [lix, i32, 0]
+      - while:
+          condition: { lt: [lix, snap.layers.len] }
+          body:
+            - decl: [row, StageLayer, { at: [snap.layers, lix] }]
+            - set: [lix, { +: [lix, 1] }]
+            - if: { condition: { eq: [row.stage, who] }, then: [{ return: row }] }
+      - return: out
+
+# Container auf einem FREMDEN Wirt (doc/spec/110 §110.36): WER darf einen
+# starten, und wann?  Die Entscheidung ist Controller-Logik und hier ohne Netz
+# und ohne Agenten pruefbar — genau wie die Zuteilung selbst.
+- def:
+    name: spawn_case
+    static_off: ["str_cmp"]
+    args: [[boot, ref<ClusterBootstrap>]]
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      - decl: [jetzt, i64, 1760000000000]
+      # Ein Lauf, der auf ein Abbild wartet — sonst gaebe es nichts zu starten.
+      - decl: [sp_run, PipelineRun]
+      - set: [sp_run.run_id, "r-sp"]
+      - set: [sp_run.status, "queued"]
+      - decl: [sp_stg, PipelineStage, { call: [make_stage, "sp-1", "bauen", "echo bau", "x86_64"] }]
+      - set: [sp_stg.image, "ubuntu-base"]
+      - call: [sp_run.stages.push, sp_stg]
+      - call: [boot.add_pipeline, sp_run]
+
+      # Ein Wirt OHNE die Faehigkeit `spawn` wird nie gefragt (F110-119/126).
+      - decl: [ohne, SpawnWant, { call: [boot.hand_out_spawn, "knoten-a", "steps", "x86_64", jetzt] }]
+      - set: [fails, { +: [fails, { call: [expect, "ohne `spawn` kein Auftrag", { eq: [ohne.found, 0] }] }] }]
+      # Mit der Faehigkeit und passenden Etiketten: Auftrag, mit Abbild.
+      - decl: [raus, SpawnWant, { call: [boot.hand_out_spawn, "knoten-a", "steps,spawn", "x86_64", jetzt] }]
+      - set: [fails, { +: [fails, { call: [expect, "mit `spawn` kommt der Auftrag", { eq: [raus.found, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und nennt das Abbild", { eq: [raus.image, "ubuntu-base"] }] }] }]
+      # Zweimal fragen gibt nicht zwei Container.
+      - decl: [nochmal, SpawnWant, { call: [boot.hand_out_spawn, "knoten-a", "steps,spawn", "x86_64", { +: [jetzt, 1000] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "ein Auftrag je Wirt, nicht zwei", { eq: [nochmal.found, 0] }] }] }]
+      # Scheitert der Start, darf es sofort wieder losgehen — nicht erst in
+      # zwei Minuten.
+      - call: [boot.note_spawn, "knoten-a", 0, "Abbild unbekannt"]
+      - decl: [wieder, SpawnWant, { call: [boot.hand_out_spawn, "knoten-a", "steps,spawn", "x86_64", { +: [jetzt, 2000] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "nach einem Fehlschlag sofort wieder", { eq: [wieder.found, 1] }] }] }]
+      # Die PIPELINE entscheidet (F110-124): ein Wirt mit FALSCHEM Etikett
+      # bekommt nichts, auch wenn er koennte — `runs_on:` ist kein Wunsch.
+      - decl: [lab_run, PipelineRun]
+      - set: [lab_run.run_id, "r-sp2"]
+      - set: [lab_run.status, "queued"]
+      - decl: [lab_stg, PipelineStage, { call: [make_stage, "sp-2", "nur_arm", "echo arm", "arm64"] }]
+      - set: [lab_stg.image, "ubuntu-base"]
+      - call: [lab_run.stages.push, lab_stg]
+      - call: [boot.add_pipeline, lab_run]
+      - call: [boot.note_spawn, "knoten-b", 0, "zuruecksetzen"]
+      - decl: [falsch, SpawnWant, { call: [boot.hand_out_spawn, "knoten-b", "steps,spawn", "riscv64", { +: [jetzt, 3000] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "ein Wirt, auf den keine Stufe zeigt, bekommt nichts", { eq: [falsch.found, 0] }] }] }]
+      - decl: [richtig, SpawnWant, { call: [boot.hand_out_spawn, "knoten-c", "steps,spawn", "arm64", { +: [jetzt, 3000] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "der genannte Wirt schon", { eq: [richtig.found, 1] }] }] }]
+      - return: fails
+
+# Freigaben: eigener Pruefblock, weil `main` an der 300-Zeilen-Grenze steht
+# (aiml spec/49).  Rueckgabe = Zahl der Fehlschlaege, wie bei `expect`.
+- def:
+    name: shares_case
+    static_off: ["str_cmp"]
+    args: [[boot, ref<ClusterBootstrap>]]
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      # ── Freigaben reisen mit dem LAUF, nicht mit der Stufe (F110-105) ───
+      # Einhaengen kann der Wirt nur beim Start des Containers; eine Freigabe,
+      # die erst die dritte Stufe nennt, muesste sonst draussen bleiben.
+      - decl: [sh_run, PipelineRun]
+      - set: [sh_run.run_id, "r-13"]
+      - set: [sh_run.status, "queued"]
+      - decl: [sh_a, PipelineStage, { call: [make_stage, "sh-1", "holen", "echo holen", ""] }]
+      - set: [sh_a.image, "ubuntu-base"]
+      - set: [sh_a.shares, "quellen:/mnt/quellen:ro"]
+      - call: [sh_run.stages.push, sh_a]
+      - decl: [sh_b, PipelineStage, { call: [make_stage, "sh-2", "ablegen", "echo ablegen", ""] }]
+      - set: [sh_b.image, "ubuntu-base"]
+      - set: [sh_b.shares, "quellen:/mnt/quellen:ro,ablage:/mnt/out:rw"]
+      - call: [sh_run.stages.push, sh_b]
+      - call: [boot.add_pipeline, sh_run]
+      - decl: [sh_want, PendingWant, { call: [boot.first_pending_want, ""] }]
+      - set: [fails, { +: [fails, { call: [expect, "die Freigabe der ersten Stufe reist mit", { ge: [{ call: [sh_want.shares.index_of, "quellen:/mnt/quellen:ro"] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "die der SPAETEREN Stufe auch (${sh_want.shares})", { ge: [{ call: [sh_want.shares.index_of, "ablage:/mnt/out:rw"] }, 0] }] }] }]
+      # Zweimal dasselbe Ziel waere eine Einhaengung ueber der anderen.
+      - decl: [doppelt, string, { call: [boot.merge_shares, "quellen:/mnt/quellen:ro", "anders:/mnt/quellen:rw"] }]
+      - set: [fails, { +: [fails, { call: [expect, "ein zweites Ziel gleichen Namens kommt nicht dazu", { eq: [doppelt, "quellen:/mnt/quellen:ro"] }] }] }]
+      - return: fails
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      - decl: [boot, ptr<ClusterBootstrap>, { new: ClusterBootstrap }]
+      - call: [boot.init]
+      - decl: [now, i64, 1760000000000]
+
+      - decl: [run, PipelineRun]
+      - set: [run.run_id, "r-1"]
+      - set: [run.pipeline_name, "demo"]
+      - set: [run.status, "running"]
+      - call: [run.stages.push, { call: [make_stage, "s-1", "compile", "echo eins", ""] }]
+      - call: [run.stages.push, { call: [make_stage, "s-2", "test", "echo zwei", ""] }]
+      - call: [boot.add_pipeline, run]
+
+      # ── Holen ───────────────────────────────────────────────────────────
+      - decl: [first, StepAssignment, { call: [boot.claim_for, { call: [asks, "builder-1", "linux", ""] }, now] }]
+      - set: [fails, { +: [fails, { call: [expect, "ein Schritt wird zugeteilt", { eq: [first.found, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "der Lauf ist benannt", { eq: [first.run_id, "r-1"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "der Befehl reist mit", { eq: [first.command, "echo eins"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "das Lehen hat eine Frist", { gt: [first.lease_until, now] }] }] }]
+
+      # Dieselbe Lane: der zweite Schritt ist noch NICHT dran (F101-9).
+      - decl: [blocked, StepAssignment, { call: [boot.claim_for, { call: [asks, "builder-2", "linux", ""] }, now] }]
+      - set: [fails, { +: [fails, { call: [expect, "der naechste wartet auf den ersten", { eq: [blocked.found, 0] }] }] }]
+
+      # ── Erneuern ────────────────────────────────────────────────────────
+      - decl: [later, i64, { +: [now, 10000] }]
+      - decl: [until, i64, { call: [boot.renew_for, "r-1", "s-1", "builder-1", later, first.attempt] }]
+      - set: [fails, { +: [fails, { call: [expect, "der Halter darf erneuern", { gt: [until, first.lease_until] }] }] }]
+      - decl: [not_mine, i64, { call: [boot.renew_for, "r-1", "s-1", "builder-9", later, first.attempt] }]
+      - set: [fails, { +: [fails, { call: [expect, "ein Fremder darf NICHT erneuern", { eq: [not_mine, 0] }] }] }]
+
+      # ── Melden ──────────────────────────────────────────────────────────
+      - decl: [rep1, StepReportReq]
+      - set: [rep1.agent_id, "builder-1"]
+      - set: [rep1.run_id, "r-1"]
+      - set: [rep1.stage_id, "s-1"]
+      - set: [rep1.attempt, first.attempt]
+      - set: [rep1.layer_bytes, 4096]
+      - set: [rep1.layer_files, 7]
+      - decl: [took, i32, { call: [boot.report_for, rep1, later] }]
+      - set: [fails, { +: [fails, { call: [expect, "der Bericht wird angenommen", { eq: [took, 1] }] }] }]
+      - decl: [second, StepAssignment, { call: [boot.claim_for, { call: [asks, "builder-2", "linux", ""] }, later] }]
+      - set: [fails, { +: [fails, { call: [expect, "danach ist der naechste dran", { eq: [second.found, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und es ist der zweite", { eq: [second.stage_id, "s-2"] }] }] }]
+
+      # ── Die SCHICHT der Stufe (doc/spec/107 §107.1c, doc/spec/110 F110-93) ──
+      # Der Agent misst seinen overlayfs-`upper` und schickt die zwei Zahlen mit
+      # dem Bericht; der Controller legt sie neben den Lauf (nicht IN ihn,
+      # doc/spec/108 F108-2) und der Schnappschuss traegt sie zum Bild.
+      - decl: [v_one, ClusterView, { call: [boot.snapshot] }]
+      - decl: [l_one, StageLayer, { call: [lay_of, v_one, "compile"] }]
+      - set: [fails, { +: [fails, { call: [expect, "die Schicht der Stufe steht im Schnappschuss", { eq: [l_one.stage, "compile"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "sie kennt ihren Lauf", { eq: [l_one.run_id, "r-1"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "mit den gemeldeten Bytes", { eq: [l_one.bytes, 4096] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und der Dateizahl", { eq: [l_one.files, 7] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und ihrer Lane", { eq: [l_one.bindings, "arch=x86_64"] }] }] }]
+      # Vorgabe der Pipeline-Syntax: nichts ist wiederverwendbar, bis jemand es
+      # behauptet (aiml spec/62 §7) — und gespeichert ist sie erst, wenn jemand
+      # nachgesehen hat.
+      - set: [fails, { +: [fails, { call: [expect, "unbehauptet heisst opaque", { eq: [l_one.reuse, ReuseClass.opaque] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und ungeprueft heisst NICHT gespeichert", { eq: [l_one.stored, 0] }] }] }]
+
+      # „Ab hier nochmal": dieselbe Stufe meldet neu — ihre Zeile wird ERSETZT,
+      # nicht ergaenzt (F110-97).  Zwei Platten fuer eine Stufe gibt es nicht.
+      - decl: [back_n, i32, { call: [boot.rewind_to, "r-1", "s-1"] }]
+      - set: [fails, { +: [fails, { call: [expect, "die Stufe wartet wieder", { gt: [back_n, 0] }] }] }]
+      - decl: [again, StepAssignment, { call: [boot.claim_for, { call: [asks, "builder-1", "linux", ""] }, later] }]
+      - decl: [rep1b, StepReportReq]
+      - set: [rep1b.agent_id, "builder-1"]
+      - set: [rep1b.run_id, "r-1"]
+      - set: [rep1b.stage_id, "s-1"]
+      - set: [rep1b.attempt, again.attempt]
+      - set: [rep1b.layer_bytes, 512]
+      - set: [rep1b.layer_files, 2]
+      - call: [boot.report_for, rep1b, later]
+      - decl: [v_two, ClusterView, { call: [boot.snapshot] }]
+      - decl: [n_comp, i32, 0]
+      - decl: [cix2, i32, 0]
+      - while:
+          condition: { lt: [cix2, v_two.layers.len] }
+          body:
+            - decl: [crow, StageLayer, { at: [v_two.layers, cix2] }]
+            - set: [cix2, { +: [cix2, 1] }]
+            - if: { condition: { eq: [crow.stage, "compile"] }, then: [{ set: [n_comp, { +: [n_comp, 1] }] }] }
+      - set: [fails, { +: [fails, { call: [expect, "eine Stufe hat EINE Platte, auch nach dem Wiederlauf", { eq: [n_comp, 1] }] }] }]
+      - decl: [l_two, StageLayer, { call: [lay_of, v_two, "compile"] }]
+      - set: [fails, { +: [fails, { call: [expect, "und es ist die NEUE Messung", { eq: [l_two.bytes, 512] }] }] }]
+
+      # ── Etikett (F103-3) ────────────────────────────────────────────────
+      - decl: [lrun, PipelineRun]
+      - set: [lrun.run_id, "r-2"]
+      - call: [lrun.stages.push, { call: [make_stage, "s-arm", "build", "echo arm", "arm64"] }]
+      - call: [boot.add_pipeline, lrun]
+      - decl: [wrong, StepAssignment, { call: [boot.claim_for, { call: [asks, "x86-box", "x86_64", ""] }, later] }]
+      - set: [fails, { +: [fails, { call: [expect, "falsches Etikett bekommt den Schritt nicht", { eq: [wrong.found, 0] }] }] }]
+      - decl: [right, StepAssignment, { call: [boot.claim_for, { call: [asks, "arm-box", "arm64", ""] }, later] }]
+      - set: [fails, { +: [fails, { call: [expect, "passendes Etikett schon", { eq: [right.stage_id, "s-arm"] }] }] }]
+
+      # ── Ein Schritt ohne Befehl ist NICHT ausfuehrbar (F103-1) ───────────
+      - decl: [nrun, PipelineRun]
+      - set: [nrun.run_id, "r-3"]
+      - call: [nrun.stages.push, { call: [make_stage, "s-none", "leer", "", ""] }]
+      - call: [boot.add_pipeline, nrun]
+      - decl: [empty_cmd, StepAssignment, { call: [boot.claim_for, { call: [asks, "builder-3", "", ""] }, later] }]
+      - set: [fails, { +: [fails, { call: [expect, "zugeteilt, aber ohne Befehl erkennbar", { '&&': [{ eq: [empty_cmd.found, 1] }, { eq: [empty_cmd.command.len, 0] }] }] }] }]
+
+      # ── Abbild (doc/spec/110 F110-73, aiml F62-67) ──────────────────────
+      # Die Umgebung ist etwas anderes als der Ort: ein Agent mit passendem
+      # Etikett, aber falschem Abbild, bekommt den Schritt NICHT — sonst baute
+      # er gegen ein fremdes System, und dem Ergebnis sieht das niemand an.
+      - decl: [irun, PipelineRun]
+      - set: [irun.run_id, "r-4"]
+      - decl: [istage, PipelineStage, { call: [make_stage, "s-img", "bauen", "echo bau", ""] }]
+      - set: [istage.image, "ubuntu-base"]
+      - call: [irun.stages.push, istage]
+      - call: [boot.add_pipeline, irun]
+      - decl: [no_img, StepAssignment, { call: [boot.claim_for, { call: [asks, "blank-box", "", ""] }, later] }]
+      - set: [fails, { +: [fails, { call: [expect, "ohne Abbild kein Schritt mit image:", { neq: [no_img.stage_id, "s-img"] }] }] }]
+      - decl: [bad_img, StepAssignment, { call: [boot.claim_for, { call: [asks, "other-box", "", "debian-base"] }, later] }]
+      - set: [fails, { +: [fails, { call: [expect, "falsches Abbild bekommt ihn auch nicht", { neq: [bad_img.stage_id, "s-img"] }] }] }]
+      - decl: [good_img, StepAssignment, { call: [boot.claim_for, { call: [asks, "ub-box", "", "ubuntu-base"] }, later] }]
+      - set: [fails, { +: [fails, { call: [expect, "passendes Abbild schon", { eq: [good_img.stage_id, "s-img"] }] }] }]
+      # Gegenrichtung: eine Stufe OHNE image: nimmt jede Umgebung (F62-125).
+      - decl: [frei, PipelineRun]
+      - set: [frei.run_id, "r-5"]
+      - call: [frei.stages.push, { call: [make_stage, "s-frei", "egal", "echo egal", ""] }]
+      - call: [boot.add_pipeline, frei]
+      - decl: [any_img, StepAssignment, { call: [boot.claim_for, { call: [asks, "ub-box2", "", "irgendwas"] }, later] }]
+      - set: [fails, { +: [fails, { call: [expect, "ohne image: nimmt jede Umgebung", { eq: [any_img.stage_id, "s-frei"] }] }] }]
+
+      # ── push: und die hergeleitete Reihenfolge (aiml F62-129/130) ───────
+      # Nennt eine Stufe als Umgebung, was eine andere Stufe erst HERSTELLT,
+      # dann ist das eine Kante im Graphen.  Ohne sie liefe die zweite Stufe
+      # gegen das Abbild des vorigen Laufs: gruen, falsch, und beim naechsten
+      # Mal wieder anders.
+      - decl: [krun, PipelineRun]
+      - set: [krun.run_id, "r-6"]
+      - set: [krun.status, "running"]
+      - call: [krun.stages.push, { call: [make_stage, "s-erste", "erste", "echo eins", ""] }]
+      - decl: [zwei, PipelineStage, { call: [make_stage, "s-zweite", "zweite", "echo zwei", ""] }]
+      - set: [zwei.image, "oci:deploy/oci/zwischen"]
+      - call: [krun.stages.push, zwei]
+      - call: [krun.pushes.push, { call: [wants_push, "erste", "oci:deploy/oci/zwischen"] }]
+      - call: [boot.add_pipeline, krun]
+
+      # Solange die erste Stufe laeuft, gibt es nichts zu schreiben.
+      - decl: [zu_frueh, PushTarget, { call: [boot.push_ready] }]
+      - set: [fails, { +: [fails, { call: [expect, "kein Push, solange die Stufe laeuft", { eq: [zu_frueh.status.len, 0] }] }] }]
+
+      - decl: [p_erste, StepAssignment, { call: [boot.claim_for, { call: [asks, "p-box", "", ""] }, later] }]
+      - set: [fails, { +: [fails, { call: [expect, "die erste Stufe wird zugeteilt", { eq: [p_erste.stage_id, "s-erste"] }] }] }]
+      # Die zweite wartet — nicht wegen der Lane, sondern weil ihr Abbild
+      # NOCH NICHT EXISTIERT (F62-129).
+      - decl: [p_zu_frueh, StepAssignment, { call: [boot.claim_for, { call: [asks, "z-box", "", "oci:deploy/oci/zwischen"] }, later] }]
+      - set: [fails, { +: [fails, { call: [expect, "die zweite wartet auf ihr Abbild", { neq: [p_zu_frueh.stage_id, "s-zweite"] }] }] }]
+
+      - decl: [rep2, StepReportReq]
+      - set: [rep2.agent_id, "p-box"]
+      - set: [rep2.run_id, "r-6"]
+      - set: [rep2.stage_id, "s-erste"]
+      - set: [rep2.attempt, p_erste.attempt]
+      - decl: [took2, i32, { call: [boot.report_for, rep2, later] }]
+      - set: [fails, { +: [fails, { call: [expect, "die erste Stufe ist fertig", { eq: [took2, 1] }] }] }]
+
+      # Jetzt ist der Schnitt das Ergebnis — und der Agent reist mit, weil nur
+      # er sagt, wo die Wurzel liegt.
+      - decl: [bereit, PushTarget, { call: [boot.push_ready] }]
+      - set: [fails, { +: [fails, { call: [expect, "danach ist der Push bereit", { eq: [bereit.status, "ready"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und nennt den Lauf", { eq: [bereit.message, "r-6"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und den Agenten, der sie ausfuehrte", { eq: [bereit.agent, "p-box"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und das Ziel", { eq: [bereit.target, "oci:deploy/oci/zwischen"] }] }] }]
+
+      # Geschrieben ist noch nicht fertig: erst die Digest macht die Umgebung
+      # benennbar (F62-130).
+      - decl: [p_noch, StepAssignment, { call: [boot.claim_for, { call: [asks, "z-box2", "", "oci:deploy/oci/zwischen"] }, later] }]
+      - set: [fails, { +: [fails, { call: [expect, "vor dem Schreiben immer noch nicht", { neq: [p_noch.stage_id, "s-zweite"] }] }] }]
+      - decl: [markiert, i32, { call: [boot.push_mark, "r-6", "erste", "done", "sha256:abc"] }]
+      - set: [fails, { +: [fails, { call: [expect, "der Stand wird festgehalten", { eq: [markiert, 1] }] }] }]
+      - decl: [p_zweite, StepAssignment, { call: [boot.claim_for, { call: [asks, "z-box3", "", "oci:deploy/oci/zwischen"] }, later] }]
+      - set: [fails, { +: [fails, { call: [expect, "danach laeuft die zweite im neuen Abbild", { eq: [p_zweite.stage_id, "s-zweite"] }] }] }]
+      # Gegenprobe: ein unbekannter Lauf laesst sich nicht markieren.
+      - decl: [niemand, i32, { call: [boot.push_mark, "r-999", "erste", "done", ""] }]
+      - set: [fails, { +: [fails, { call: [expect, "ein unbekannter Lauf wird nicht markiert", { eq: [niemand, 0] }] }] }]
+
+      # ── eine Frage, nicht zwei (doc/spec/110 F110-84) ───────────────────
+      # Die Kapazitaetsschleife fragte kuerzer als die Zuteilung: „wartet eine
+      # Stufe?" statt „darf sie jemand nehmen?".  Ergebnis war ein Controller,
+      # der im Minutentakt Container fuer unnehmbare Arbeit startete und sie als
+      # untaetig wieder abraeumte — mitsamt dem Arbeitsverzeichnis des Laufs.
+      - decl: [wartend, PipelineRun]
+      - set: [wartend.run_id, "r-7"]
+      - set: [wartend.status, "running"]
+      - call: [wartend.stages.push, { call: [make_stage, "s-vor", "vorher", "echo vor", ""] }]
+      - decl: [nach, PipelineStage, { call: [make_stage, "s-nach", "nachher", "echo nach", ""] }]
+      - set: [nach.image, "oci:deploy/oci/kommt-noch"]
+      - call: [wartend.stages.push, nach]
+      - call: [wartend.pushes.push, { call: [wants_push, "vorher", "oci:deploy/oci/kommt-noch"] }]
+      - call: [boot.add_pipeline, wartend]
+      # Die VORHERIGE Stufe ist nehmbar — sonst liefe gar nichts mehr an.
+      - decl: [vorn, ClaimWho, { call: [asks, "erste-box", "", ""] }]
+      - set: [fails, { +: [fails, { call: [expect, "die Stufe davor ist nehmbar", { gt: [{ call: [boot.pending_for, vorn] }, 0] }] }] }]
+      # Sie weg, damit nur noch die wartende uebrig ist (gezaehlt wird ueber ALLE
+      # Laeufe — eine freie Stufe irgendwo sagt nichts ueber diese hier).
+      - decl: [erste_dran, StepAssignment, { call: [boot.claim_for, { call: [asks, "halter-box", "", ""] }, later] }]
+      - set: [fails, { +: [fails, { call: [expect, "ein Halter bekommt die erste Stufe", { eq: [erste_dran.stage_id, "s-vor"] }] }] }]
+      - decl: [frage, ClaimWho, { call: [asks, "egal-box", "", "oci:deploy/oci/kommt-noch"] }]
+      - set: [fails, { +: [fails, { call: [expect, "eine Stufe, die auf ihr Abbild wartet, ist nicht nehmbar", { eq: [{ call: [boot.pending_for, frage] }, 0] }] }] }]
+      - decl: [bedarf, PendingWant, { call: [boot.first_pending_want, ""] }]
+      - set: [fails, { +: [fails, { call: [expect, "und sie ist auch kein Grund, einen Container zu starten", { neq: [bedarf.image, "oci:deploy/oci/kommt-noch"] }] }] }]
+
+      # ── der Container gehoert dem Lauf (F110-85) ─────────────────────────
+      - set: [fails, { +: [fails, { call: [expect, "und haelt damit einen offenen Lauf", { eq: [{ call: [boot.serves_open_run, "halter-box"] }, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "ein unbeteiligter Container haelt nichts", { eq: [{ call: [boot.serves_open_run, "fremd-box"] }, 0] }] }] }]
+
+      # ── ein Fehlschlag beendet den Lauf (F101-10, F110-85) ──────────────
+      # Der Nachfolger einer gescheiterten Stufe bleibt `pending` stehen und
+      # wird nie zugeteilt.  Zaehlte er als offene Arbeit, waere der Lauf
+      # unendlich — und der Container seit F110-85 fuer immer gebunden.
+      - decl: [kaputt, PipelineRun]
+      - set: [kaputt.run_id, "r-8"]
+      - set: [kaputt.status, "running"]
+      - call: [kaputt.stages.push, { call: [make_stage, "s-knall", "knall", "exit 1", ""] }]
+      - call: [kaputt.stages.push, { call: [make_stage, "s-danach", "danach", "echo nie", ""] }]
+      - call: [boot.add_pipeline, kaputt]
+      - decl: [knall, StepAssignment, { call: [boot.claim_for, { call: [asks, "pech-box", "", ""] }, later] }]
+      - set: [fails, { +: [fails, { call: [expect, "die erste Stufe wird zugeteilt", { eq: [knall.stage_id, "s-knall"] }] }] }]
+      - decl: [rep3, StepReportReq]
+      - set: [rep3.agent_id, "pech-box"]
+      - set: [rep3.run_id, "r-8"]
+      - set: [rep3.stage_id, "s-knall"]
+      - set: [rep3.attempt, knall.attempt]
+      - set: [rep3.exit_code, 1]
+      - decl: [took3, i32, { call: [boot.report_for, rep3, later] }]
+      - set: [fails, { +: [fails, { call: [expect, "der Fehlschlag wird angenommen", { eq: [took3, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "der Nachfolger ist niemandem zuteilbar", { eq: [{ call: [boot.pending_for, { call: [asks, "neu-box", "", ""] }] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und der Lauf gilt nicht mehr als offen", { eq: [{ call: [boot.serves_open_run, "pech-box"] }, 0] }] }] }]
+
+      # ── nach der letzten Stufe kommt der Push (F110-89) ─────────────────
+      # Der Lauf r-6 ist durch (beide Stufen fertig), aber sein Push-Ziel steht
+      # noch auf "done"?  Nein: oben wurde es markiert.  Darum ein eigener Lauf,
+      # dessen Stufe fertig ist und dessen Push noch offen ist — der Container
+      # muss stehen bleiben, sonst liest `tar` eine Wurzel, die unter ihm
+      # verschwindet.
+      - decl: [nachher, PipelineRun]
+      - set: [nachher.run_id, "r-9"]
+      - set: [nachher.status, "running"]
+      - call: [nachher.stages.push, { call: [make_stage, "s-fertig", "fertig", "echo fertig", ""] }]
+      - call: [nachher.pushes.push, { call: [wants_push, "fertig", "oci:deploy/oci/danach"] }]
+      - call: [boot.add_pipeline, nachher]
+      - decl: [letzte, StepAssignment, { call: [boot.claim_for, { call: [asks, "push-box", "", ""] }, later] }]
+      - set: [fails, { +: [fails, { call: [expect, "die letzte Stufe wird zugeteilt", { eq: [letzte.stage_id, "s-fertig"] }] }] }]
+      - decl: [rep4, StepReportReq]
+      - set: [rep4.agent_id, "push-box"]
+      - set: [rep4.run_id, "r-9"]
+      - set: [rep4.stage_id, "s-fertig"]
+      - set: [rep4.attempt, letzte.attempt]
+      - decl: [took4, i32, { call: [boot.report_for, rep4, later] }]
+      - set: [fails, { +: [fails, { call: [expect, "sie wird als fertig gemeldet", { eq: [took4, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "der Container bleibt, bis der Push durch ist", { eq: [{ call: [boot.serves_open_run, "push-box"] }, 1] }] }] }]
+      - decl: [push_fertig, i32, { call: [boot.push_mark, "r-9", "fertig", "done", "sha256:zzz"] }]
+      - set: [fails, { +: [fails, { call: [expect, "der Push wird als fertig vermerkt", { eq: [push_fertig, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "danach ist der Container frei", { eq: [{ call: [boot.serves_open_run, "push-box"] }, 0] }] }] }]
+
+      # ── Anhalten und Einzelschritt (aiml spec/62 §5.9, F62-53/55/56) ────
+      - decl: [halt_run, PipelineRun]
+      - set: [halt_run.run_id, "r-10"]
+      - set: [halt_run.status, "queued"]
+      - call: [halt_run.stages.push, { call: [make_stage, "h-1", "eins", "echo 1", ""] }]
+      - call: [halt_run.stages.push, { call: [make_stage, "h-2", "zwei", "echo 2", ""] }]
+      - call: [halt_run.stages.push, { call: [make_stage, "h-3", "drei", "echo 3", ""] }]
+      - call: [boot.add_pipeline, halt_run]
+      - decl: [halt_who, ClaimWho, { call: [asks, "halt-box", "", ""] }]
+      # Angehalten: nichts wird zugeteilt — und es wartet auch nichts mehr,
+      # sonst startete der Controller dafür einen Container (F110-84).
+      - call: [boot.set_mode, "r-10", RunMode.halted, 0, "pruefer"]
+      - decl: [nix, StepAssignment, { call: [boot.claim_for, halt_who, later] }]
+      - set: [fails, { +: [fails, { call: [expect, "angehalten wird nichts zugeteilt", { neq: [nix.run_id, "r-10"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und es wartet auch nichts", { eq: [{ call: [boot.pending_for, halt_who] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "der Lauf heiszt jetzt angehalten", { eq: [{ call: [boot.run_status, "r-10"] }, "paused"] }] }] }]
+      # Einzelschritt: genau EINE Stufe darf starten.
+      - call: [boot.set_mode, "r-10", RunMode.stepping, 1, "pruefer"]
+      - decl: [eins, StepAssignment, { call: [boot.claim_for, halt_who, later] }]
+      - set: [fails, { +: [fails, { call: [expect, "ein Schritt wird freigegeben", { eq: [eins.stage_id, "h-1"] }] }] }]
+      - decl: [rep5, StepReportReq]
+      - set: [rep5.agent_id, "halt-box"]
+      - set: [rep5.run_id, "r-10"]
+      - set: [rep5.stage_id, "h-1"]
+      - set: [rep5.attempt, eins.attempt]
+      - decl: [took5, i32, { call: [boot.report_for, rep5, later] }]
+      - set: [fails, { +: [fails, { call: [expect, "und gemeldet", { eq: [took5, 1] }] }] }]
+      - decl: [nochmal, StepAssignment, { call: [boot.claim_for, halt_who, later] }]
+      - set: [fails, { +: [fails, { call: [expect, "danach steht der naechste wieder", { neq: [nochmal.run_id, "r-10"] }] }] }]
+      # Zwei auf einmal freigeben: zwei Stufen, dann wieder Halt.
+      - call: [boot.set_mode, "r-10", RunMode.stepping, 2, "pruefer"]
+      - decl: [frei2, StepAssignment, { call: [boot.claim_for, halt_who, later] }]
+      - decl: [rep6, StepReportReq]
+      - set: [rep6.agent_id, "halt-box"]
+      - set: [rep6.run_id, "r-10"]
+      - set: [rep6.stage_id, frei2.stage_id]
+      - set: [rep6.attempt, frei2.attempt]
+      - call: [boot.report_for, rep6, later]
+      - decl: [frei3, StepAssignment, { call: [boot.claim_for, halt_who, later] }]
+      - set: [fails, { +: [fails, { call: [expect, "zwei Freigaben, zwei Stufen", { '&&': [{ eq: [frei2.stage_id, "h-2"] }, { eq: [frei3.stage_id, "h-3"] }] }] }] }]
+      # Und ganz frei: der Lauf laeuft wieder von selbst.
+      - call: [boot.set_mode, "r-10", RunMode.free, 0, "pruefer"]
+      - set: [fails, { +: [fails, { call: [expect, "freigegeben wartet wieder etwas", { eq: [{ call: [boot.run_halted, "r-10"] }, 0] }] }] }]
+
+      # ── Flagge an den Rand, und „ab hier nochmal" (§107.1d, §101.8) ─────
+      - decl: [flag_run, PipelineRun]
+      - set: [flag_run.run_id, "r-11"]
+      - set: [flag_run.status, "queued"]
+      - call: [flag_run.stages.push, { call: [make_stage, "f-1", "eins", "echo 1", ""] }]
+      - call: [flag_run.stages.push, { call: [make_stage, "f-2", "zwei", "echo 2", ""] }]
+      - call: [flag_run.stages.push, { call: [make_stage, "f-3", "drei", "echo 3", ""] }]
+      - call: [boot.add_pipeline, flag_run]
+      - decl: [flag_who, ClaimWho, { call: [asks, "flag-box", "", ""] }]
+      # Flagge vor der ZWEITEN Stufe: die erste laeuft noch durch.
+      - set: [fails, { +: [fails, { call: [expect, "die Flagge laesst sich setzen", { eq: [{ call: [boot.break_set, "r-11", "f-2", 1] }, 1] }] }] }]
+      - decl: [vor_flag, StepAssignment, { call: [boot.claim_for, flag_who, later] }]
+      - set: [fails, { +: [fails, { call: [expect, "die Stufe davor laeuft noch", { eq: [vor_flag.stage_id, "f-1"] }] }] }]
+      - decl: [rep7, StepReportReq]
+      - set: [rep7.agent_id, "flag-box"]
+      - set: [rep7.run_id, "r-11"]
+      - set: [rep7.stage_id, "f-1"]
+      - set: [rep7.attempt, vor_flag.attempt]
+      - call: [boot.report_for, rep7, later]
+      - decl: [an_flag, StepAssignment, { call: [boot.claim_for, flag_who, later] }]
+      - set: [fails, { +: [fails, { call: [expect, "an der Flagge haelt er", { neq: [an_flag.run_id, "r-11"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und der Lauf heiszt angehalten", { eq: [{ call: [boot.run_status, "r-11"] }, "paused"] }] }] }]
+      # Eine Flagge an einer LAUFENDEN Stufe geht nicht (F62-55).
+      - set: [fails, { +: [fails, { call: [expect, "an einer fertigen Stufe keine Flagge", { eq: [{ call: [boot.break_set, "r-11", "f-1", 1] }, 0] }] }] }]
+      # Weg damit: der Lauf darf weiter.
+      - set: [fails, { +: [fails, { call: [expect, "die Flagge laesst sich wegnehmen", { eq: [{ call: [boot.break_set, "r-11", "f-2", 0] }, 1] }] }] }]
+      - decl: [nach_flag, StepAssignment, { call: [boot.claim_for, flag_who, later] }]
+      - set: [fails, { +: [fails, { call: [expect, "danach geht es weiter", { eq: [nach_flag.stage_id, "f-2"] }] }] }]
+      - decl: [rep8, StepReportReq]
+      - set: [rep8.agent_id, "flag-box"]
+      - set: [rep8.run_id, "r-11"]
+      - set: [rep8.stage_id, "f-2"]
+      - set: [rep8.attempt, nach_flag.attempt]
+      - call: [boot.report_for, rep8, later]
+      # „ab hier nochmal": Stufe zwei und drei wieder wartend.
+      - decl: [zurueck, i32, { call: [boot.rewind_to, "r-11", "f-2"] }]
+      - set: [fails, { +: [fails, { call: [expect, "zwei Stufen wieder wartend (${zurueck})", { eq: [zurueck, 2] }] }] }]
+      - decl: [zweite_wieder, StepAssignment, { call: [boot.claim_for, flag_who, later] }]
+      - set: [fails, { +: [fails, { call: [expect, "und die zweite laeuft erneut", { eq: [zweite_wieder.stage_id, "f-2"] }] }] }]
+      # Und sie laeuft MIT IHREM BEFEHL.  Ohne diese Zusage sah ein Wiederlauf
+      # im Betrieb aus wie Arbeit: der Agent bekam den Schritt, fuehrte eine
+      # leere Zeile aus und meldete Erfolg in derselben Sekunde (gemessen
+      # 22.10.2026 an run-1792672340772).
+      - set: [fails, { +: [fails, { call: [expect, "und zwar mit ihrem Befehl (${zweite_wieder.command})", { eq: [zweite_wieder.command, "echo 2"] }] }] }]
+      # Was davor liegt, bleibt fertig — zurueckgesetzt wird ab hier, nicht alles.
+      - set: [fails, { +: [fails, { call: [expect, "die erste bleibt fertig", { eq: [{ call: [boot.rewind_to, "r-11", "f-9"] }, 0] }] }] }]
+
+      # ── Grenzen reisen mit der wartenden Stufe (F110-91) ────────────────
+      - decl: [res_run, PipelineRun]
+      - set: [res_run.run_id, "r-12"]
+      - set: [res_run.status, "queued"]
+      - decl: [res_stg, PipelineStage, { call: [make_stage, "res-1", "schwer", "echo schwer", ""] }]
+      - set: [res_stg.cpu_cores, 8]
+      - set: [res_stg.mem_mb, 12288]
+      - set: [res_stg.pids_max, 4096]
+      - call: [res_run.stages.push, res_stg]
+      - call: [boot.add_pipeline, res_run]
+      - decl: [bedarf2, PendingWant, { call: [boot.first_pending_want, ""] }]
+      - set: [fails, { +: [fails, { call: [expect, "der Bedarf nennt die Kerne", { eq: [bedarf2.cpu_cores, 8] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und den Speicher", { eq: [bedarf2.mem_mb, 12288] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und die Prozessgrenze", { eq: [bedarf2.pids_max, 4096] }] }] }]
+
+      - set: [fails, { +: [fails, { call: [shares_case, boot] }] }]
+      - set: [fails, { +: [fails, { call: [spawn_case, boot] }] }]
+
+      - if:
+          condition: { eq: [fails, 0] }
+          then: [{ call: [log.info, "test_step_dispatch PASS"] }, { return: 0 }]
+      - call: [log.info, "test_step_dispatch FAIL (${fails})"]
+      - return: 1

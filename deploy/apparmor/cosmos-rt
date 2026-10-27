@@ -1,0 +1,42 @@
+# AppArmor-Profil für cosmos-rt (doc/spec/110 M1).
+#
+# WARUM: Ubuntu setzt `kernel.apparmor_restrict_unprivileged_userns=1`.  Ein
+# *unconfined* Prozess darf einen User-Namespace noch ERZEUGEN, wird dabei aber
+# in das Profil `unprivileged_userns` überführt — und das verweigert das
+# Schreiben der ID-Abbildung.  Gemessen am 18.10.2026 mit `runtime/rt_probe`:
+#
+#   userns erzeugbar: NEIN — setgroups=deny nicht schreibbar
+#
+# Dieselbe Diagnose wie beim Agenten; die ausführliche Begründung steht in
+# `deploy/apparmor/cosmos-agent`.  Ein Prozess mit EIGENEM Profil wird nicht
+# überführt, `userns` erlaubt ihm das Erzeugen, und `flags=(unconfined)` sorgt
+# dafür, dass dieses Profil darüber hinaus nichts einschränkt — die Isolation
+# des Containers leistet der Namespace, nicht AppArmor.
+#
+# BEWUSST NICHT: `sysctl kernel.apparmor_restrict_unprivileged_userns=0`.
+# Das öffnet den Riegel für den GANZEN Rechner, nicht nur für cosmos-rt.
+#
+# EINSPIELEN (einmal je Host, braucht root)
+#   sudo cp deploy/apparmor/cosmos-rt /etc/apparmor.d/cosmos-rt
+#   sudo apparmor_parser -r /etc/apparmor.d/cosmos-rt
+#   ./rt_probe        → muss nun „userns erzeugbar: ja" melden
+#
+# PRÜFEN
+#   sudo aa-status | grep cosmos        # Profil geladen?
+#   sudo grep DENIED /var/log/kern.log  # was fehlt noch?
+
+abi <abi/4.0>,
+
+include <tunables/global>
+
+# Entwicklerpfad, wie beim Agenten.  `{,*/}` deckt Kopien in Arbeits-
+# verzeichnissen ab — AppArmor bindet an den BINÄRPFAD, eine Kopie fiele sonst
+# aus dem Profil.  `rt_probe` ist der Fähigkeitsbericht (M0), `cosmos-rt` die
+# Runtime selbst (ab M2).  Für den Betrieb später auf /opt/cosmos/ umstellen.
+profile cosmos-rt /media/nikolai/95a208ef-ffa2-478b-abdd-ff394baa6a76/projects/python/test/cosmos/{,*/}{rt_probe,cosmos-rt} flags=(unconfined) {
+    # Der Kern: User-Namespaces erzeugen dürfen.
+    userns,
+
+    # Standort-spezifische Ergänzungen, ohne dieses Profil zu ändern.
+    include if exists <local/cosmos-rt>
+}

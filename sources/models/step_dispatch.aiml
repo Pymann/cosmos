@@ -1,0 +1,32 @@
+# Nachrichten der Ausfuehrungskette (doc/spec/103 §103.2).
+#
+# Drei Nachrichten, alle Agent -> Server: holen, erneuern, melden.  Der Agent
+# zieht (F103-2) — der Server haelt Zustand, er treibt nicht.
+
+- model:
+    name: StepClaimReq
+    fields:
+      - [agent_id, string]
+      - [labels,   string]   # "x86_64,linux" — entscheidet ueber Etiketten (F103-3)
+      # Das Abbild, in dem dieser Agent laeuft (doc/spec/110 F110-73).  Eine
+      # Stufe mit `image:` geht nur an einen Agenten mit GENAU diesem Abbild —
+      # die Umgebung ist Schluesselmaterial (aiml F62-67), das Etikett nicht.
+      - [image,    string]
+
+- model:
+    name: StepAssignment
+    fields:
+      - [found,       i32]   # 0 = nichts fuer dich; KEIN Fehler (§103.2)
+      - [run_id,      string]
+      - [stage_id,    string]
+      - [stage_name,  string]
+      - [bindings,    string]
+      - [command,     string]
+      - [image,       string]   # die Umgebung der Stufe ("" = Knoten-Dateisystem)
+      - [requires,    string]   # Vorbedingungen, kommagetrennt (aiml F62-126)
+      # Der UNTERBAU: "run:<lauf>" = die Schichten jenes Laufs liegen unter
+      # denen dieses (aiml spec/62 §18.4, doc/spec/110 F110-114).  "" = keiner.
+      - [base,        string]
+      - [lease_until, i64]
+      - [attempt,     i32]   # F101-7: diese Nummer gehoert in jede Rueckmeldung
+      - [timeout_ms,  i32]   # F103-17: Millisekunden; 0 = Vorgabe des Agenten

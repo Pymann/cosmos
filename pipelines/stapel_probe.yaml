@@ -1,0 +1,21 @@
+# Probe fuer den STAPEL (doc/spec/110 F110-95): drei Stufen, drei Schichten,
+# ein Abbild AUS den Schichten statt aus der ganzen Wurzel.  Die dritte Stufe
+# loescht, was die erste angelegt hat — der Endstand muss das zeigen.
+- pipeline:
+    name: stapel_probe
+    image: ubuntu-base
+    push:
+      - { from: drei, to: "oci:deploy/oci/stapel-probe", tag: "stapel" }
+    steps:
+      - stage:
+          name: eins
+          timeout: 120000
+          run: "set -e; echo 'eins' > /etc/stufe-eins; echo angelegt"
+      - stage:
+          name: zwei
+          timeout: 120000
+          run: "set -e; echo 'zwei' > /etc/stufe-zwei; ls /etc/stufe-*"
+      - stage:
+          name: drei
+          timeout: 120000
+          run: "set -e; rm -f /etc/stufe-eins; ls /etc/stufe-* 2>&1 || true"

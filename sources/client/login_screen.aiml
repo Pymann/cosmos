@@ -1,0 +1,285 @@
+# LoginScreen — Email/Password + Login/Register mit echter Server-Anbindung.
+#
+# Login-Klick   → net_login(email, pass)     → Success setzt <.session.token+<.session.email
+# Register-Klick → net_register(email, pass, email)  — Anzeigename = email vorerst
+# Erfolgs-Flag  <.done wird vom Host (LoginApp) gepollt zum Wechsel Menu.
+#
+# Static-Check: 1 class.
+
+- import: "sources/client/prefabs.aiml"
+- import: "sources/client/net/session_state.aiml"
+- import: "sources/client/localized_docs.aiml"   # localized_doc() für Terms/Privacy-Overlay
+
+- class:
+    name: LoginScreen
+    members:
+      # Kollaborateur; von der Gruppe ueber `sees: [session]` verdrahtet (spec/58 §5.1).
+      - [session, ref<SessionState>]
+      - [initialized,   i32]
+      - [scene,         prefab_instance]
+      - [is_visible,    i32]
+      - [done,          i32]        # 1 wenn Auth erfolgreich (Host polls)
+      - [reg_open,      i32]        # 1 = Register-Overlay sichtbar (gated Klicks)
+      - [terms_overlay, prefab_instance]  # Nutzungsbedingungen/Datenschutz
+      - [terms_open,    i32]        # 1 = Terms-Overlay offen (gated Klicks)
+      - [server_names,  list<string>]  # Anzeigenamen der "up"-Server (aus /servers.json)
+      - [server_urls,   list<string>]  # zugehörige wss/ws-URLs (parallel zu server_names)
+      - [server_idx,    i32]        # aktuell gewählter Index im Picker
+    methods:
+      # apply_server: Picker-Auswahl anwenden — Button-Label setzen, <.session.server_url +
+      # <.session.server_pinned setzen (net_connect nimmt dann diese URL unverändert).
+      - def:
+          name: apply_server
+          args: [[sel, i32]]
+          body:
+            - if: { condition: { lt: [sel, 0] }, then: [{ return }] }
+            - decl: [cnt, i32, <.server_names.len]
+            - if:
+                condition: { lt: [sel, cnt] }
+                then:
+                  - set: [<.server_idx, sel]
+                  - decl: [srv_name, string, { at: [<.server_names, sel] }]
+                  - decl: [srv_url,  string, { at: [<.server_urls,  sel] }]
+                  - call: [<.scene.set_text, "server_btn", srv_name]
+                  - set: [<.session.server_url, srv_url]
+                  - set: [<.session.server_pinned, 1]
+
+      # populate_servers: /servers.json holen und die "up"-Server in die Picker-
+      # Listen füllen; ersten anwenden.  Leere Liste (nativ / kein Static) → Picker
+      # bleibt "(auto)", <.session.server_pinned bleibt 0 → net_connect leitet selbst ab.
+      - def:
+          name: populate_servers
+          body:
+            - decl: [lst, ptr<ServerList>, { call: [<.session.fetch_server_list] }]
+            - if: { condition: { eq: [lst, null] }, then: [{ return }] }
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, lst.servers.len] }
+                body:
+                  - decl: [entry, ServerEntry, { at: [lst.servers, idx] }]
+                  - if:
+                      condition: { eq: [entry.status, ServerStatus.up] }
+                      then:
+                        - call: [<.server_names.push, entry.name]
+                        - call: [<.server_urls.push,  entry.url]
+                  - set: [idx, { +: [idx, 1] }]
+            - if: { condition: { gt: [<.server_names.len, 0] }, then: [{ call: [<.apply_server, 0] }] }
+
+      - def:
+          name: init
+          body:
+            - if: { condition: { eq: [<.initialized, 1] }, then: [{ return }] }
+            - set: [<.scene, { call: [engine.instantiate, "LoginScene"] }]
+            - call: [<.scene.set_pos, 0.0, 0.0]
+            - call: [<.scene.set_z, 0]
+            - call: [<.scene.set_texture, "logo_img", { call: [gl.tex, "cosmos_logo"] }]
+            # Register-Overlay startet versteckt.
+            - call: [<.set_reg_visible, 0]
+            - set: [<.reg_open, 0]
+            # Terms/Privacy-Overlay (eigenes Prefab, über allem) — versteckt.
+            - set: [<.terms_overlay, { call: [engine.instantiate, "TermsOverlay"] }]
+            - call: [<.terms_overlay.set_pos, 0.0, 0.0]
+            - call: [<.terms_overlay.set_z, 200]
+            - call: [<.terms_overlay.set_visible, 0]
+            - set: [<.terms_open, 0]
+            # Server-Picker aus /servers.json befüllen (Web; nativ no-op).
+            - call: [<.populate_servers]
+            # Build-Stempel aus dem gepackten Asset (build_version) anzeigen — zeigt,
+            # welchen Client-Build dieses Gerät geladen hat (Cache-/Versions-Diagnose).
+            - decl: [bstamp, string, { call: [io.read_asset, "build_version"] }]
+            - if: { condition: { gt: [bstamp.len, 0] }, then: [{ call: [<.scene.set_text, "build_lbl", "build ${bstamp}"] }] }
+            - set: [<.initialized, 1]
+            - set: [<.is_visible, 1]
+
+      # set_reg_visible: alle reg_*-Kinder des Overlays ein-/ausblenden.
+      - def:
+          name: set_reg_visible
+          args: [[vis, i32]]
+          body:
+            - call: [<.scene.set_child_visible, "reg_bg",          vis]
+            - call: [<.scene.set_child_visible, "reg_title",       vis]
+            - call: [<.scene.set_child_visible, "reg_nick_lbl",    vis]
+            - call: [<.scene.set_child_visible, "reg_nick_input",  vis]
+            - call: [<.scene.set_child_visible, "reg_email_lbl",   vis]
+            - call: [<.scene.set_child_visible, "reg_email_input", vis]
+            - call: [<.scene.set_child_visible, "reg_pw_lbl",      vis]
+            - call: [<.scene.set_child_visible, "reg_pw_input",    vis]
+            - call: [<.scene.set_child_visible, "reg_disc_chk",    vis]
+            - call: [<.scene.set_child_visible, "reg_terms_link",  vis]
+            - call: [<.scene.set_child_visible, "reg_submit_btn",  vis]
+            - call: [<.scene.set_child_visible, "reg_cancel_btn",  vis]
+            - call: [<.scene.set_child_visible, "reg_status",      vis]
+
+      # set_login_visible: die Login-Karten-Widgets ein-/ausblenden.  Muss beim
+      # Öffnen des Overlays AUS, sonst stiehlt das (weiterhin sichtbare) Login-
+      # text_input hinter dem opaken Panel den Tastatur-Fokus (Hit-Test wählt das
+      # oberste text_input — reg_bg ist nur ein rect).
+      - def:
+          name: set_login_visible
+          args: [[vis, i32]]
+          body:
+            - call: [<.scene.set_child_visible, "card_bg",      vis]
+            - call: [<.scene.set_child_visible, "title",        vis]
+            - call: [<.scene.set_child_visible, "email_lbl",    vis]
+            - call: [<.scene.set_child_visible, "email_input",  vis]
+            - call: [<.scene.set_child_visible, "pw_lbl",       vis]
+            - call: [<.scene.set_child_visible, "pw_input",     vis]
+            - call: [<.scene.set_child_visible, "keep_chk",     vis]
+            - call: [<.scene.set_child_visible, "login_btn",    vis]
+            - call: [<.scene.set_child_visible, "register_btn", vis]
+            - call: [<.scene.set_child_visible, "server_lbl",   vis]
+            - call: [<.scene.set_child_visible, "server_btn",   vis]
+
+      # open_register / close_register: Overlay auf/zu + Felder leeren.
+      - def:
+          name: open_register
+          body:
+            - call: [<.scene.set_text, "reg_nick_input",  ""]
+            - call: [<.scene.set_text, "reg_email_input", ""]
+            - call: [<.scene.set_text, "reg_pw_input",    ""]
+            - call: [<.scene.set_text, "reg_status",      ""]
+            - call: [<.set_login_visible, 0]
+            - call: [<.set_reg_visible, 1]
+            - set: [<.reg_open, 1]
+      - def:
+          name: close_register
+          body:
+            - call: [<.set_reg_visible, 0]
+            - call: [<.set_login_visible, 1]
+            - set: [<.reg_open, 0]
+
+      # show_terms_doc: lädt das sprachrichtige Dokument (vocab Ganzdatei) in die
+      # Body-textbox.  "disclaimer_en" = Nutzungsbedingungen, "privacy_en" = Datenschutz.
+      - def:
+          name: show_terms_doc
+          args: [[stem, string]]
+          body:
+            - call: [<.terms_overlay.set_text, "terms_body", { call: [localized_doc, stem] }]
+      - def:
+          name: open_terms
+          body:
+            - call: [<.show_terms_doc, "disclaimer_en"]
+            - call: [<.terms_overlay.set_visible, 1]
+            - set: [<.terms_open, 1]
+      - def:
+          name: close_terms
+          body:
+            - call: [<.terms_overlay.set_visible, 0]
+            - set: [<.terms_open, 0]
+
+      - def:
+          name: set_visible
+          args: [[vis, i32]]
+          body:
+            - if: { condition: { eq: [<.initialized, 0] }, then: [{ return }] }
+            - call: [<.scene.set_visible, vis]
+            - set: [<.is_visible, vis]
+            # Terms-Overlay (z=200) nie über dem Menü stehen lassen.
+            - if: { condition: { eq: [vis, 0] }, then: [{ call: [<.close_terms] }] }
+
+      - def:
+          name: is_done
+          return: i32
+          body: [{ return: <.done }]
+
+      # reset: nach Logout aufgerufen — done zurücksetzen, sonst schaltet der
+      # App-Loop sofort wieder auf Menu.  Eingabefelder leeren.
+      - def:
+          name: reset
+          body:
+            - set: [<.done, 0]
+            - if:
+                condition: { eq: [<.initialized, 1] }
+                then:
+                  - call: [<.scene.set_text, "email_input", ""]
+                  - call: [<.scene.set_text, "pw_input",    ""]
+                  - call: [<.close_register]
+
+      - def:
+          name: render
+          body:
+            - if: { condition: { eq: [<.initialized, 0] }, then: [{ call: [<.init] }] }
+            - if: { condition: { eq: [<.is_visible, 0] }, then: [{ return }] }
+            # ── Terms/Privacy-Overlay offen (über allem): nur dessen Buttons. ──
+            - if:
+                condition: { eq: [<.terms_open, 1] }
+                then:
+                  - if: { condition: { eq: [{ call: [<.terms_overlay.child_clicked, "close_btn"] }, 1] },   then: [{ call: [<.close_terms] }] }
+                  - if: { condition: { eq: [{ call: [<.terms_overlay.child_clicked, "terms_tab"] }, 1] },   then: [{ call: [<.show_terms_doc, "disclaimer_en"] }] }
+                  - if: { condition: { eq: [{ call: [<.terms_overlay.child_clicked, "privacy_tab"] }, 1] }, then: [{ call: [<.show_terms_doc, "privacy_en"] }] }
+                  - return: []
+            # ── Register-Overlay offen: nur dessen Buttons verarbeiten, Login-
+            #    Buttons dahinter ignorieren (kein Doppel-Handling). ────────────
+            - if:
+                condition: { eq: [<.reg_open, 1] }
+                then:
+                  - if: { condition: { eq: [{ call: [<.scene.child_clicked, "reg_terms_link"] }, 1] }, then: [{ call: [<.open_terms] }] }
+                  - if: { condition: { eq: [{ call: [<.scene.child_clicked, "reg_cancel_btn"] }, 1] }, then: [{ call: [<.close_register] }] }
+                  - if:
+                      condition: { eq: [{ call: [<.scene.child_clicked, "reg_submit_btn"] }, 1] }
+                      then:
+                        - decl: [nick, string, { call: [<.scene.text_value, "reg_nick_input"]  }]
+                        - decl: [rem,  string, { call: [<.scene.text_value, "reg_email_input"] }]
+                        - decl: [rpw,  string, { call: [<.scene.text_value, "reg_pw_input"]    }]
+                        - if:
+                            condition: { lt: [nick.len, 3] }
+                            then: [{ call: [<.scene.set_text, "reg_status", "Nickname braucht mind. 3 Zeichen"] }]
+                            else:
+                              - if:
+                                  condition: { '||': [{ eq: [rem.len, 0] }, { eq: [rpw.len, 0] }] }
+                                  then: [{ call: [<.scene.set_text, "reg_status", "Email und Password erforderlich"] }]
+                                  else:
+                                    - if:
+                                        condition: { eq: [{ call: [<.scene.is_checked, "reg_disc_chk"] }, 0] }
+                                        then: [{ call: [<.scene.set_text, "reg_status", "Bitte die Bedingungen akzeptieren (» anzeigen)"] }]
+                                        else:
+                                          - call: [<.scene.set_text, "reg_status", "registriere ${nick}…"]
+                                          - decl: [rres, AuthResult, { call: [<.session.register, rem, rpw, nick] }]
+                                          - if:
+                                              condition: { eq: [rres.success, 1] }
+                                              then:
+                                                - call: [<.close_register]
+                                                - call: [<.scene.set_text, "status_lbl", "Willkommen, ${rres.display_name}!"]
+                                                - set: [<.done, 1]
+                                              else:
+                                                - call: [<.scene.set_text, "reg_status", rres.message]
+                  - return: []
+            # ── Login-Ansicht (Overlay zu) ────────────────────────────────────
+            - if:
+                condition: { eq: [{ call: [<.scene.child_clicked, "login_btn"] }, 1] }
+                then:
+                  - decl: [em1,  string, { call: [<.scene.text_value, "email_input"] }]
+                  - decl: [pw1,  string, { call: [<.scene.text_value, "pw_input"]    }]
+                  - if:
+                      condition: { '||': [{ eq: [em1.len, 0] }, { eq: [pw1.len, 0] }] }
+                      then:
+                        - call: [<.scene.set_text, "status_lbl", "email und password erforderlich"]
+                      else:
+                        - call: [<.scene.set_text, "status_lbl", "logging in as ${em1}…"]
+                        - decl: [res, AuthResult, { call: [<.session.login, em1, pw1] }]
+                        - if:
+                            condition: { eq: [res.success, 1] }
+                            then:
+                              - call: [<.scene.set_text, "status_lbl", "welcome ${res.display_name}"]
+                              # "keep logged in": net_login speichert den Token
+                              # immer; ist die Checkbox NICHT aktiv, wieder löschen
+                              # → kein Auto-Login beim nächsten Start.
+                              - if: { condition: { eq: [{ call: [<.scene.is_checked, "keep_chk"] }, 0] }, then: [{ call: [<.session.clear_stored_token] }] }
+                              - set: [<.done, 1]
+                            else:
+                              - call: [<.scene.set_text, "status_lbl", res.message]
+            # Register-Button öffnet jetzt das Formular statt direkt zu registrieren.
+            - if:
+                condition: { eq: [{ call: [<.scene.child_clicked, "register_btn"] }, 1] }
+                then:
+                  - call: [<.open_register]
+            # Server-Picker: Klick wechselt zyklisch zum nächsten "up"-Server.
+            - if:
+                condition: { eq: [{ call: [<.scene.child_clicked, "server_btn"] }, 1] }
+                then:
+                  - decl: [num, i32, <.server_names.len]
+                  - if:
+                      condition: { gt: [num, 0] }
+                      then:
+                        - decl: [nxt, i32, { '%': [{ +: [<.server_idx, 1] }, num] }]
+                        - call: [<.apply_server, nxt]

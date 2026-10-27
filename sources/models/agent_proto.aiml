@@ -1,0 +1,61 @@
+# AP1 (doc/spec/90): Agent-Registrierung + Zustands-Enums.
+# Getrennt vom durable-Job-Protokoll (sources/shared/agent_hello.aiml) — der bleibt (§AP1.3).
+# Enums zählen nicht gegen den 3-Typen-Cap (spec/49 §14).
+
+- enum:
+    name: AgentStatus
+    wire: true          # Agenten-Protokoll: der Server benennt, was der Client nicht
+    values:
+      - connected
+      - disconnected
+
+- enum:
+    name: OutStream
+    wire: true
+    values:
+      - out
+      - err
+
+- enum:
+    name: RunState
+    wire: true
+    values:
+      - running
+      - finished
+
+# Agent → cosmosd: Registrierung.  agent_token = gemeinsames Geheimnis (§AP1.7-D3).
+- model:
+    name: AgentRegister
+    fields:
+      - [agent_id,    string]
+      - [agent_token, string]
+      - [labels,      string]
+      # In WELCHEM Abbild laeuft dieser Agent?  "" = auf dem Dateisystem des
+      # Knotens.  Der Server teilt danach zu (doc/spec/110 F110-73) — ein
+      # Etikett sagt nur, WO der Knoten steht.
+      - [image,       string]
+      - [host,        string]
+      - [os_name,     string]
+      # WAS kann dieser Agent?  Ein Agent, der den Ausfuehrungspfad (spec/103)
+      # nicht kennt, meldet sich an und schlaegt Herzschlag — er nimmt nur nie
+      # einen Schritt.  Ohne dieses Feld steht er als „bereit" in der Liste und
+      # niemand kann sehen, warum Jobs liegen bleiben (gemessen 2026-10-15: der
+      # eingerichtete Agent war aelter als `claim_step`).
+      # "steps" = holt sich Schritte.  Leer = kann es nicht.
+      - [caps,        string]
+
+- model:
+    name: AgentAck
+    fields:
+      - [accepted, i32]
+      - [reason, string]
+
+- model:
+    name: AgentBeat
+    fields:
+      - [agent_id, string]
+      # doc/spec/109 F109-7: die Last reist im Heartbeat mit.  Er laeuft ohnehin und
+      # traegt schon „ich lebe"; „und so geht es mir" gehoert in dieselbe Nachricht —
+      # ein zweiter Takt waere ein zweiter Weg, auf dem Daten veralten koennen.
+      - [cpu_permille, i32]
+      - [rss_kb,       i64]

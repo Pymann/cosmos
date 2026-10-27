@@ -1,0 +1,111 @@
+# Abnahme der Skript-Konsole (doc/spec/108 C1-C4, F108-15/F108-16).
+#
+# Prueft den Pfad, den der RPC-Handler nimmt — ConsoleRunner.run_script — ohne Netz.
+# Die Freigabe ist das Argument, nicht die Umgebung des Testlaufs: derselbe Code muss
+# fuer zwei Nutzer mit verschiedenen Rechten laufen (spec/65 F65-36).
+#
+# COSMOS_ROOT zeigt auf das Projektverzeichnis (run_tests.sh setzt es), weil die Probe
+# in einem eigenen Arbeitsverzeichnis laeuft, die Artefakte aber im Projekt liegen.
+# Expected exit code: 0
+
+- import: "sources/server/console_runner.aiml"
+
+- def:
+    name: expect
+    args: [[label, string], [cond, i32]]
+    return: i32
+    body:
+      - if: { condition: { eq: [cond, 1] }, then: [{ return: 0 }] }
+      - print: ["  FAIL ${label}"]
+      - return: 1
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      - decl: [cenv, map<string:string>, { call: [sys.env] }]
+      - decl: [root, string, "."]
+      - if:
+          condition: { gt: [{ call: [cenv.contains, "COSMOS_ROOT"] }, 0] }
+          then:
+            - decl: [raw, string, { call: [cenv.get, "COSMOS_ROOT"] }]
+            - set: [root, "${raw}"]
+
+      - decl: [runner, ptr<ConsoleRunner>, { new: ConsoleRunner }]
+      - call: [runner.init_with,
+               "${root}/../aiml/out/aiml/aiml",
+               "${root}/deploy/clearance/console_exports.txt",
+               "${root}/deploy/clearance/console_preamble.aiml",
+               "${root}/libcosmos_console_offer.so",
+               "console_runs"]
+      - call: [runner.set_snapshot, "${root}/probe/console/snapshot.txt"]
+
+      # C1: Freigabe 1 (Admin) — das Angebot steht auf Level 1, der Aufruf geht durch.
+      # KEIN ${...} in diesen Proben-Skripten: aiml interpoliert Zeichenketten bereits
+      # beim Uebersetzen DIESER Datei — der Platzhalter waere hier aufgeloest worden und
+      # nie im Kind-Skript angekommen.  Also den Wert direkt uebergeben.
+      - decl: [src_ok, string, "- def:\n    name: main\n    return: i32\n    body:\n      - decl: [who, string, { call: [cosmos_whoami] }]\n      - call: [log.info, who]\n      - return: [0]"]
+      - decl: [r_ok, ConsoleExecResult, { call: [runner.run_script, "u_admin", src_ok, 1] }]
+      - set: [fails, { +: [fails, { call: [expect, "C1 Admin-Lauf endet mit 0", { eq: [r_ok.exit_code, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "C1 Ausgabe traegt den Aufrufer",
+          { ge: [{ call: [r_ok.output.index_of, "u_admin"] }, 0] }] }] }]
+
+      # F108-15/F108-16: dasselbe Skript mit Freigabe 255 — das Angebot steht auf
+      # Level 1, also abgelehnt.  DAS ist der Level-Diskriminator der Ausfuehrung.
+      - decl: [r_low, ConsoleExecResult, { call: [runner.run_script, "u_user", src_ok, 255] }]
+      - set: [fails, { +: [fails, { call: [expect, "F108-15 Freigabe 255 scheitert", { neq: [r_low.exit_code, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "F108-15 Grund ist clearance-denied",
+          { ge: [{ call: [r_low.diagnostics.index_of, "clearance-denied"] }, 0] }] }] }]
+
+      # C2: ein Builtin, das nicht offen ist.  Von Grund auf zu (spec/65 F65-35).
+      - decl: [src_db, string, "- def:\n    name: main\n    return: i32\n    body:\n      - decl: [kv, Kv<string:string>, { call: [db.open_kv, \"x\", {}] }]\n      - return: [0]"]
+      - decl: [r_db, ConsoleExecResult, { call: [runner.run_script, "u_admin", src_db, 1] }]
+      - set: [fails, { +: [fails, { call: [expect, "C2 db.open_kv abgelehnt", { neq: [r_db.exit_code, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "C2 Grund ist clearance-builtin",
+          { ge: [{ call: [r_db.diagnostics.index_of, "clearance-builtin"] }, 0] }] }] }]
+
+      # C4: eigenes `level:` ist Selbstbeglaubigung (spec/65 F65-6/F65-27).
+      - decl: [src_self, string, "- def:\n    name: sneaky\n    level: 1\n    return: i32\n    body:\n      - return: [0]\n- def:\n    name: main\n    return: i32\n    body:\n      - return: [{ call: [sneaky] }]"]
+      - decl: [r_self, ConsoleExecResult, { call: [runner.run_script, "u_admin", src_self, 1] }]
+      - set: [fails, { +: [fails, { call: [expect, "C4 eigenes level: abgelehnt", { neq: [r_self.exit_code, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "C4 Grund ist clearance-self-certify",
+          { ge: [{ call: [r_self.diagnostics.index_of, "clearance-self-certify"] }, 0] }] }] }]
+
+      # doc/spec/108 §6a: die Fundstelle wird auf den Quelltext DES NUTZERS umgerechnet.
+      # `src_db` hat den `db.open_kv`-Aufruf in Zeile 5 — die Praeambel ist abgezogen.
+      # Ohne den Versatz zeigte die Markierung um die Laenge der Praeambel daneben.
+      - set: [fails, { +: [fails, { call: [expect, "Fundstelle liegt im Nutzer-Quelltext",
+          { '&&': [{ gt: [r_db.error_line, 0] }, { le: [r_db.error_line, 8] }] }] }] }]
+      - print: ["  Fundstelle: Zeile ${r_db.error_line} (Nutzer-Quelltext)"]
+      # Ein fehlerfreier Lauf markiert NICHTS — falsch markieren waere schlimmer als gar nicht.
+      - set: [fails, { +: [fails, { call: [expect, "sauberer Lauf ohne Fundstelle",
+          { eq: [r_ok.error_line, 0] }] }] }]
+
+      # Die Dauer wird gemessen und ist plausibel (nicht 0, nicht absurd).
+      - set: [fails, { +: [fails, { call: [expect, "Dauer wird gemessen", { ge: [r_ok.duration_ms, 0] }] }] }]
+
+      # doc/spec/108 F108-18: der Weg ueber den FADEN — annehmen, laufen lassen,
+      # abholen.  `run_script` oben ist der synchrone Kern; hier wird geprueft, dass
+      # die Huelle darum stimmt: eine Kennung, ein zweiter Lauf wird abgelehnt
+      # solange der erste laeuft, und das Ergebnis kommt unter derselben Kennung an.
+      - decl: [job_id, i32, { call: [runner.begin, "u_admin", src_ok, 1] }]
+      - set: [fails, { +: [fails, { call: [expect, "begin liefert eine Kennung", { gt: [job_id, 0] }] }] }]
+      - decl: [busy_id, i32, { call: [runner.begin, "u_admin", src_ok, 1] }]
+      - set: [fails, { +: [fails, { call: [expect, "zweiter Lauf abgelehnt solange belegt", { eq: [busy_id, 0] }] }] }]
+      - decl: [not_yet, ConsoleExecResult, { call: [runner.take_result, job_id] }]
+      - set: [fails, { +: [fails, { call: [expect, "vor dem Lauf kein Ergebnis", { eq: [not_yet.finished, 0] }] }] }]
+      - call: [runner.execute]
+      - decl: [after, ConsoleExecResult, { call: [runner.take_result, job_id] }]
+      - set: [fails, { +: [fails, { call: [expect, "nach dem Lauf fertig", { eq: [after.finished, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Ergebnis traegt die Kennung", { eq: [after.run_id, job_id] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Ergebnis ist das des Skripts", { eq: [after.exit_code, 0] }] }] }]
+      # Eine FREMDE Kennung darf nichts liefern — sonst saehe ein zweiter Nutzer das
+      # Ergebnis eines fremden Laufs.
+      - decl: [alien, ConsoleExecResult, { call: [runner.take_result, { +: [job_id, 99] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "fremde Kennung liefert nichts", { eq: [alien.finished, 0] }] }] }]
+
+      - if: { condition: { gt: [fails, 0] }, then: [{ print: ["test_console: ${fails} failed"] }, { return: 1 }] }
+      - print: ["test_console PASS"]
+      - return: 0

@@ -1,0 +1,222 @@
+# MainMenuScreen (cosmos) — Cluster/Account/Logout + Account-Overlay (E-Mail/Passwort ändern).
+# Trimmed from 9rooms: no arena/deck/card/forum/trade/rulebook/language — control plane only.
+- import: "sources/client/prefabs.aiml"
+- import: "sources/shared/pipe_status.aiml"
+- import: "sources/shared/dashboard.aiml"
+- import: "sources/client/net/live_state.aiml"
+- import: "sources/client/net/session_state.aiml"     # net_change_email/password + <.session.email
+
+- class:
+    name: MainMenuScreen
+    members:
+      # Kollaborateur; von der Gruppe ueber `sees: [session]` verdrahtet (spec/58 §5.1).
+      - [session, ref<SessionState>]
+      # doc/spec/106: die Uebersicht rechnet (Dashboard), der Bildschirm zeichnet.
+      - [live,      ref<LiveState>]
+      - [dash,      Dashboard]
+      # F107-7: die gebundene Liste gibt der Zeilen-ANZAHL ihre Wahrheit; der
+      # Inhalt jeder Zeile kommt aus dem Schnappschuss (eine zweite Kopie der
+      # Jobs waere die zweite Quelle, die §104.0 schon einmal teuer war).
+      - [row_ids,   list<string>]
+      # Zeile → Job-Index im Schnappschuss.  Mit einem Ordnerfilter ist die
+      # Zeilennummer NICHT mehr die Jobnummer, und genau daran gehen solche
+      # Listen kaputt.
+      - [row_idx,   list<i32>]
+      # Gewaehlter Ordner („" = alle), kommt aus der Huelle (doc/spec/107 F107-5).
+      - [folder,    string]
+      # Geklickte Zeile, einmal abholbar (-1 = nichts).  Der Bildschirm RUFT
+      # nicht selbst den Server: er zeichnet, der Wirt handelt (doc/spec/105).
+      - [open_req,  i32]
+      - [start_req, i32]
+      - [new_req,   i32]
+      - [shown_seq, i32]
+      - [initialized, i32]
+      - [scene,        prefab_instance]
+      - [is_visible,   i32]
+    methods:
+      - def:
+          name: init
+          body:
+            - if: { condition: { eq: [<.initialized, 1] }, then: [{ return }] }
+            - set: [<.scene, { call: [engine.instantiate, "MainMenuScene"] }]
+            - call: [<.scene.set_pos, 0.0, 0.0]
+            - call: [<.scene.set_z, 0]
+            # Einmal binden: die Liste wird nur geleert und gefuellt, nie neu
+            # zugewiesen — sonst muesste hier erneut gebunden werden (spec/44_6 §5c).
+            - call: [<.scene.bind_list, "jobs_list", <.row_ids]
+            - set: [<.open_req, -1]
+            - set: [<.start_req, -1]
+            - set: [<.new_req, 0]
+            - set: [<.initialized, 1]
+            - set: [<.is_visible, 1]
+      - def:
+          name: set_visible
+          args: [[vis, i32]]
+          body:
+            - if: { condition: { eq: [<.initialized, 0] }, then: [{ return }] }
+            - call: [<.scene.set_visible, vis]
+            - set: [<.is_visible, vis]
+      # fill_rows: JEDE Zeile aus dem Schnappschuss beschriften und ihre Klicks
+      # einsammeln.  Der Bildschirm ruft den Server NICHT selbst (doc/spec/105):
+      # er merkt sich den Wunsch, der Wirt fuehrt ihn aus.
+      - def:
+          name: fill_rows
+          static_off: ["str_cmp"]
+          body:
+            - if: { condition: { peq: [<.live, null] }, then: [{ return }] }
+            - if: { condition: { eq: [{ call: [<.live.has] }, 0] }, then: [{ return }] }
+            - decl: [rcc, i32, { call: [<.scene.container_row_count, "jobs_list"] }]
+            - decl: [rci, i32, 0]
+            - while:
+                condition: { lt: [rci, rcc] }
+                body:
+                  - decl: [row, prefab_instance, { call: [<.scene.container_row, "jobs_list", rci] }]
+                  - if:
+                      condition: { '&&': [{ neq: [row, null] }, { lt: [rci, <.row_idx.len] }] }
+                      then:
+                        - decl: [jpos, i32, { at: [<.row_idx, rci] }]
+                        - decl: [job, JobDef, { at: [<.live.view.job_defs, jpos] }]
+                        - decl: [row_name, string, job.name]
+                        - if: { condition: { eq: [job.enabled, 0] }, then: [{ set: [row_name, "${job.name}  (abgeschaltet)"] }] }
+                        - call: [row.set_text, "name_lblx", row_name]
+                        - decl: [last, string, "noch nie gelaufen"]
+                        - decl: [dotc, i32, 0x667788FF]
+                        - if:
+                            condition: { gt: [job.last_status.len, 0] }
+                            then:
+                              - decl: [secs, i64, { /: [job.last_ms, 1000] }]
+                              - set: [last, "${job.last_status} in ${secs} s"]
+                              # Ueber den ENUM, nicht ueber Stringvergleiche: hier stand
+                              # `== "ok"` — ein Wort, das dieses System nicht kennt
+                              # (`run_outcome` liefert "done"/"failed").  Der Vergleich
+                              # traf nie zu und faerbte JEDEN abgeschlossenen Lauf rot
+                              # (User 2026-10-18).  `PipeStatus.ok` waere ein
+                              # Uebersetzungsfehler gewesen; `"ok"` ist ein gueltiger
+                              # String, und genau das ist der Unterschied.
+                              #
+                              # Dreiwertig: Unbekanntes bleibt grau statt still gruen —
+                              # daneben steht das Wort, also kann man es lesen.
+                              - decl: [st_code, i32, { call: [pipe_status_of, job.last_status] }]
+                              - if: { condition: { eq: [st_code, PipeStatus.done] }, then: [{ set: [dotc, 0x66CC88FF] }] }
+                              - if: { condition: { eq: [st_code, PipeStatus.failed] }, then: [{ set: [dotc, 0xDD6655FF] }] }
+                        - call: [row.set_text, "last_lblx", last]
+                        - call: [row.set_bg_color, "stat_dotx", dotc]
+                        # Was die zwei Zahlen SIND, steht jetzt im Wert.  `runs_total`
+                        # zaehlt ABGESCHLOSSENE Laeufe (note_run_result laeuft erst, wenn
+                        # ein Lauf ein Ergebnis hat) — die Lauf-NUMMER zaehlt gestartete.
+                        # Die Differenz sind Laeufe ohne Ergebnis: abgebrochen, Agent weg,
+                        # Server neu gestartet.  Sie zu verschweigen laesst die Luecke wie
+                        # einen Zaehlfehler aussehen (User 2026-10-18: „bilanz 0/6, es gibt
+                        # schon 10 laeufe").
+                        - call: [row.set_text, "tally_lbl", "${job.runs_total} fertig · ${job.runs_failed} gescheitert"]
+                        - decl: [started, i32, { -: [job.next_build, 1] }]
+                        - decl: [no_result, i32, { -: [started, job.runs_total] }]
+                        - if:
+                            condition: { gt: [no_result, 0] }
+                            then: [{ call: [row.set_text, "tally_sub", "${no_result} ohne Ergebnis"] }]
+                            else: [{ call: [row.set_text, "tally_sub", ""] }]
+                        # Starten hat Vorrang vor Oeffnen: der Knopf liegt oben,
+                        # sonst wuerde ein Start versehentlich den Editor aufziehen.
+                        - if:
+                            condition: { eq: [{ call: [row.child_clicked, "start_btnx"] }, 1] }
+                            then: [{ set: [<.start_req, jpos] }]
+                            else:
+                              - if:
+                                  condition: { eq: [{ call: [row.child_clicked, "click_area"] }, 1] }
+                                  then: [{ set: [<.open_req, jpos] }]
+                  - set: [rci, { +: [rci, 1] }]
+
+      # take_open / take_start: einmal abholen, dann geloescht — ein Wunsch, der
+      # stehen bleibt, wird in jedem Rahmen erneut ausgefuehrt.
+      # set_folder: die Ordnerwahl kommt aus der Huelle (doc/spec/107 F107-5).
+      # shown_seq zuruecksetzen, sonst wartet die Liste auf den naechsten
+      # Schnappschuss und der Klick waere wirkungslos.
+      - def:
+          name: set_folder
+          access: public
+          static_off: ["str_cmp"]
+          args: [[name, string]]
+          body:
+            - if: { condition: { eq: [name, <.folder] }, then: [{ return }] }
+            - set: [<.folder, name]
+            - set: [<.shown_seq, -1]
+
+      - def:
+          name: take_new
+          access: public
+          return: i32
+          body:
+            - decl: [want, i32, <.new_req]
+            - set: [<.new_req, 0]
+            - return: want
+
+      - def:
+          name: take_open
+          access: public
+          return: i32
+          body:
+            - decl: [want, i32, <.open_req]
+            - set: [<.open_req, -1]
+            - return: want
+      - def:
+          name: take_start
+          access: public
+          return: i32
+          body:
+            - decl: [want, i32, <.start_req]
+            - set: [<.start_req, -1]
+            - return: want
+
+      - def:
+          name: render
+          static_off: ["str_cmp"]
+          body:
+            - if: { condition: { eq: [<.initialized, 0] }, then: [{ call: [<.init] }] }
+            # doc/spec/106 §106.2: nur bei NEUEM Schnappschuss neu rechnen — eine
+            # Uebersicht, die jeden Rahmen neu formatiert, kostet Strom ohne Aussage.
+            - if:
+                condition: { '&&': [{ pneq: [<.live, null] }, { gt: [{ call: [<.live.has] }, 0] }] }
+                then:
+                  - decl: [snap_seq, i32, { call: [<.live.revision] }]
+                  - if:
+                      condition: { neq: [snap_seq, <.shown_seq] }
+                      then:
+                        - set: [<.shown_seq, snap_seq]
+                        # Zeilen-Identitaeten neu setzen: die Anzahl steuert, wie
+                        # viele Zeilen der Container aufspannt.
+                        - call: [<.row_ids.clear]
+                        - call: [<.row_idx.clear]
+                        - decl: [rix, i32, 0]
+                        - while:
+                            condition: { lt: [rix, <.live.view.job_defs.len] }
+                            body:
+                              - decl: [jrec, JobDef, { at: [<.live.view.job_defs, rix] }]
+                              - decl: [take, i32, 1]
+                              - if:
+                                  condition: { gt: [<.folder.len, 0] }
+                                  then:
+                                    - set: [take, { call: [jrec.name.starts_with, "${<.folder}/"] }]
+                              - if:
+                                  condition: { eq: [take, 1] }
+                                  then:
+                                    - call: [<.row_ids.push, jrec.job_id]
+                                    - call: [<.row_idx.push, rix]
+                              - set: [rix, { +: [rix, 1] }]
+                        # F107-4: die Fusszeile des Bildschirms nennt die Menge, nicht den Zustand
+                        # des Netzes — der steht in der Huelle und wuerde hier doppelt stehen.
+                        - decl: [n_jobs, i32, <.row_ids.len]
+                        - decl: [n_all, i32, <.live.view.job_defs.len]
+                        - decl: [n_runs, i32, <.live.view.pipelines.len]
+                        - if:
+                            condition: { eq: [n_jobs, n_all] }
+                            then: [{ call: [<.scene.set_text, "status_lbl", "${n_jobs} Jobs, ${n_runs} Laeufe bekannt"] }]
+                            else: [{ call: [<.scene.set_text, "status_lbl", "${n_jobs} von ${n_all} Jobs (Ordner ${<.folder}), ${n_runs} Laeufe bekannt"] }]
+                        - decl: [none_txt, string, ""]
+                        - if: { condition: { eq: [n_all, 0] }, then: [{ set: [none_txt, "Kein Job angelegt — oben über „Pipelines“ einen anlegen."] }] }
+                        - if: { condition: { '&&': [{ eq: [n_jobs, 0] }, { gt: [n_all, 0] }] }, then: [{ set: [none_txt, "Kein Job in diesem Ordner."] }] }
+                        - call: [<.scene.set_text, "jobs_none", none_txt]
+            - if: { condition: { eq: [<.is_visible, 0] }, then: [{ return }] }
+            # Zeilen JEDEN Rahmen fuellen: der Container gleicht seine Anzahl selbst
+            # ab, eine Zeile kann also nach dem Schnappschuss entstehen (spec/44_6 §5c).
+            - call: [<.fill_rows]
+            - if: { condition: { eq: [{ call: [<.scene.child_clicked, "newjob_btn"] }, 1] }, then: [{ set: [<.new_req, 1] }] }

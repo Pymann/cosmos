@@ -1,0 +1,11 @@
+- extern: "C"
+  defs:
+    - def:
+        name: aiml_db_kv_set
+        args: [[one, string]]
+        return: i32
+- def:
+    name: main
+    return: i32
+    body:
+      - return: [0]

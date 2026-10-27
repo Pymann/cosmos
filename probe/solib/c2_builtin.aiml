@@ -1,0 +1,6 @@
+- def:
+    name: main
+    return: i32
+    body:
+      - decl: [kv, Kv<string:string>, { call: [db.open_kv, "x", {}] }]
+      - return: [0]

@@ -1,0 +1,195 @@
+# Abnahme: ein Pipeline-Lauf laeuft WIRKLICH auf einem Agenten (doc/spec/103).
+#
+# Die bisherige e2e-Abnahme deckte nur den Ad-hoc-Befehl ab (run_on_agent).
+# Die eigentliche Kette — Job speichern, Lauf starten, Schritt vom Agenten
+# holen lassen, Ergebnis melden — war NIE end-to-end geprueft.  Genau daran
+# scheiterte der Nutzer (2026-10-15: „ich habe es noch immer nicht geschafft
+# eine pipeline laufen zu lassen").
+#
+# Geprueft:
+#   1 Job mit zweistufiger Quelle wird angenommen (save_job prueft, F106-5)
+#   2 run_job liefert eine Nummer und einen Lauf
+#   3 der Agent HOLT sich die Schritte (claim) und meldet sie zurueck
+#   4 der Lauf erreicht "done", alle Stufen "done"
+#   5 `runs_on:` trifft ein Etikett UND die Kennung eines Agenten (F103-3)
+#
+# Expected exit code: 0
+
+- import: "test/e2e_runner.aiml"
+- import: "sources/models/job_reqs.aiml"
+- import: "sources/shared/cluster_view.aiml"
+
+- def:
+    name: expect
+    args: [[what, string], [cond, i32]]
+    return: i32
+    body:
+      - if: { condition: { eq: [cond, 1] }, then: [{ print: ["  ok   ${what}"] }, { return: 0 }] }
+      - print: ["  FAIL ${what}"]
+      - return: 1
+
+# Quelle nach spec/62: zwei Stufen, die zweite traegt ein Etikett.
+# F103-17: eine Pipeline, deren einzige Stufe ihre Grenze REISST (2000 ms).  Der
+# abgekoppelte Beobachter bricht sie ab (124, spec/23 §5.3) — der Lauf
+# scheitert also mit Grund, statt fuer immer „running" zu heissen.
+- def:
+    name: timeout_source
+    return: { type: string, lifetime: producer }
+    body:
+      - decl: [src, string, ""]
+      - set: [src, "${src}- pipeline:\n"]
+      - set: [src, "${src}    name: e2e_timeout\n"]
+      - set: [src, "${src}    timeout: 60000\n"]
+      - set: [src, "${src}    steps:\n"]
+      - set: [src, "${src}      - stage:\n"]
+      - set: [src, "${src}          name: haengt\n"]
+      - set: [src, "${src}          timeout: 2000\n"]
+      - set: [src, "${src}          run: \"echo faengt-an; sleep 30; echo kommt-nie\"\n"]
+      - return: src
+
+- def:
+    name: probe_source
+    # `hold_s`: wie lange die erste Stufe arbeitet.  Der Chaos-Lauf braucht sie
+    # lang genug, um den Agenten MITTEN darin zu toeten.
+    args: [[hold_s, string]]
+    return: { type: string, lifetime: producer }
+    body:
+      - decl: [src, string, ""]
+      - set: [src, "${src}- pipeline:\n"]
+      - set: [src, "${src}    name: e2e_probe\n"]
+      - set: [src, "${src}    steps:\n"]
+      - set: [src, "${src}      - stage:\n"]
+      - set: [src, "${src}          name: eins\n"]
+      - set: [src, "${src}          run: \"echo stufe-eins; sleep ${hold_s}\"\n"]
+      - set: [src, "${src}      - stage:\n"]
+      - set: [src, "${src}          name: zwei\n"]
+      - set: [src, "${src}          runs_on: e2e\n"]
+      - set: [src, "${src}          run: \"echo stufe-zwei\"\n"]
+      # Die KENNUNG des Agenten als Etikett: so nagelt man einen Schritt auf
+      # genau einen Rechner, ohne ihm erst ein eigenes Etikett zu geben.
+      # Eine Stufe, die ihre eigene Umgebung ausgibt: der Pruefstand liest sie
+      # und darf darin KEIN Token finden (doc/spec/103 F103-14).
+      - set: [src, "${src}      - stage:\n"]
+      - set: [src, "${src}          name: umgebung\n"]
+      - set: [src, "${src}          run: \"env\"\n"]
+      - set: [src, "${src}      - stage:\n"]
+      - set: [src, "${src}          name: drei\n"]
+      - set: [src, "${src}          runs_on: agent-e2e\n"]
+      - set: [src, "${src}          run: \"echo stufe-drei\"\n"]
+      - return: src
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      - decl: [envm, map<string:string>, { call: [sys.env] }]
+      - decl: [url, string, "ws://127.0.0.1:8799"]
+      - if: { condition: { gt: [{ call: [envm.contains, "COSMOS_E2E_URL"] }, 0] }, then: [{ set: [url, { call: [envm.get, "COSMOS_E2E_URL"] }] }] }
+      - decl: [run, ptr<E2eRunner>, { new: E2eRunner }]
+      - if: { condition: { neq: [{ call: [run.connect, url] }, 1] }, then: [{ print: ["FAIL keine Verbindung"] }, { return: 1 }] }
+      - if: { condition: { neq: [{ call: [run.login, "pipe@e2e.test", "pipe-pass-123"] }, 1] }, then: [{ print: ["FAIL Anmeldung"] }, { return: 1 }] }
+      - if: { condition: { neq: [{ call: [run.wait_agent, "agent-e2e", 15000] }, 1] }, then: [{ print: ["FAIL Agent meldet sich nicht"] }, { return: 1 }] }
+
+      # ── 1) Job speichern ────────────────────────────────────────────────
+      - decl: [stamp, i64, { call: [time.now] }]
+      - decl: [jid, string, "e2e-pipe-${stamp}"]
+      # Der Weg des NEUEN Jobs aus der Oberflaeche: ohne Kennung.  Der Server
+      # leitet sie aus dem Namen ab und MUSS sie zurueckmelden — sonst weiss der
+      # Editor nicht, was er eben angelegt hat, und „Starten" findet nichts.
+      - decl: [sreq, SaveJobReq]
+      - set: [sreq.token, run.token]
+      - set: [sreq.job_id, ""]
+      - set: [sreq.name, jid]
+      - decl: [hold_s, string, "0"]
+      - if: { condition: { gt: [{ call: [envm.contains, "COSMOS_STEP_SLEEP"] }, 0] }, then: [{ set: [hold_s, { call: [envm.get, "COSMOS_STEP_SLEEP"] }] }] }
+      # COSMOS_TIMEOUT_PROBE=1: dieselbe Abnahme, andere Pipeline — eine, die
+      # ihre Zeitgrenze reisst (F103-17).  Erwartet wird dann ein FEHLSCHLAG
+      # mit Rueckgabewert 124, kein Durchlauf.
+      - decl: [tmo_probe, i32, 0]
+      - if: { condition: { gt: [{ call: [envm.contains, "COSMOS_TIMEOUT_PROBE"] }, 0] }, then: [{ set: [tmo_probe, 1] }] }
+      - if:
+          condition: { eq: [tmo_probe, 1] }
+          then: [{ set: [sreq.source, { call: [timeout_source] }] }]
+          else: [{ set: [sreq.source, { call: [probe_source, hold_s] }] }]
+      - set: [sreq.enabled, 1]
+      - set: [sreq.interval_s, 0]
+      - decl: [sack, ptr<JobAck>, { new: JobAck }]
+      - decl: [sgot, i32, { call: [run.sess.send_and_await, 0, "save_job", sreq, sack, 5000] }]
+      - set: [fails, { +: [fails, { call: [expect, "save_job antwortet", { eq: [sgot, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Job angenommen (${sack.message})", { eq: [sack.accepted, 1] }] }] }]
+      - if: { condition: { neq: [sack.accepted, 1] }, then: [{ return: 1 }] }
+      - set: [fails, { +: [fails, { call: [expect, "die Antwort nennt den angelegten Job (${sack.job_id})", { eq: [sack.job_id, jid] }] }] }]
+
+      # ── 2) Lauf starten ─────────────────────────────────────────────────
+      - decl: [rreq, RunJobReq]
+      - set: [rreq.token, run.token]
+      - set: [rreq.job_id, sack.job_id]
+      - decl: [rack, ptr<JobAck>, { new: JobAck }]
+      - decl: [rgot, i32, { call: [run.sess.send_and_await, 0, "run_job", rreq, rack, 5000] }]
+      - set: [fails, { +: [fails, { call: [expect, "run_job antwortet", { eq: [rgot, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Lauf gestartet (${rack.message})", { eq: [rack.accepted, 1] }] }] }]
+      - if: { condition: { neq: [rack.accepted, 1] }, then: [{ return: 1 }] }
+      - decl: [run_id, string, rack.run_id]
+      - set: [fails, { +: [fails, { call: [expect, "Lauf traegt eine Nummer", { gt: [rack.build, 0] }] }] }]
+
+      # ── 3+4) Warten, bis der Agent die Schritte geholt und gemeldet hat ─
+      - decl: [deadline, i64, { +: [{ call: [time.now] }, 60000] }]
+      - decl: [done_stages, i32, 0]
+      - decl: [run_status, string, ""]
+      - decl: [label_agent, string, ""]
+      - while:
+          condition: { lt: [{ call: [time.now] }, deadline] }
+          body:
+            # Der Server darf zwischendurch weg sein — die Abnahme prueft den
+            # LAUF, nicht die Nerven des Pruefstands.
+            - if: { condition: { neq: [{ call: [run.ensure, url] }, 1] }, then: [{ call: [time.sleep_ms, 500] }] }
+            - call: [run.sess.update]
+            - decl: [creq, TokenReq]
+            - set: [creq.token, run.token]
+            - decl: [view, ptr<ClusterView>, { new: ClusterView }]
+            - decl: [cgot, i32, 0]
+            - if: { condition: { eq: [{ call: [run.sess.is_connected] }, 1] }, then: [{ set: [cgot, { call: [run.sess.send_and_await, 0, "subscribe_cluster", creq, view, 5000] }] }] }
+            - if:
+                condition: { eq: [cgot, 1] }
+                then:
+                  - decl: [pix, i32, 0]
+                  - while:
+                      condition: { lt: [pix, view.pipelines.len] }
+                      body:
+                        - decl: [prun, PipelineRun, { at: [view.pipelines, pix] }]
+                        - if:
+                            condition: { eq: [prun.run_id, run_id] }
+                            then:
+                              - set: [run_status, prun.status]
+                              - set: [done_stages, 0]
+                              - decl: [six, i32, 0]
+                              - while:
+                                  condition: { lt: [six, prun.stages.len] }
+                                  body:
+                                    - decl: [stg, PipelineStage, { at: [prun.stages, six] }]
+                                    - if: { condition: { eq: [stg.status, "done"] }, then: [{ set: [done_stages, { +: [done_stages, 1] }] }] }
+                                    - if: { condition: { gt: [stg.required_label.len, 0] }, then: [{ set: [label_agent, stg.agent] }] }
+                                    - set: [six, { +: [six, 1] }]
+                        - set: [pix, { +: [pix, 1] }]
+            - if: { condition: { '&&': [{ eq: [tmo_probe, 0] }, { ge: [done_stages, 4] }] }, then: [{ set: [deadline, 0] }] }
+            # Die Zeitgrenzen-Probe wartet auf das ENDE des Laufs, nicht auf
+            # fertige Stufen — sie soll ja scheitern.
+            - if: { condition: { '&&': [{ eq: [tmo_probe, 1] }, { '||': [{ eq: [run_status, "failed"] }, { eq: [run_status, "done"] }] }] }, then: [{ set: [deadline, 0] }] }
+      - if:
+          condition: { eq: [tmo_probe, 1] }
+          then:
+            # 2000 ms Grenze, 30 s Schlaf: der Lauf MUSS scheitern, und zwar lange
+            # vor der 60-s-Frist dieser Abnahme.
+            - set: [fails, { +: [fails, { call: [expect, "der Lauf scheitert an der Zeitgrenze (Stand ${run_status})", { eq: [run_status, "failed"] }] }] }]
+            - set: [fails, { +: [fails, { call: [expect, "und keine Stufe gilt als durchgelaufen (${done_stages})", { eq: [done_stages, 0] }] }] }]
+            - if: { condition: { eq: [fails, 0] }, then: [{ print: ["PASS e2e_timeout_probe"] }, { return: 0 }] }
+            - print: ["FAIL e2e_timeout_probe (${fails})"]
+            - return: 1
+      - set: [fails, { +: [fails, { call: [expect, "alle vier Stufen sind durch (${done_stages}/4, Lauf ${run_status})", { ge: [done_stages, 4] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "die Stufe mit label lief auf einem Agenten (${label_agent})", { gt: [label_agent.len, 0] }] }] }]
+
+      - if: { condition: { eq: [fails, 0] }, then: [{ print: ["PASS e2e_pipeline_run"] }, { return: 0 }] }
+      - print: ["FAIL e2e_pipeline_run (${fails})"]
+      - return: 1

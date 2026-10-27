@@ -1,0 +1,24 @@
+# AP1 (doc/spec/90 §AP1.5a): kleine, beschränkte Lauf-Metadaten.
+# Das ist der EINZIGE dauerhafte Server-Zustand je Lauf (KV "runs") — die
+# Ausgabe selbst liegt in Dateien.  out_bytes/err_bytes kommen aus der
+# Dateigrösse, sind also immer wahr.  state trägt RunState.
+
+- model:
+    name: RunInfoReq
+    fields:
+      - [token,   string]
+      - [run_ref, string]
+
+- model:
+    name: RunInfo
+    fields:
+      - [run_ref,    string]
+      - [agent_id,   string]
+      - [command,    string]
+      - [cwd,        string]
+      - [state,      i32]
+      - [exit_code,  i32]
+      - [out_bytes,  i64]
+      - [err_bytes,  i64]
+      - [started_ms, i64]
+      - [updated_ms, i64]

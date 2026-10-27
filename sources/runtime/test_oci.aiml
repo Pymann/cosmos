@@ -1,0 +1,245 @@
+# Prüfungen für den CAS⇄OCI-Wandler (doc/spec/110 §110.25).
+#
+# Gebündelt in EINER Datei (wie runtime/test_rt.aiml): jedes Testziel hier
+# übersetzt eigens, und eine Datei je Behauptung kostet mehr Bauzeit als sie an
+# Klarheit bringt.
+#
+# Geprüft wird, was schiefgehen KANN:
+#   1. Das Layout stimmt (oci-layout, index.json, Blobs).
+#   2. Die Adresse ist wirklich der Inhalt — nachgerechnet, nicht geglaubt.
+#   3. Die Rückrichtung stellt den Baum wieder her.
+#   4. WHITEOUTS: eine obere Schicht löscht eine Datei und macht einen Ordner
+#      opak.  Das ist der häufigste Fehler in selbstgebauten Image-Lesern und
+#      fällt sonst erst bei einem fremden Image auf.
+#   5. Fehlendes index.json und fehlende Quelle enden mit einem Fehler, nicht
+#      mit einem halben Ergebnis.
+#   6. Der STAPEL: ein Abbild aus mehreren Stufen-Schichten (doc/spec/110
+#      F110-95) traegt je Stufe eine Schicht, je Schicht eine diff_id, und der
+#      Rueckimport legt sie in der richtigen Reihenfolge auf.
+#
+# Expected exit code: 0
+
+- import: "sources/runtime/rt_oci.aiml"
+
+- def:
+    name: expect
+    static_off: ["str_cmp"]
+    args: [[what, string], [cond, i32]]
+    return: i32
+    body:
+      - if:
+          condition: { eq: [cond, 1] }
+          then: [{ call: [log.info, "  ok   ${what}"] }, { return: 0 }]
+      - call: [log.info, "  FAIL ${what}"]
+      - return: 1
+
+# put_file: Datei mit Inhalt anlegen, Verzeichnisse dazu.
+- def:
+    name: put_file
+    static_off: ["str_cmp"]
+    args: [[dir, string], [name, string], [body, string]]
+    body:
+      - call: [io.mkdir_all, dir]
+      - call: [io.write_file, "${dir}/${name}", body]
+
+# layer_of: aus einem Image den Deskriptor seiner EINZIGEN Schicht holen —
+# über index.json und Manifest, also über denselben Weg, den ein fremder Leser
+# nimmt.
+- def:
+    name: layer_of
+    static_off: ["str_cmp"]
+    args: [[image, string]]
+    return: OciDesc
+    body:
+      - decl: [out, OciDesc]
+      - decl: [idx_raw, string, { call: [io.read_file, "${image}/index.json"] }]
+      - decl: [idx, OciIndex, { call: [sys.deserialize, idx_raw, "OciIndex"] }]
+      - if: { condition: { eq: [idx.manifests.len, 0] }, then: [{ return: out }] }
+      - decl: [ref0, OciRef, { at: [idx.manifests, 0] }]
+      - decl: [hex, string, { call: [ref0.digest.substr, 7] }]
+      - decl: [man_raw, string, { call: [io.read_file, "${image}/blobs/sha256/${hex}"] }]
+      - decl: [man, OciManifest, { call: [sys.deserialize, man_raw, "OciManifest"] }]
+      - if: { condition: { eq: [man.layers.len, 0] }, then: [{ return: out }] }
+      - return: { at: [man.layers, 0] }
+
+# man_of: das Manifest eines Images, ueber index.json — derselbe Weg, den ein
+# fremder Leser nimmt.
+- def:
+    name: man_of
+    static_off: ["str_cmp"]
+    args: [[img_at, string]]
+    return: OciManifest
+    body:
+      - decl: [out, OciManifest]
+      - decl: [idx_raw, string, { call: [io.read_file, "${img_at}/index.json"] }]
+      - decl: [idx, OciIndex, { call: [sys.deserialize, idx_raw, "OciIndex"] }]
+      - if: { condition: { eq: [idx.manifests.len, 0] }, then: [{ return: out }] }
+      - decl: [ref0, OciRef, { at: [idx.manifests, 0] }]
+      - decl: [hex, string, { call: [ref0.digest.substr, 7] }]
+      - decl: [man_raw, string, { call: [io.read_file, "${img_at}/blobs/sha256/${hex}"] }]
+      - return: { call: [sys.deserialize, man_raw, "OciManifest"] }
+
+# diffs_of: die diff_ids aus der Konfiguration.  Sie muessen so viele sein wie
+# die Schichten — ein Abbild mit drei Blobs und zwei diff_ids nimmt kein Leser.
+- def:
+    name: diffs_of
+    static_off: ["str_cmp"]
+    args: [[img_dir, string]]
+    return: i32
+    body:
+      - decl: [man, OciManifest, { call: [man_of, img_dir] }]
+      - if: { condition: { eq: [man.config.digest.len, 0] }, then: [{ return: { -: [0, 1] } }] }
+      - decl: [chex, string, { call: [man.config.digest.substr, 7] }]
+      - decl: [craw, string, { call: [io.read_file, "${img_dir}/blobs/sha256/${chex}"] }]
+      - decl: [cfg, OciImgCfg, { call: [sys.deserialize, craw, "OciImgCfg"] }]
+      - return: cfg.rootfs.diff_ids.len
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      - decl: [root, string, "logs/oci_test"]
+      - call: [io.remove_all, root]
+
+      # run_tests.sh laeuft jede Probe in einem EIGENEN Verzeichnis; Vorlage und
+      # Binaerdatei liegen aber im Projekt (COSMOS_ROOT, doc/spec/108).
+      - decl: [envm, map<string:string>, { call: [sys.env] }]
+      - decl: [proj, string, "."]
+      - if: { condition: { gt: [{ call: [envm.contains, "COSMOS_ROOT"] }, 0] }, then: [{ set: [proj, { call: [envm.get, "COSMOS_ROOT"] }] }] }
+      - decl: [base_at, string, "${proj}/deploy/rt_base"]
+      - if:
+          condition: { eq: [{ call: [io.is_dir, base_at] }, false] }
+          then: [{ call: [log.info, "test_oci SKIP — ${base_at} fehlt (tools/make_base_rootfs.sh)"] }, { return: 0 }]
+      - decl: [tool, ptr<RtOci>, { new: RtOci }]
+      - call: [tool.init, base_at, "${proj}/cosmos-rt", "${root}/work"]
+      - set: [tool.quiet, 1]
+
+      # ── Baum 1: der untere Stand ────────────────────────────────────────
+      - call: [put_file, "${root}/src1/etc", "marke", "hallo-cas"]
+      - call: [put_file, "${root}/src1/opt/alt", "eins.txt", "unten"]
+      - call: [put_file, "${root}/src1/opt", "bleibt.txt", "unberuehrt"]
+
+      # ── 1. Hinaus: Cut → Image ──────────────────────────────────────────
+      - decl: [rc1, i32, { call: [tool.export_cut, "${root}/src1", "${root}/image", "probe", "amd64"] }]
+      - set: [fails, { +: [fails, { call: [expect, "export endet mit 0", { eq: [rc1, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "oci-layout liegt da", { call: [io.is_file, "${root}/image/oci-layout"] }] }] }]
+      - decl: [lay_raw, string, { call: [io.read_file, "${root}/image/oci-layout"] }]
+      - decl: [lay_doc, OciLayout, { call: [sys.deserialize, lay_raw, "OciLayout"] }]
+      - set: [fails, { +: [fails, { call: [expect, "imageLayoutVersion 1.0.0", { eq: [lay_doc.imageLayoutVersion, "1.0.0"] }] }] }]
+
+      - decl: [idx_raw, string, { call: [io.read_file, "${root}/image/index.json"] }]
+      - decl: [idx, OciIndex, { call: [sys.deserialize, idx_raw, "OciIndex"] }]
+      - set: [fails, { +: [fails, { call: [expect, "index nennt genau ein Manifest", { eq: [idx.manifests.len, 1] }] }] }]
+      - decl: [ref0, OciRef, { at: [idx.manifests, 0] }]
+      - set: [fails, { +: [fails, { call: [expect, "Plattform steht drin", { eq: [ref0.platform.architecture, "amd64"] }] }] }]
+      # Die Anmerkung ist zugleich die Probe auf aiml F29-22 (Map-Feld wird mit
+      # Inhalt geschrieben) — ohne den Fix stand hier `{}`.
+      - set: [fails, { +: [fails, { call: [expect, "ref.name als Anmerkung (aiml F29-22)", { eq: [{ call: [ref0.annotations.get, "org.opencontainers.image.ref.name"] }, "probe"] }] }] }]
+
+      # ── 2. Die Adresse IST der Inhalt — nachgerechnet ───────────────────
+      - decl: [man_hex, string, { call: [ref0.digest.substr, 7] }]
+      - decl: [man_at, string, "${root}/image/blobs/sha256/${man_hex}"]
+      - set: [fails, { +: [fails, { call: [expect, "Manifest-Blob liegt unter seiner Adresse", { call: [io.is_file, man_at] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Manifest-Digest nachgerechnet", { eq: [{ call: [hash.sha256_file, man_at] }, man_hex] }] }] }]
+      - decl: [lay1, OciDesc, { call: [layer_of, "${root}/image"] }]
+      - decl: [lay1_hex, string, { call: [lay1.digest.substr, 7] }]
+      - decl: [lay1_at, string, "${root}/image/blobs/sha256/${lay1_hex}"]
+      - set: [fails, { +: [fails, { call: [expect, "Schicht-Digest nachgerechnet", { eq: [{ call: [hash.sha256_file, lay1_at] }, lay1_hex] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Schicht-Groesse stimmt", { eq: [lay1.size, { call: [io.file_size, lay1_at] }] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Medientyp ist tar+gzip", { eq: [lay1.mediaType, "application/vnd.oci.image.layer.v1.tar+gzip"] }] }] }]
+
+      # ── 3. Herein: Image → Bundle ───────────────────────────────────────
+      - decl: [rc2, i32, { call: [tool.import_image, "${root}/image", "${root}/back", "amd64"] }]
+      - set: [fails, { +: [fails, { call: [expect, "import endet mit 0", { eq: [rc2, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Inhalt kommt zurueck", { eq: [{ call: [io.read_file, "${root}/back/rootfs/etc/marke"] }, "hallo-cas"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "auch tiefer liegendes", { eq: [{ call: [io.read_file, "${root}/back/rootfs/opt/alt/eins.txt"] }, "unten"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "config.json ist dabei", { call: [io.is_file, "${root}/back/config.json"] }] }] }]
+      - decl: [bconf_raw, string, { call: [io.read_file, "${root}/back/config.json"] }]
+      - decl: [bconf, RtConfig, { call: [sys.deserialize, bconf_raw, "RtConfig"] }]
+      - set: [fails, { +: [fails, { call: [expect, "Bundle hat ein Startkommando", { gt: [bconf.process.args.len, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Wurzel zeigt auf rootfs", { eq: [bconf.root.path, "rootfs"] }] }] }]
+
+      # ── 4. Whiteouts: eine ZWEITE Schicht loescht ───────────────────────
+      # `.wh.marke` loescht etc/marke, `.wh..wh..opq` macht opt/alt opak.
+      - call: [put_file, "${root}/src2/etc", ".wh.marke", ""]
+      - call: [put_file, "${root}/src2/opt/alt", ".wh..wh..opq", ""]
+      - call: [put_file, "${root}/src2/opt/alt", "zwei.txt", "oben"]
+      - decl: [rc3, i32, { call: [tool.export_cut, "${root}/src2", "${root}/image", "oben", "amd64"] }]
+      - set: [fails, { +: [fails, { call: [expect, "zweite Schicht gebaut", { eq: [rc3, 0] }] }] }]
+      - decl: [lay2, OciDesc, { call: [layer_of, "${root}/image"] }]
+
+      # Ein Manifest mit BEIDEN Schichten — von Hand, denn genau so sieht ein
+      # Image aus, das nicht von uns kommt.
+      - decl: [two, OciManifest]
+      - set: [two.config.mediaType, "application/vnd.oci.image.config.v1+json"]
+      - decl: [cfg2, OciImgCfg]
+      - call: [cfg2.rootfs.diff_ids.push, "sha256:unbekannt"]
+      - decl: [lean, JsonStyle]
+      - set: [lean.bare, 1]
+      - set: [lean.skip_empty, 1]
+      - decl: [cfg2_json, string, { call: [sys.serialize, cfg2, lean] }]
+      - decl: [cfg2_hex, string, { call: [tool.blob_text, "${root}/image", cfg2_json] }]
+      - set: [two.config.digest, "sha256:${cfg2_hex}"]
+      - set: [two.config.size, { cast: [cfg2_json.len, i64] }]
+      - call: [two.layers.push, lay1]
+      - call: [two.layers.push, lay2]
+      - decl: [two_json, string, { call: [sys.serialize, two, lean] }]
+      - decl: [two_hex, string, { call: [tool.blob_text, "${root}/image", two_json] }]
+      - decl: [idx2, OciIndex]
+      - decl: [ref2, OciRef]
+      - set: [ref2.mediaType, "application/vnd.oci.image.manifest.v1+json"]
+      - set: [ref2.digest, "sha256:${two_hex}"]
+      - set: [ref2.size, { cast: [two_json.len, i64] }]
+      - set: [ref2.platform.architecture, "amd64"]
+      - call: [idx2.manifests.push, ref2]
+      - call: [io.write_file, "${root}/image/index.json", { call: [sys.serialize, idx2, lean] }]
+
+      - decl: [rc4, i32, { call: [tool.import_image, "${root}/image", "${root}/zwei", "amd64"] }]
+      - set: [fails, { +: [fails, { call: [expect, "zwei Schichten lassen sich auflegen", { eq: [rc4, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Whiteout loescht etc/marke", { eq: [{ call: [io.is_file, "${root}/zwei/rootfs/etc/marke"] }, false] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "der Marker selbst bleibt NICHT liegen", { eq: [{ call: [io.is_file, "${root}/zwei/rootfs/etc/.wh.marke"] }, false] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "opaker Ordner verliert den unteren Stand", { eq: [{ call: [io.is_file, "${root}/zwei/rootfs/opt/alt/eins.txt"] }, false] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und behaelt den oberen", { eq: [{ call: [io.read_file, "${root}/zwei/rootfs/opt/alt/zwei.txt"] }, "oben"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "unberuehrtes bleibt unberuehrt", { eq: [{ call: [io.read_file, "${root}/zwei/rootfs/opt/bleibt.txt"] }, "unberuehrt"] }] }] }]
+
+      # ── 5. Gegenproben ──────────────────────────────────────────────────
+      - call: [io.mkdir_all, "${root}/leer"]
+      - decl: [rc5, i32, { call: [tool.import_image, "${root}/leer", "${root}/nirgends", ""] }]
+      - set: [fails, { +: [fails, { call: [expect, "Image ohne index.json wird abgelehnt", { neq: [rc5, 0] }] }] }]
+      - decl: [rc6, i32, { call: [tool.export_cut, "${root}/gibtesnicht", "${root}/image_x", "x", "amd64"] }]
+      - set: [fails, { +: [fails, { call: [expect, "fehlende Quelle wird abgelehnt", { neq: [rc6, 0] }] }] }]
+      - decl: [rc7, i32, { call: [tool.import_image, "${root}/image", "${root}/arm", "arm64"] }]
+      - set: [fails, { +: [fails, { call: [expect, "kein Manifest fuer arm64 → Fehler, keine halbe Arbeit", { neq: [rc7, 0] }] }] }]
+
+      # ── 6. Der STAPEL: eine Schicht JE STUFE ────────────────────────────
+      # So liegen die Schichten im Lauf (agent_step.layer_root): numeriert,
+      # jede mit ihrem `upper`.  Stufe 2 loescht, was Stufe 0 angelegt hat —
+      # der Whiteout muss den Weg ins Abbild finden, sonst waere der Stapel
+      # eine Luege ueber den Endstand.
+      - call: [put_file, "${root}/stapel/0/upper/etc", "stufe-eins", "eins"]
+      - call: [put_file, "${root}/stapel/1/upper/etc", "stufe-zwei", "zwei"]
+      - call: [put_file, "${root}/stapel/2/upper/etc", ".wh.stufe-eins", ""]
+      - decl: [rc8, i32, { call: [tool.export_layers, "${root}/stapel", "${root}/image_s", "stapel", "amd64"] }]
+      - set: [fails, { +: [fails, { call: [expect, "Stapel laesst sich schneiden", { eq: [rc8, 0] }] }] }]
+      - decl: [man_s, OciManifest, { call: [man_of, "${root}/image_s"] }]
+      - set: [fails, { +: [fails, { call: [expect, "drei Stufen → drei Schichten", { eq: [man_s.layers.len, 3] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "drei Schichten → drei diff_ids", { eq: [{ call: [diffs_of, "${root}/image_s"] }, 3] }] }] }]
+      - decl: [l_a, OciDesc, { at: [man_s.layers, 0] }]
+      - decl: [l_b, OciDesc, { at: [man_s.layers, 1] }]
+      - set: [fails, { +: [fails, { call: [expect, "jede Schicht ist ihr eigener Blob", { neq: [l_a.digest, l_b.digest] }] }] }]
+      - decl: [rc9, i32, { call: [tool.import_image, "${root}/image_s", "${root}/drei", "amd64"] }]
+      - set: [fails, { +: [fails, { call: [expect, "der Stapel laesst sich zurueckholen", { eq: [rc9, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Stufe 1 liegt im Endstand", { eq: [{ call: [io.read_file, "${root}/drei/rootfs/etc/stufe-zwei"] }, "zwei"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Stufe 2 hat Stufe 0 geloescht", { eq: [{ call: [io.is_file, "${root}/drei/rootfs/etc/stufe-eins"] }, false] }] }] }]
+      - call: [io.mkdir_all, "${root}/stapel_leer"]
+      - decl: [rc10, i32, { call: [tool.export_layers, "${root}/stapel_leer", "${root}/image_l", "leer", "amd64"] }]
+      - set: [fails, { +: [fails, { call: [expect, "ein Stapel ohne Schichten wird abgelehnt", { neq: [rc10, 0] }] }] }]
+
+      - call: [io.remove_all, root]
+      - if:
+          condition: { neq: [fails, 0] }
+          then: [{ call: [log.info, "test_oci FAIL (${fails})"] }, { return: 1 }]
+      - call: [log.info, "test_oci PASS"]
+      - return: 0

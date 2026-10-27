@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no,viewport-fit=cover">
+  <!-- Fullscreen when launched from the iOS/Android home screen (PWA); Safari has
+       no element-fullscreen API, so "Add to Home Screen" is the iOS path. -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>Cosmos</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #000;
+    }
+    body { display: flex; align-items: center; justify-content: center; }
+    /* Size (backing + CSS) is set by fitCanvas() to the largest 16:9 box that
+     * fits the window — backing == CSS display size, so it's crisp (no upscale)
+     * and mouse coords need no scaling.  The engine syncs the GL viewport to the
+     * backing each frame and rescales the 1280x720 design UI to fill it. */
+    canvas#canvas {
+      display: block;
+      outline: none;
+      cursor: default;
+      /* Give ALL touch gestures to our touch→mouse handlers (they preventDefault).
+       * touch-action:none is the reliable choice across iOS+Android; a
+       * pinch-zoom exception broke single-finger touch on iOS Safari.  The DPR
+       * fix keeps things crisp so zoom is less needed; an in-app zoom can be
+       * added later if wanted. */
+      touch-action: none;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+    /* Hide the emcc default debug status — we don't want it in production. */
+    #status, #progress, #spinner { display: none !important; }
+    /* Loading overlay shown while the bundle downloads (otherwise the page is a
+     * black canvas for ~30s and looks frozen — people reload and never finish). */
+    #ldg {
+      position: fixed; inset: 0; z-index: 10;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      background: #0b0b10; color: #cfd2dc;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      -webkit-user-select: none; user-select: none;
+    }
+    #ldg .t { font-size: 15px; letter-spacing: .5px; margin-bottom: 14px; opacity: .9; }
+    #ldg .bar { width: 62vw; max-width: 320px; height: 8px; border-radius: 6px;
+                background: #23232e; overflow: hidden; }
+    #ldg .fill { height: 100%; width: 0%; border-radius: 6px;
+                 background: linear-gradient(90deg,#5b8cff,#8f6bff); transition: width .2s ease; }
+    #ldg .pct { margin-top: 10px; font-size: 13px; opacity: .7; font-variant-numeric: tabular-nums; }
+  </style>
+</head>
+<body>
+  <canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
+  <div id="status"></div>
+  <div id="progress"></div>
+  <div id="ldg">
+    <div class="t">Cosmos wird geladen…</div>
+    <div class="bar"><div class="fill" id="ldgfill"></div></div>
+    <div class="pct" id="ldgpct">0&nbsp;%</div>
+  </div>
+  <script>
+    // Pin the backing store to the engine's logical 1280x720 (the display is
+    // CSS-scaled by the stylesheet above).  Do NOT resize the backing to the
+    // window — the engine adopts the backing size as its GL viewport, so a
+    // window-sized backing would render the fixed 1280x720 UI into a corner.
+    // posten → logs/console_client.txt. Fängt damit ALLE Diagnose-Ausgaben des WASM-Clients
+    // serverseitig ein — AIML_TRACE ([TRACE]), AIML_TRACE_SYMBOL ([aiml-trace] DECL/MOVE/DROP),
+    // AIML_SIZETRACE ([SIZETRACE]) und die [mem]-Heap-Logs (log.info) — weil sie alle über
+    // fprintf(stderr)/printf → Module.print(Err) → console.* laufen.
+    //
+    // Ersetzt die alte PRO-ZEILE /log-Brücke, die unter AIML_TRACE-Volumen (tausende POSTs/s → 429 in
+    // ~0 ms → sofortiges Re-Fire) Firefox zum Absturz brachte. Jetzt: EIN POST in Flight (sequenziell),
+    // Flush alle ~3 s ODER ab ~128 KB Rückstau, jeder POST ≤ 256 KB (Server-Limit 8 MiB), und über
+    // 4 MB Rückstau werden Zeilen verworfen (drop-on-backpressure) statt den Tab volllaufen zu lassen.
+    // Der 1×/min mem_diff-Dump läuft GETRENNT direkt aus dem WASM → mem_diff_client.txt.
+    (function () {
+      var LOG_URL  = location.origin + '/log';
+      var FNAME    = 'cosmos_client';
+      var SOFT     = 128 * 1024;        // flush früh ab so vielen gepufferten Bytes
+      var MAX_POST = 256 * 1024;        // ein POST-Body höchstens so groß
+      var HARD     = 4 * 1024 * 1024;   // ab hier Zeilen verwerfen (Rückstau)
+      var FLUSH_MS = 3000;
+      var buf = [], bufBytes = 0, shipping = false, dropped = 0;
+
+      function enqueue(line) {
+        if (bufBytes >= HARD) { dropped++; return; }   // Rückstau: verwerfen (Konsole bleibt lokal)
+        buf.push(line); bufBytes += line.length + 1;
+        if (bufBytes >= SOFT) ship();
+      }
+      function ship() {
+        if (shipping || !buf.length) return;
+        var out = [], n = 0;                            // bis zu MAX_POST Bytes dieser Runde senden
+        while (buf.length && n < MAX_POST) { var l = buf.shift(); out.push(l); n += l.length + 1; bufBytes -= l.length + 1; }
+        if (bufBytes < 0) bufBytes = 0;
+        var head = '';
+        if (dropped) { head = '[log-forward] dropped ' + dropped + ' line(s) under backpressure\n'; dropped = 0; }
+        var body = FNAME + '\n' + head + out.join('\n') + '\n';
+        shipping = true;
+        try {
+          fetch(LOG_URL, { method: 'POST', body: body, headers: { 'Content-Type': 'text/plain' }, keepalive: true })
+            .catch(function () {})
+            .then(function () { shipping = false; if (buf.length) ship(); });   // Rest weiter abfließen lassen
+        } catch (e) { shipping = false; }
+      }
+      function push(kind, args) {
+        try {
+          var parts = [];
+          for (var i = 0; i < args.length; i++) {
+            var a = args[i];
+            if (typeof a === 'string') parts.push(a);
+            else { try { parts.push(JSON.stringify(a)); } catch (e) { parts.push(String(a)); } }
+          }
+          enqueue(kind + ' ' + parts.join(' '));
+        } catch (e) {}
+      }
+      ['log', 'warn', 'error'].forEach(function (k) {
+        var orig = console[k] ? console[k].bind(console) : function () {};
+        console[k] = function () { push(k.toUpperCase(), arguments); orig.apply(null, arguments); };
+      });
+      window.addEventListener('error', function (e) {
+        var stk = '';
+        try { if (e && e.error && e.error.stack) stk = '\n' + e.error.stack; } catch (x) {}
+        push('JSERROR', [(e && e.message) + ' @ ' + (e && e.filename) + ':' + (e && e.lineno) + stk]);
+      });
+      window.addEventListener('unhandledrejection', function (e) {
+        var r = e && e.reason;
+        var stk = '';
+        try { if (r && r.stack) stk = '\n' + r.stack; } catch (x) {}
+        push('JSREJECT', [String(r) + stk]);
+      });
+      setInterval(ship, FLUSH_MS);
+      window.addEventListener('beforeunload', ship);
+    })();
+
+    // ── Render-loop watchdog ──────────────────────────────────────────────────
+    // The wasm frame loop bumps aiml_rt_frame_counter() every tick.  If it stops
+    // advancing the render loop has STALLED (typically an Asyncify unwind inside
+    // a blocking send_and_await that never rewound).  We read the RPC breadcrumb
+    // aiml_rt_rpc_phase() to name the exact call the frame is stuck inside and
+    // shout it once — turning a silent freeze into an actionable diagnosis.
+    (function () {
+      var last = -1, sameFor = 0, reported = false;
+      setInterval(function () {
+        try {
+          // Gate on calledRun: under -sASSERTIONS=2 an exported native function
+          // called before the runtime finishes initializing hits a fatal
+          // abort() (which would kill init itself).  calledRun flips true only
+          // after run() completes, so we never poke the module too early.
+          if (typeof Module === 'undefined' || !Module || !Module.calledRun ||
+              !Module._aiml_rt_frame_counter) return;
+          var cur = Module._aiml_rt_frame_counter() >>> 0;
+          if (cur === last) {
+            sameFor += 1;
+            if (sameFor >= 3 && !reported) {   // ~3s frozen
+              reported = true;
+              var phase = '?';
+              try {
+                if (Module._aiml_rt_rpc_phase && Module.UTF8ToString) {
+                  phase = Module.UTF8ToString(Module._aiml_rt_rpc_phase());
+                }
+              } catch (e) {}
+              var asy = 'n/a';
+              try {
+                if (typeof Module.Asyncify !== 'undefined' && Module.Asyncify && typeof Module.Asyncify.state !== 'undefined') asy = Module.Asyncify.state;
+                else if (typeof Asyncify !== 'undefined' && Asyncify && typeof Asyncify.state !== 'undefined') asy = Asyncify.state;
+              } catch (e) {}
+              // Asyncify.state: 0=Normal, 1=Unwinding, 2=Rewinding. Non-zero when
+              // stalled ⇒ an emscripten_sleep unwound the frame and never rewound.
+              console.error('[watchdog] RENDER LOOP STALLED @frame=' + cur +
+                            ' rpc_phase="' + phase + '"' +
+                            ' asyncify_state=' + asy +
+                            (phase ? ' — frame blocked inside this call' :
+                                     ' — no C++ breadcrumb'));
+            }
+          } else {
+            last = cur; sameFor = 0;
+            if (reported) { reported = false; console.warn('[watchdog] render loop recovered @frame=' + cur); }
+          }
+        } catch (e) {}
+      }, 1000);
+    })();
+
+    // Size the canvas to the largest 16:9 box fitting the window.
+    //
+    // BACKING resolution vs performance: the engine renders the whole 1280x720
+    // scene (incl. the big textures) into this backing every frame, so backing
+    // pixel-count = per-frame fill cost.  A `× devicePixelRatio` backing (crisp
+    // on hi-DPI) multiplies that by up to 9× and tanks the framerate on phones
+    // ("very slow / long period").  We therefore render at a modest scale over
+    // CSS pixels — a bit crisper than 1:1, still smooth — and cap the backing so
+    // it never exceeds the 1280x720 design resolution (rendering above the
+    // design size buys nothing but fill cost).  bin_event_xy scales
+    // client(CSS)→backing by backing/CSS, so touch/mouse coords stay correct at
+    // any scale.  Bump SHARPNESS toward devicePixelRatio only if the phone keeps
+    // up.
+    var DESIGN_ASPECT = 1280 / 720;
+    var SHARPNESS = 2.0;   // 1 = CSS pixels (fast). 2 = crisper (readable text); still
+                           // capped at the 1280x720 design res below.  antialias is off
+                           // (engine_runtime), so this is affordable on most phones.
+    function fitCanvas() {
+      var c = document.getElementById('canvas');
+      var winW = window.innerWidth, winH = window.innerHeight;
+      var w = winW, h = Math.round(winW / DESIGN_ASPECT);
+      if (h > winH) { h = winH; w = Math.round(winH * DESIGN_ASPECT); }
+      var dpr   = window.devicePixelRatio || 1;
+      var scale = Math.min(SHARPNESS, dpr, 1280 / w);   // never below CSS, never above design res
+      if (scale < 1) scale = 1;
+      var bw = Math.round(w * scale), bh = Math.round(h * scale);
+      if (c.width  !== bw) c.width  = bw;
+      if (c.height !== bh) c.height = bh;
+      c.style.width  = w + 'px';
+      c.style.height = h + 'px';
+    }
+    fitCanvas();
+    window.addEventListener('resize', fitCanvas);
+
+    var Module = {
+      canvas: (function() { return document.getElementById('canvas'); })(),
+      print: function(t) { console.log(t); },
+      printErr: function(t) { console.warn(t); },
+    };
+
+    // Pre-fetch client.data BEFORE loading the wasm-runtime script.
+    // emcc's default loader streams .data via fetch().body.getReader()
+    // in parallel with WebAssembly compile/instantiate/run, but our
+    // wasm-side runtime (asyncify stack swaps + memory growth +
+    // websocket setup) reliably aborts that streaming read mid-way in
+    // every browser tested (Firefox + Chrome). We sidestep the race
+    // by fetching .data fully into an ArrayBuffer first, exposing it
+    // via Module.getPreloadedPackage, and ONLY THEN appending the
+    // emcc-generated client.js script tag to the body so its loader
+    // skips its own fetch entirely. The emcc placeholder is parked
+    // inside an inert <template> below.
+    console.log('[shell] inline script start');
+    var pendingCachePuts = [];   // bundle bytes to persist to IndexedDB after calledRun
+
+    // ── iOS touch diagnostic ───────────────────────────────────────────────────
+    // The engine's touch handling is inside the wasm (emscripten callbacks).  If
+    // touch fails on iOS we need to know whether the browser even delivers touch
+    // events to the page and on which element — log the first few at the DOM.
+    (function () {
+      var n = 0;
+      ['touchstart', 'touchend'].forEach(function (evt) {
+        window.addEventListener(evt, function (e) {
+          if (n < 6) {
+            n++;
+            console.log('[touchdiag] ' + evt + ' touches=' +
+              (e.touches ? e.touches.length : '?') + ' target=' +
+              (e.target && (e.target.id || e.target.tagName)));
+          }
+        }, { passive: true, capture: true });
+      });
+    })();
+
+    // ── Immersive: fullscreen + landscape on the first user gesture ────────────
+    // The whole UI is a 1280x720 (landscape) design; portrait letterboxes it to an
+    // unreadable strip.  requestFullscreen() + orientation.lock() must run inside a
+    // user gesture, so we hook the first touch/click.  Android honours both; iOS
+    // Safari supports neither for a page (the PWA metas above cover its home-screen
+    // launch).  Done once; if the user leaves fullscreen we don't force it back.
+    (function () {
+      var done = false;
+      function goImmersive() {
+        if (done) return;
+        var el = document.documentElement;
+        var rf = el.requestFullscreen || el.webkitRequestFullscreen || el.webkitRequestFullScreen;
+        if (!rf) { done = true; return; }   // iOS Safari: no-op, don't retry
+        try {
+          var p = rf.call(el);
+          var lock = function () {
+            try {
+              if (screen.orientation && screen.orientation.lock)
+                screen.orientation.lock('landscape').catch(function () {});
+            } catch (e) {}
+          };
+          if (p && p.then) p.then(function () { done = true; lock(); }).catch(function () {});
+          else { done = true; lock(); }
+        } catch (e) {}
+      }
+      window.addEventListener('touchend',  goImmersive, { passive: true, capture: true });
+      window.addEventListener('mousedown', goImmersive, { passive: true, capture: true });
+    })();
+
+    // ── Two-finger vertical pan of the canvas ──────────────────────────────────
+    // Single finger = game input (touch-action:none).  A two-finger drag slides
+    // the canvas up/down via CSS translateY — this moves the whole rect, which
+    // getBoundingClientRect reflects, so the engine's touch mapping stays exact
+    // (only scaling would break it).  Lets the player pull a keyboard-covered
+    // input into view / reposition the board.
+    (function () {
+      var panY = 0, startMid = 0, startPan = 0, panning = false;
+      var c = document.getElementById('canvas');
+      function mid(t) { return (t[0].clientY + t[1].clientY) / 2; }
+      function clampY(v) {
+        var lim = Math.max(60, window.innerHeight * 0.7);
+        return Math.max(-lim, Math.min(lim, v));
+      }
+      window.addEventListener('touchstart', function (e) {
+        if (e.touches.length === 2) { panning = true; startMid = mid(e.touches); startPan = panY; }
+      }, { passive: true, capture: true });
+      window.addEventListener('touchmove', function (e) {
+        if (panning && e.touches.length === 2 && c) {
+          panY = clampY(startPan + (mid(e.touches) - startMid));
+          c.style.transform = 'translateY(' + panY + 'px)';
+        }
+      }, { passive: true, capture: true });
+      window.addEventListener('touchend', function (e) {
+        if (e.touches.length < 2) panning = false;
+      }, { passive: true, capture: true });
+    })();
+
+    // ── FPS probe: log the real framerate so we can see how the phone copes. ────
+    (function () {
+      var last = -1, lastT = 0;
+      setInterval(function () {
+        try {
+          if (typeof Module === 'undefined' || !Module || !Module.calledRun ||
+              !Module._aiml_rt_frame_counter) return;
+          var cur = Module._aiml_rt_frame_counter() >>> 0;
+          var now = (window.performance && performance.now) ? performance.now() : 0;
+          if (last >= 0 && now > lastT) {
+            var fps = (cur - last) * 1000 / (now - lastT);
+            console.log('[fps] ' + fps.toFixed(1) + ' fps (' + (cur - last) + ' frames/3s)');
+          }
+          last = cur; lastT = now;
+        } catch (e) {}
+      }, 3000);
+    })();
+
+    // ── Loading overlay: turn the ~30s black download into visible progress ────
+    // wasm is ~7% of the bundle bytes, client.data the rest — weight the bar so
+    // it advances smoothly across both phases.
+    function updateLoading(url, pct) {
+      try {
+        var overall = (url.indexOf('wasm') >= 0) ? (pct * 0.07)
+                                                 : (7 + pct * 0.93);
+        overall = Math.max(0, Math.min(100, Math.round(overall)));
+        var f = document.getElementById('ldgfill');
+        var p = document.getElementById('ldgpct');
+        if (f) f.style.width = overall + '%';
+        if (p) p.innerHTML = overall + '&nbsp;%';
+      } catch (e) {}
+    }
+    function setLoadingNote(txt) {
+      try { var t = document.querySelector('#ldg .t'); if (t) t.textContent = txt; } catch (e) {}
+    }
+    // Hide the overlay once the runtime is actually running (calledRun), or after
+    // a short grace once client.js is in and frames advance.
+    (function () {
+      var iv = setInterval(function () {
+        try {
+          if (typeof Module !== 'undefined' && Module && Module.calledRun) {
+            var el = document.getElementById('ldg');
+            if (el) el.parentNode && el.parentNode.removeChild(el);
+            // App is running & init memory has settled → persist any pending bundle
+            // bytes to IndexedDB now (best-effort; failure just means no cache).
+            if (pendingCachePuts && pendingCachePuts.length) {
+              pendingCachePuts.forEach(function (p) {
+                try { idbPut(p.db, p.url, { tag: p.tag, buf: p.buf }); } catch (e) {}
+              });
+              pendingCachePuts = [];
+            }
+            clearInterval(iv);
+          }
+        } catch (e) {}
+      }, 200);
+    })();
+
+    // ── Robust client.data loader ─────────────────────────────────────────────
+    // A single fetch().arrayBuffer() of the whole bundle (>100 MB) reliably
+    // aborts on mobile browsers: one giant response is buffered twice (stream +
+    // final ArrayBuffer ≈ 2× peak) and Safari/Chrome-mobile kill it on memory
+    // pressure — the server then logs a "broken pipe" mid-stream and the tab
+    // shows a black screen (wasm never starts).  Instead we stream the bundle in
+    // ranged chunks into ONE pre-allocated Uint8Array (peak ≈ total + one chunk),
+    // retrying each chunk, so a transient abort costs one 8 MB retry, not the
+    // whole download.  Falls back to a single fetch if the server has no Range.
+    function downloadRanged(URL) {
+      var CHUNK = 8 * 1024 * 1024;   // 8 MB per request
+      var MAX_RETRY = 5;
+      function fetchChunk(start, end, attempt) {
+        return fetch(URL, { headers: { 'Range': 'bytes=' + start + '-' + end }, cache: 'no-store' })
+          .then(function (r) {
+            if (r.status !== 206 && r.status !== 200)
+              throw new Error('chunk status ' + r.status);
+            return r.arrayBuffer();
+          })
+          .catch(function (e) {
+            if (attempt >= MAX_RETRY) throw e;
+            var wait = 300 * (attempt + 1);
+            console.warn('[shell] chunk ' + start + '-' + end + ' failed (' + e +
+                         '), retry ' + (attempt + 1) + '/' + MAX_RETRY +
+                         ' in ' + wait + 'ms');
+            setLoadingNote('Netzwerk wackelt – erneuter Versuch…');
+            return new Promise(function (res) { setTimeout(res, wait); })
+              .then(function () { return fetchChunk(start, end, attempt + 1); });
+          });
+      }
+      // Probe total size + range support with a 1-byte ranged GET (no-store: a re-download only
+      // happens on an ETag miss = a newer server build, so always fetch the fresh bytes).
+      return fetch(URL, { headers: { 'Range': 'bytes=0-0' }, cache: 'no-store' }).then(function (r) {
+        if (r.status === 206) {
+          var cr = r.headers.get('Content-Range') || '';   // "bytes 0-0/<total>"
+          var total = parseInt((cr.split('/')[1] || ''), 10);
+          if (!(total > 0)) throw new Error('bad Content-Range: ' + cr);
+          console.log('[shell] ranged download ' + URL + ', total=' + total +
+                      ' in ' + Math.ceil(total / CHUNK) + ' chunks');
+          var out = new Uint8Array(total), pos = 0;
+          function next() {
+            if (pos >= total) {
+              console.log('[shell] ' + URL + ' assembled, bytes=' + out.length);
+              return out.buffer;
+            }
+            var start = pos, end = Math.min(pos + CHUNK, total) - 1;
+            return fetchChunk(start, end, 0).then(function (ab) {
+              out.set(new Uint8Array(ab), start);
+              pos = end + 1;
+              var pctNow = Math.round(pos / total * 100);
+              console.log('[shell] ' + URL + ' ' + pctNow + '% (' + pos + '/' +
+                          total + ')');
+              updateLoading(URL, pctNow);
+              setLoadingNote('Cosmos wird geladen…');
+              return next();
+            });
+          }
+          return next();
+        }
+        // No range support (200 full body, or other) → whole-file fallback.
+        console.warn('[shell] ' + URL + ': no range support (status=' + r.status +
+                     '), whole-file fallback');
+        if (!r.ok) throw new Error(URL + ' probe returned ' + r.status);
+        return r.arrayBuffer();
+      });
+    }
+
+    // ── IndexedDB bundle cache: skip re-downloading an unchanged file ──────────
+    // Keyed by the server's ETag (size+mtime).  Works over plain http (the Cache
+    // API / Service Workers need https or localhost — the phone uses http://LAN).
+    // Every failure path (no IndexedDB, private mode, quota, probe error) falls
+    // back to a fresh ranged download, so PC + mobile both keep working.
+    function idbOpen() {
+      return new Promise(function (res, rej) {
+        try {
+          if (!window.indexedDB) { rej('no-idb'); return; }
+          var rq = indexedDB.open('aiml-bundle', 1);
+          rq.onupgradeneeded = function () { rq.result.createObjectStore('files'); };
+          rq.onsuccess = function () { res(rq.result); };
+          rq.onerror   = function () { rej(rq.error || 'idb-open'); };
+        } catch (e) { rej(e); }
+      });
+    }
+    function idbGet(db, key) {
+      return new Promise(function (res) {
+        try {
+          var rq = db.transaction('files', 'readonly').objectStore('files').get(key);
+          rq.onsuccess = function () { res(rq.result || null); };
+          rq.onerror   = function () { res(null); };
+        } catch (e) { res(null); }
+      });
+    }
+    function idbPut(db, key, val) {
+      return new Promise(function (res) {
+        try {
+          var tx = db.transaction('files', 'readwrite');
+          tx.objectStore('files').put(val, key);
+          tx.oncomplete = function () { res(true); };
+          tx.onerror = function () { res(false); };   // quota etc. → just skip caching
+          tx.onabort = function () { res(false); };
+        } catch (e) { res(false); }
+      });
+    }
+    // Current server version of a file (tiny ranged request → ETag / Last-Modified).
+    function fileVersion(url) {
+      // cache:'no-store' → this version probe ALWAYS hits the server, never the HTTP cache. That
+      // makes "does the server have a newer build?" authoritative: a rebuild changes the ETag
+      // (size-mtime), so the cached-vs-current comparison below busts the IndexedDB bundle on the
+      // next load — no hard-reload / manual "clear site data" needed.
+      return fetch(url, { headers: { 'Range': 'bytes=0-0' }, cache: 'no-store' })
+        .then(function (r) { return r.headers.get('ETag') || r.headers.get('Last-Modified') || ''; })
+        .catch(function () { return ''; });
+    }
+    // Return the file's bytes, from IndexedDB when the cached ETag still matches,
+    // otherwise download (ranged) and cache for next time.
+    function loadWithCache(url) {
+      var db = null, tag = '';
+      return idbOpen().then(function (d) { db = d; }, function () { db = null; })
+        .then(function () { return fileVersion(url); })
+        .then(function (v) {
+          tag = v;
+          if (!db || !tag) return null;
+          return idbGet(db, url).then(function (ent) {
+            if (ent && ent.tag === tag && ent.buf) {
+              console.log('[shell] ' + url + ' from cache (' + tag + '), ' +
+                          ent.buf.byteLength + ' bytes');
+              return ent.buf;
+            }
+            return null;
+          });
+        })
+        .then(function (cachedBuf) {
+          if (cachedBuf) return cachedBuf;
+          return downloadRanged(url).then(function (buf) {
+            // Defer the IndexedDB write until the app runs (calledRun) so the big
+            // structured-clone copy doesn't pile onto the init memory peak.
+            if (db && tag) pendingCachePuts.push({ db: db, url: url, tag: tag, buf: buf });
+            return buf;
+          });
+        });
+    }
+
+    // Prefetch BOTH large artifacts robustly (cached / ranged chunks), then run.
+    // client.wasm (~9 MB) is handed to emcc via Module.wasmBinary so emcc skips
+    // its own single-shot fetch (which also aborts on mobile); client.data via
+    // getPreloadedPackage as before.  Sequential: wasm first, then data.
+    loadWithCache('client.wasm')
+      .then(function (wasmBuf) {
+        console.log('[shell] wasmBinary ready, bytes=' + wasmBuf.byteLength);
+        Module.wasmBinary = wasmBuf;
+        return loadWithCache('client.data');
+      })
+      .then(function (buf) {
+        console.log('[shell] client.data ready, bytes=' + buf.byteLength);
+        Module.__prefetchedData = buf;
+        Module.getPreloadedPackage = function () {
+          console.log('[shell] getPreloadedPackage called');
+          return Module.__prefetchedData;
+        };
+        var tmpl  = document.getElementById('emcc-script');
+        console.log('[shell] template element:', tmpl);
+        if (!tmpl) {
+          console.error('[shell] emcc-script template not found in DOM');
+          return;
+        }
+        console.log('[shell] template content children count=' +
+                    tmpl.content.children.length);
+        var inert = tmpl.content.querySelector('script');
+        if (!inert) {
+          console.error('[shell] script tag missing in template — ',
+                        tmpl.content);
+          return;
+        }
+        console.log('[shell] inert script tag src=' + inert.src);
+        var live = document.createElement('script');
+        for (var i = 0; i < inert.attributes.length; i++) {
+          var a = inert.attributes[i];
+          live.setAttribute(a.name, a.value);
+        }
+        live.onload  = function () { console.log('[shell] client.js loaded'); };
+        live.onerror = function (e) { console.error('[shell] client.js failed to load', e); };
+        document.body.appendChild(live);
+        console.log('[shell] live script appended, src=' + live.src);
+      })
+      .catch(function (e) {
+        console.error('[shell] client.data prefetch failed:', e);
+      });
+  </script>
+  <template id="emcc-script">{{{ SCRIPT }}}</template>
+</body>
+</html>

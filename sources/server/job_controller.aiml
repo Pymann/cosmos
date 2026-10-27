@@ -1,0 +1,220 @@
+# Cosmos job controller: hands one durable job to an agent, keeps its state (log, pid,
+# exit code, disconnects) in a persistent KV and survives agent and controller restarts.
+- import: "sources/shared/job_state.aiml"
+- import: "sources/shared/agent_hello.aiml"
+- import: "sources/shared/job_update.aiml"
+- import: "sources/shared/job_record.aiml"
+
+- model:
+    name: ControllerCfg
+    fields:
+      - [port,           i32,    19870]
+      - [job_id,         string, "job-1"]
+      - [command,        string, "echo hello"]
+      - [exit_when_done, i32,    0]
+
+- class:
+    name: JobController
+    members:
+      - [cfg,         ControllerCfg]
+      - [jobs,        Kv<string:JobRecord>]
+      - [peer_agents, map<i32:string>]
+      - [peer_jobs,   map<i32:string>]
+    methods:
+      - def:
+          name: init
+          access: public
+          args: [[cfg, ControllerCfg]]
+          body:
+            - set: [<.cfg, cfg]
+            - set: [<.jobs, { call: [db.open_kv, "jobs", {persist: true}] }]
+            - decl: [job_key, string, <.cfg.job_id]
+            - if:
+                condition: { eq: [{ call: [<.jobs.has, job_key] }, 1] }
+                then:
+                  - decl: [rec, ref<JobRecord>, { call: [<.jobs.get, job_key] }]
+                  - call: [log.info, "restored ${rec.job_id} state=${rec.state} log_len=${rec.log.len} disconnects=${rec.disconnects} agent=${rec.agent_id}"]
+                  - return: 0
+            - decl: [fresh, JobRecord]
+            - set: [fresh.job_id, job_key]
+            - set: [fresh.command, <.cfg.command]
+            - set: [fresh.state, JobState.queued]
+            - set: [fresh.exit_code, -1]
+            - set: [fresh.updated_ms, { call: [time.now] }]
+            - call: [<.jobs.set, job_key, fresh]
+            - call: [log.info, "enqueued ${job_key}"]
+
+      - def:
+          name: report
+          access: public
+          args: [[reason, string]]
+          body:
+            - decl: [rec, ref<JobRecord>, { call: [<.jobs.get, <.cfg.job_id] }]
+            - call: [log.info, "STATE ${reason} job=${rec.job_id} state=${rec.state} pid=${rec.pid} exit=${rec.exit_code} log_len=${rec.log.len} disconnects=${rec.disconnects}"]
+
+      - def:
+          name: on_disconnect
+          access: public
+          args: [[peer_id, i32]]
+          body:
+            - decl: [lost_job, string, { call: [<.peer_jobs.get, peer_id] }]
+            - if: { condition: { eq: [lost_job, null] }, then: [{ return: 0 }] }
+            - call: [<.peer_jobs.remove, peer_id]
+            - decl: [rec, ref<JobRecord>, { call: [<.jobs.get, lost_job] }]
+            - if:
+                condition: { eq: [rec.state, JobState.running] }
+                then:
+                  - set: [rec.state, JobState.agent_lost]
+                  - set: [rec.disconnects, { +: [rec.disconnects, 1] }]
+                  - set: [rec.updated_ms, { call: [time.now] }]
+                  - call: [<.jobs.set, lost_job, rec]
+                  - call: [<.report, "agent_disconnected"]
+
+      - def:
+          name: on_hello
+          access: public
+          static_off: ["str_cmp"]
+          args: [[sess, mirror_session], [rpc, rpc_event]]
+          body:
+            - decl: [hello, AgentHello]
+            - if: { condition: { neq: [{ call: [sess.decode_rpc, rpc, hello] }, 0] }, then: [{ return: 0 }] }
+            - call: [<.peer_agents.put, rpc.peer_id, hello.agent_id]
+            - decl: [welcome, AgentWelcome]
+            - decl: [rec, ref<JobRecord>, { call: [<.jobs.get, <.cfg.job_id] }]
+            - decl: [owned, i32, 0]
+            # reattach: agent still owns the job (process may have kept running while offline)
+            - if: { condition: { eq: [hello.current_job_id, rec.job_id] }, then: [{ set: [owned, 1] }] }
+            - if:
+                condition: { '&&': [{ eq: [owned, 0] }, { eq: [rec.state, JobState.queued] }] }
+                then:
+                  - set: [rec.agent_id, hello.agent_id]
+                  - set: [owned, 1]
+            - if:
+                condition: { eq: [owned, 1] }
+                then:
+                  - if: { condition: { neq: [rec.state, JobState.finished] }, then: [{ set: [rec.state, JobState.running] }] }
+                  - set: [rec.updated_ms, { call: [time.now] }]
+                  - call: [<.jobs.set, rec.job_id, rec]
+                  - call: [<.peer_jobs.put, rpc.peer_id, rec.job_id]
+                  - set: [welcome.job_id, rec.job_id]
+                  - set: [welcome.command, rec.command]
+                  - set: [welcome.log_len, rec.log.len]
+                  - call: [log.info, "agent ${hello.agent_id} peer=${rpc.peer_id} attached to ${rec.job_id} (reattach=${hello.current_job_id})"]
+                  - call: [<.report, "agent_attached"]
+            - call: [sess.reply_rpc, rpc, "set_result", 0, welcome]
+
+      - def:
+          name: on_update
+          access: public
+          static_off: ["str_cmp"]
+          args: [[sess, mirror_session], [rpc, rpc_event]]
+          body:
+            - decl: [upd, JobUpdate]
+            - if: { condition: { neq: [{ call: [sess.decode_rpc, rpc, upd] }, 0] }, then: [{ return: 0 }] }
+            - decl: [ack, JobAck]
+            - set: [ack.job_id, upd.job_id]
+            # stale update queued before a disconnect: peer no longer owns the job
+            - decl: [bound_job, string, { call: [<.peer_jobs.get, rpc.peer_id] }]
+            - if:
+                condition: { eq: [bound_job, null] }
+                then:
+                  - call: [sess.reply_rpc, rpc, "set_result", 0, ack]
+                  - return: 0
+            - if:
+                condition: { eq: [{ call: [<.jobs.has, upd.job_id] }, 0] }
+                then:
+                  - call: [sess.reply_rpc, rpc, "set_result", 0, ack]
+                  - return: 0
+            - decl: [rec, ref<JobRecord>, { call: [<.jobs.get, upd.job_id] }]
+            - set: [ack.log_len, rec.log.len]
+            - decl: [changed, i32, 0]
+            # chunks are idempotent: only a chunk continuing exactly at the stored length is taken
+            - if:
+                condition: { eq: [upd.offset, rec.log.len] }
+                then:
+                  - if: { condition: { neq: [upd.state, rec.state] }, then: [{ set: [changed, 1] }] }
+                  - set: [rec.log, "${rec.log}${upd.chunk}"]
+                  - set: [rec.pid, upd.pid]
+                  - set: [rec.state, upd.state]
+                  - set: [rec.exit_code, upd.exit_code]
+                  - set: [rec.updated_ms, { call: [time.now] }]
+                  - call: [<.jobs.set, upd.job_id, rec]
+            - set: [ack.log_len, rec.log.len]
+            - call: [sess.reply_rpc, rpc, "set_result", 0, ack]
+            - if: { condition: { eq: [changed, 1] }, then: [{ call: [<.report, "state_change"] }] }
+
+      - def:
+          name: finished
+          access: public
+          return: i32
+          body:
+            - decl: [rec, ref<JobRecord>, { call: [<.jobs.get, <.cfg.job_id] }]
+            - if: { condition: { eq: [rec.state, JobState.finished] }, then: [{ return: 1 }] }
+            - return: 0
+
+      - def:
+          name: write_log
+          access: public
+          body:
+            - decl: [rec, ref<JobRecord>, { call: [<.jobs.get, <.cfg.job_id] }]
+            - decl: [out, file_handle, { call: [io.open, "${rec.job_id}.controller.log", "w"] }]
+            - if: { condition: { eq: [out, null] }, then: [{ return: 0 }] }
+            - call: [io.write, out, rec.log]
+            - call: [io.close, out]
+
+      - def:
+          name: run
+          access: public
+          static_off: ["str_cmp"]
+          return: i32
+          body:
+            - decl: [sess, mirror_session, { call: [mirror.listen, "tcp://127.0.0.1:${<.cfg.port}"] }]
+            # Erst pruefen, dann melden (wie cosmos_daemon und der Static-Host):
+            # ohne diese Pruefung schrieb der Controller „listening on port …",
+            # lief in seine Ereignisschleife und wartete auf Verbindungen, die
+            # nie kommen konnten — der Port gehoerte jemand anderem.  Ein
+            # Starter, der auf diese Zeile wartet, haelt das fuer Erfolg.
+            - if:
+                condition: { eq: [sess, null] }
+                then:
+                  - call: [log.error, "controller: Port ${<.cfg.port} nicht bindbar — belegt? (laeuft schon ein controller?)"]
+                  - return: 1
+            - call: [log.info, "controller listening on port ${<.cfg.port}"]
+            - call: [<.report, "startup"]
+            - decl: [linger, i32, -1]
+            - while:
+                condition: { neq: [linger, 0] }
+                body:
+                  - call: [sess.update]
+                  - decl: [more_events, i32, 1]
+                  - while:
+                      condition: { eq: [more_events, 1] }
+                      body:
+                        - decl: [evt, mirror_event, { call: [sess.poll_event] }]
+                        - decl: [kind, MirrorEventType, { call: [evt.type_enum] }]
+                        - if: { condition: { eq: [kind, MirrorEventType.none] }, then: [{ set: [more_events, 0] }] }
+                        - if: { condition: { eq: [kind, MirrorEventType.peer_connected] }, then: [{ call: [log.info, "peer ${evt.peer_id} connected"] }] }
+                        - if:
+                            condition: { eq: [kind, MirrorEventType.peer_disconnected] }
+                            then:
+                              - call: [log.info, "peer ${evt.peer_id} disconnected"]
+                              - call: [<.on_disconnect, evt.peer_id]
+                  - decl: [more_rpcs, i32, 1]
+                  - while:
+                      condition: { eq: [more_rpcs, 1] }
+                      body:
+                        - decl: [rpc, rpc_event, { call: [sess.poll_rpc] }]
+                        - if: { condition: { eq: [rpc.method, ""] }, then: [{ set: [more_rpcs, 0] }] }
+                        - if: { condition: { eq: [rpc.method, "hello"] }, then: [{ call: [<.on_hello, sess, rpc] }] }
+                        - if: { condition: { eq: [rpc.method, "job_update"] }, then: [{ call: [<.on_update, sess, rpc] }] }
+                  # keep serving briefly after the job finished so the final ack reaches the agent
+                  - if:
+                      condition: { '&&': [{ '&&': [{ eq: [linger, -1] }, { eq: [<.cfg.exit_when_done, 1] }] }, { eq: [{ call: [<.finished] }, 1] }] }
+                      then:
+                        - call: [<.write_log]
+                        - call: [<.report, "done"]
+                        - set: [linger, 50]
+                  - if: { condition: { gt: [linger, 0] }, then: [{ set: [linger, { -: [linger, 1] }] }] }
+                  - call: [time.sleep_ms, 20]
+            - call: [sess.close]
+            - return: 0

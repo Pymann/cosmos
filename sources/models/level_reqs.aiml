@@ -1,0 +1,38 @@
+# RPC-Models der Rechtevergabe (doc/spec/108 §2).
+#
+# Richtung nicht verwechseln (spec/65 F65-4: `clearance <= level`): die KLEINERE Zahl ist
+# das GROESSERE Recht.  1 = Admin, 255 = am staerksten eingeschraenkt, 0 = ungueltig.
+#
+# Static-Check (spec/49 §14): 3 models — am Cap.
+
+# Einem Konto eine Freigabe geben.  NUR fuer Konten, die selbst hoch genug stehen, und
+# nie staerker als die eigene (F108-4) — geprueft serverseitig in AuthService.set_level,
+# nicht hier: ein Client kann luegen.
+- model:
+    name: SetUserLevelReq
+    fields:
+      - [token,        string]
+      - [target_email, string]
+      - [level,        i32]
+
+# Eine Zeile der Nutzerliste.  KEIN Passwort-Hash, kein Token — eine Verwaltungsansicht
+# zeigt, wer da ist und was er darf, sonst nichts.
+- model:
+    name: UserLevelRow
+    fields:
+      - [email,        string]
+      - [display_name, string]
+      - [level,        i32]
+
+# Antwort auf list_users / set_user_level / my_clearance.
+#   success=0 → message traegt den Grund (Anzeigetext)
+#   my_level  = die Freigabe des ANFRAGENDEN Kontos; sie steht IMMER drin, damit die
+#               Oberflaeche eine Ablehnung erklaeren kann (Level sind nicht geheim,
+#               spec/65 F65-16) und nicht raten muss.
+- model:
+    name: UserLevelResult
+    fields:
+      - [success,  i32]
+      - [message,  string]
+      - [my_level, i32]
+      - [users,    list<UserLevelRow>]

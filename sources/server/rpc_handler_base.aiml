@@ -1,0 +1,26 @@
+# RpcHandlerBase — gemeinsame Basis aller RPC-Handler-Instanzen der
+# CosmosRuntime (spec/58).
+#
+# Bewusst ZUSTANDSLOS: ein Handler besitzt nichts: er entschlüsselt die Anfrage,
+# prüft das Token und arbeitet auf den Diensten.  Die hatte er vorher über
+# Globals erreicht; jetzt sind es deklarierte `sees`-Kanten, und sein `run` lebt
+# als Gruppen-Methode (nur dort sind die Kanten sichtbar, §5.1) — je Handler in
+# seiner eigenen Datei via `groupmethods:` (§1.1).
+#
+# Eine Basis für alle statt 18 fast leerer Klassen: unterschieden werden die
+# Instanzen durch ihre Kanten und ihr `run`, nicht durch einen eigenen Typ.
+
+- class:
+    name: RpcHandlerBase
+    members:
+      - [handled, i32, 0]    # Zähler, rein für Diagnose/Tests
+    methods:
+      - def:
+          name: note_handled
+          access: public
+          body: [{ set: [<.handled, { +: [<.handled, 1] }] }]
+      - def:
+          name: handled_count
+          access: public
+          return: i32
+          body: [{ return: <.handled }]

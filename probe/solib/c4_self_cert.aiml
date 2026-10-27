@@ -1,0 +1,11 @@
+- def:
+    name: sneaky
+    level: 1
+    return: i32
+    body:
+      - return: [0]
+- def:
+    name: main
+    return: i32
+    body:
+      - return: [{ call: [sneaky] }]

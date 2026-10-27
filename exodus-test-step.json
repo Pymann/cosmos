@@ -1,0 +1,29 @@
+{
+    "$schema": "exodus.project.config-1.0",
+    "name": "test_step_runner",
+    "version": "0.1.0",
+    "output_type": "executable",
+    "sources": ["test/test_step_runner.aiml"],
+    "compiler": {
+        "name": "/media/nikolai/95a208ef-ffa2-478b-abdd-ff394baa6a76/projects/python/test/aiml/out/aiml/aiml",
+        "lang_standard": "17",
+        "flags": []
+    },
+    "linker": {
+        "name": "g++",
+        "flags": [
+            "-Wl,-rpath,/media/nikolai/95a208ef-ffa2-478b-abdd-ff394baa6a76/projects/python/test/aiml/out/libaiml"
+        ],
+        "libraries": ["aiml", "pthread", "ssl", "crypto", "dl"],
+        "library_paths": [
+            "/media/nikolai/95a208ef-ffa2-478b-abdd-ff394baa6a76/projects/python/test/aiml/out/libaiml"
+        ]
+    },
+    "artifact_in_cwd": true,
+    "optimization": "0",
+    "debug": true,
+    "warnings": [],
+    "env": {
+        "AIML_MEM_V3": "1"
+    }
+}

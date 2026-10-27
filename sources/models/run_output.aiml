@@ -1,0 +1,18 @@
+# AP1 (doc/spec/90 §AP1.5a): Ausgabe-Chunk und Abschluss.
+# Ein Chunk wird serverseitig SOFORT persistiert und nur transient an den
+# anfragenden Nutzer weitergereicht — nie im Server-RAM akkumuliert.
+# stream trägt OutStream (out|err), offset = Byte-Offset im jeweiligen Strom.
+
+- model:
+    name: OutChunk
+    fields:
+      - [run_ref, string]
+      - [stream,  i32]
+      - [chunk,   string]
+      - [offset,  i64]
+
+- model:
+    name: RunResult
+    fields:
+      - [run_ref,   string]
+      - [exit_code, i32]

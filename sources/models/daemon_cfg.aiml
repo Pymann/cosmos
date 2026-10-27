@@ -1,0 +1,31 @@
+# Aufruf-Konfiguration von cosmosd (sys.arg_dump → jedes Feld ist ein Flag, spec/23).
+# Der Dienst selbst wird ueber COSMOS_*-Umgebungsvariablen eingestellt; hier stehen nur
+# BETRIEBSHANDLUNGEN, die statt des Dienstes laufen.
+
+- model:
+    name: DaemonCfg
+    fields:
+      # doc/spec/108 F108-3: Freigabe eines Kontos setzen.  Nur hier, nie ueber eine RPC —
+      # ein Konto, das sich selbst Rechte geben kann, beglaubigt sich selbst (spec/65 F65-6).
+      # Zwei Flags statt zweier Positionen: `--grant-email a@b --grant-level 7` kann man
+      # nicht vertauschen, `--grant-level a@b 7` schon.
+      - [grant_email, string, ""]
+      - [grant_level, i32,    0]
+      # doc/spec/110: ein Agent-Token fuer einen Knoten praegen.  Dieselbe
+      # Begruendung wie bei `--grant-*`: die Autoritaet sitzt am Server, und
+      # eine Einrichtung ohne Browser muss moeglich sein (Container, Pi, CI).
+      # Das Geheimnis wird EINMAL ausgegeben und nie gespeichert — nur sein
+      # sha256 liegt im Store (doc/spec/90 §AP1.9).
+      - [mint_token, string, ""]
+      # doc/spec/110 M7: einen Agenten im Container starten.  Betriebshandlung
+      # wie --grant/--mint: der Controller praegt das Token selbst, schreibt das
+      # Bundle und loest `cosmos-rt` ab.
+      # doc/spec/110 §110.20: ein Konto am gestoppten Server anlegen.  Die
+      # Registrierungsbremse haengt an der Client-IP; eine Betriebshandlung hat
+      # keine, also greift sie hier nicht — das ist kein Schlupfloch, sondern
+      # die Unterscheidung zwischen „jemand im Netz" und „der Betreiber".
+      - [add_user,      string, ""]     # E-Mail
+      - [add_user_pw,   string, ""]
+      - [add_user_nick, string, ""]
+      - [spawn_agent,    string, ""]
+      - [spawn_limit_mb, i32,    256]

@@ -1,0 +1,311 @@
+# AgentExec — AP1-Ausführungsschleife (doc/spec/90 §AP1.2 Punkt 4, §AP1.7-D1/D4).
+#
+# Verbindet sich per ws/wss mit cosmosd, registriert sich mit COSMOS_AGENT_TOKEN,
+# nimmt targeted `run_command` an, startet es mit sys.exe (detach + GETRENNTE Dateien
+# für stdout und stderr, cwd festlegbar) und streamt beide Ströme inkrementell als
+# `command_output`; am Ende `command_result` mit dem Exit-Code.
+#
+# Der Agent hält die Ausgabe ebenfalls nicht im RAM: er liest je Tick nur die Bytes
+# ab dem letzten Offset (gedeckelt), schickt sie weg und merkt sich nur den Offset.
+# Der durable-Job-Pfad (agent_runner.aiml) bleibt unberührt (§AP1.3).
+
+- import: "sources/models/agent_exec.aiml"
+- import: "sources/shared/res_usage.aiml"
+- import: "sources/agent/agent_step.aiml"
+- import: "sources/models/agent_cfg.aiml"
+- import: "sources/shared/out_pump.aiml"
+
+- class:
+    name: AgentExec
+    members:
+      # doc/spec/103: die Schritt-Kette, getrennt von der AP1-Kommandokette.
+      - [worker,     StepWorker]
+      # doc/spec/109: die eigene Last.  Der Sampler haelt den Bezugspunkt der
+      # letzten Messung — CPU ist eine Ableitung und braucht zwei Punkte (F109-2).
+      - [res,        ResSampler]
+      - [pump_io,    OutPump]
+      - [agent_id,   string]
+      - [exec_url,   string]
+      - [token,      string]
+      - [run_ref,    string, ""]
+      - [run_dir,    string, ""]
+      - [out_off,    i64, 0]
+      - [err_off,    i64, 0]
+      - [job_pid,    i64, 0]
+      - [ending,     i32, 0]     # 1 = Prozess beendet, Ausgabe wird noch gedrosselt nachgezogen
+      - [exit_code,  i32, -1]
+      - [runs_done,  i32, 0]
+      - [stop_after, i32, 0]     # 0 = Dienst läuft endlos; >0 = nach N Läufen beenden (Test)
+    methods:
+      - def:
+          name: init
+          access: public
+          # Die Konfiguration als MODELL statt als sechs Argumente — genau das,
+          # worauf der Compiler bei >5 Argumenten hinweist.
+          args: [[cfg, AgentCfg], [token, string]]
+          body:
+            - set: [<.agent_id, cfg.agent_id]
+            - set: [<.exec_url, cfg.exec_url]
+            - set: [<.token, token]
+            - set: [<.stop_after, cfg.stop_after]
+            - call: [<.worker.init, cfg.agent_id, cfg.labels, cfg.bwrap_path, cfg.work_root, cfg.in_container]
+            # Die Freigaben stehen nicht in `init`: fuenf Argumente sind aimls
+            # Grenze, und sie gehoeren zum Wirt, nicht zur Kennung des Agenten.
+            - call: [<.worker.set_shares, cfg.shares]
+            - set: [<.worker.image, cfg.image]
+
+      - def:
+          name: register
+          access: public
+          args: [[sess, mirror_session]]
+          return: i32
+          body:
+            - decl: [req, AgentRegister]
+            - set: [req.agent_id, <.agent_id]
+            - set: [req.agent_token, <.token]
+            # Die Etiketten gehoeren in die ANMELDUNG: bisher reisten sie nur mit
+            # `claim_step` mit, also zeigte die Agentenliste „(keine)", obwohl der
+            # Agent welche fuehrte — und niemand konnte pruefen, warum ein Schritt
+            # mit `label:` liegen blieb.
+            - set: [req.labels, <.worker.labels]
+            # WORIN er laeuft — die Umgebung, nicht der Ort (doc/spec/110 §110.29).
+            - set: [req.image, <.worker.image]
+            # Was dieser Stand kann (doc/spec/103): Schritte holen und melden.
+            - set: [req.caps, "steps"]
+            - decl: [envm, map<string:string>, { call: [sys.env] }]
+            - if: { condition: { gt: [{ call: [envm.contains, "HOSTNAME"] }, 0] }, then: [{ set: [req.host, { call: [envm.get, "HOSTNAME"] }] }] }
+            - if: { condition: { gt: [{ call: [envm.contains, "OSTYPE"] }, 0] }, then: [{ set: [req.os_name, { call: [envm.get, "OSTYPE"] }] }] }
+            - decl: [ack, ptr<AgentAck>, { new: AgentAck }]
+            - decl: [got, i32, { call: [sess.send_and_await, 0, "agent_register", req, ack, 3000] }]
+            - if: { condition: { neq: [got, 1] }, then: [{ call: [log.warn, "[agent_exec] no answer to agent_register"] }, { return: 0 }] }
+            - if:
+                condition: { neq: [ack.accepted, 1] }
+                then:
+                  - call: [log.error, "[agent_exec] registration refused: ${ack.reason}"]
+                  - return: 0
+            - call: [log.info, "[agent_exec] ${<.agent_id} registered at ${<.exec_url}"]
+            - return: 1
+
+      # start_run: Kommando starten.  stdout und stderr gehen in GETRENNTE Dateien,
+      # damit beide Ströme getrennt erkennbar bleiben (§AP1.5 Punkt 9) und je einen
+      # eigenen Byte-Offset haben.  detach + status_file = Exit-Code auch nach
+      # Verbindungsverlust (spec/23 §5.4).
+      - def:
+          name: start_run
+          access: public
+          args: [[cmd, RunCommand]]
+          body:
+            - set: [<.run_ref, cmd.run_ref]
+            - set: [<.run_dir, "runs/${cmd.run_ref}"]
+            - set: [<.out_off, 0]
+            - set: [<.err_off, 0]
+            - set: [<.ending, 0]
+            - set: [<.exit_code, -1]
+            - call: [io.mkdir_all, <.run_dir]
+            - decl: [argv, list<string>, ["sh", "-c", cmd.command]]
+            - decl: [proc, process, { call: [sys.exe, argv, {detach: true, cwd: "${cmd.cwd}", stdout: "${<.run_dir}/out", stderr: "${<.run_dir}/err", status_file: "${<.run_dir}/status"}] }]
+            - set: [<.job_pid, proc.pid]
+            - if:
+                condition: { le: [<.job_pid, 0] }
+                then:
+                  - call: [log.error, "[agent_exec] spawn failed for ${cmd.run_ref} (cwd='${cmd.cwd}')"]
+                  - decl: [bad, RunResult]
+                  - set: [bad.run_ref, cmd.run_ref]
+                  - set: [bad.exit_code, -1]
+                  - set: [<.run_ref, ""]
+                  - return: []
+            - call: [log.info, "[agent_exec] ${cmd.run_ref} started pid=${<.job_pid} cwd='${cmd.cwd}'"]
+
+      # tail: delegiert an OutPump — Chunk-Deckel und `sess.update()` nach dem
+      # Send stehen dort EINMAL, fuer den AP1-Befehl und den Pipeline-Schritt
+      # (doc/spec/103 §103.4e).  Vorher lag dieselbe Logik zweimal im Haus.
+      - def:
+          name: tail
+          access: public
+          args: [[sess, mirror_session], [stream, i32], [spath, string], [off, i64]]
+          return: i64
+          body:
+            - return: { call: [<.pump_io.tail, sess, <.run_ref, stream, spath, off] }
+
+      # drain_streams: beide Ströme nachziehen, höchstens `limit` Runden pro Tick.
+      # Rückgabe 1 = es wurde etwas gesendet (Fortschritt), 0 = nichts Neues.
+      #
+      # Die Deckelung ist WICHTIG und nicht nur Kosmetik: ein unbegrenzter Schwall
+      # (6,9 MB in einem Rutsch) führte reproduzierbar dazu, dass der Server die
+      # noch lebende Agenten-Verbindung als getrennt meldete und die restliche
+      # Ausgabe verwarf — die Mirror-Queue ist pro Sender begrenzt (4096 Events /
+      # 64 MiB, spec/44_5) und der relayende Konsument ist langsamer als der
+      # Produzent.  Eine Probe ohne Ausgabe-Last (probe_spurious_disconnect.sh)
+      # zeigte 4/4 korrekte Disconnects → der Schwall ist die Bedingung, nicht
+      # der Disconnect eines anderen Clients.
+      - def:
+          name: drain_streams
+          access: public
+          args: [[sess, mirror_session], [limit, i32]]
+          return: i32
+          body:
+            - decl: [out_path, string, "${<.run_dir}/out"]
+            - decl: [err_path, string, "${<.run_dir}/err"]
+            - decl: [rounds, i32, 0]
+            - decl: [moved, i32, 0]
+            - decl: [spin, i32, 1]
+            - while:
+                condition: { eq: [spin, 1] }
+                body:
+                  - decl: [prev_out, i64, <.out_off]
+                  - decl: [prev_err, i64, <.err_off]
+                  - set: [<.out_off, { call: [<.tail, sess, OutStream.out, out_path, <.out_off] }]
+                  - set: [<.err_off, { call: [<.tail, sess, OutStream.err, err_path, <.err_off] }]
+                  - set: [rounds, { +: [rounds, 1] }]
+                  - if:
+                      condition: { '&&': [{ eq: [<.out_off, prev_out] }, { eq: [<.err_off, prev_err] }] }
+                      then: [{ set: [spin, 0] }]
+                      else: [{ set: [moved, 1] }]
+                  - if:
+                      condition: { '&&': [{ gt: [limit, 0] }, { ge: [rounds, limit] }] }
+                      then: [{ set: [spin, 0] }]
+            - return: moved
+
+      # pump: beide Ströme gedrosselt nachziehen.  Ist der Prozess beendet, wird der
+      # Lauf erst abgeschlossen, wenn ein Tick KEINEN Fortschritt mehr bringt — die
+      # Ausgabe ist dann vollständig übertragen, ohne sie in einem Rutsch zu feuern.
+      - def:
+          name: pump
+          access: public
+          args: [[sess, mirror_session]]
+          body:
+            - if: { condition: { eq: [<.run_ref.len, 0] }, then: [{ return: [] }] }
+            - decl: [moved, i32, { call: [<.drain_streams, sess, 16] }]
+            - if:
+                condition: { eq: [<.ending, 0] }
+                then:
+                  - decl: [proc, process, { call: [sys.process_attach, <.job_pid, "${<.run_dir}/status"] }]
+                  - if: { condition: { eq: [{ call: [proc.running] }, true] }, then: [{ return: [] }] }
+                  - set: [<.ending, 1]
+                  - set: [<.exit_code, proc.returncode]
+            # Prozess beendet: weiter drosseln, bis nichts mehr nachkommt.
+            - if: { condition: { eq: [moved, 1] }, then: [{ return: [] }] }
+            - decl: [res, RunResult]
+            - set: [res.run_ref, <.run_ref]
+            - set: [res.exit_code, <.exit_code]
+            - call: [sess.send_rpc, 0, "command_result", 0, res]
+            - call: [log.info, "[agent_exec] ${<.run_ref} finished exit=${<.exit_code} (${<.out_off}B out, ${<.err_off}B err)"]
+            - set: [<.run_ref, ""]
+            - set: [<.job_pid, 0]
+            - set: [<.ending, 0]
+            - set: [<.runs_done, { +: [<.runs_done, 1] }]
+
+      # drain: eingehende RPCs abarbeiten (targeted run_command vom Server).
+      - def:
+          name: drain
+          access: public
+          static_off: ["str_cmp"]
+          args: [[sess, mirror_session]]
+          body:
+            - decl: [more, i32, 1]
+            - while:
+                condition: { eq: [more, 1] }
+                body:
+                  - decl: [rpc, rpc_event, { call: [sess.poll_rpc] }]
+                  - if:
+                      condition: { eq: [rpc.method, ""] }
+                      then: [{ set: [more, 0] }]
+                      else:
+                        - if:
+                            condition: { eq: [rpc.method, "run_command"] }
+                            then:
+                              - decl: [cmd, RunCommand]
+                              - if:
+                                  condition: { eq: [{ call: [sess.decode_rpc, rpc, cmd] }, 0] }
+                                  then:
+                                    - if:
+                                        condition: { gt: [<.run_ref.len, 0] }
+                                        then:
+                                          - call: [log.warn, "[agent_exec] busy with ${<.run_ref}, rejecting ${cmd.run_ref}"]
+                                          - decl: [busy, RunResult]
+                                          - set: [busy.run_ref, cmd.run_ref]
+                                          - set: [busy.exit_code, -1]
+                                          - call: [sess.send_rpc, 0, "command_result", 0, busy]
+                                        else:
+                                          - call: [<.start_run, cmd]
+
+      - def:
+          name: run
+          access: public
+          return: i32
+          body:
+            - decl: [sess, mirror_session]
+            - decl: [connected, i32, 0]
+            - decl: [last_beat, i64, 0]
+            - decl: [keep, i32, 1]
+            # Wartezeit nach einem gescheiterten Anlauf.  Ohne sie versuchte der
+            # Agent es mehrmals pro SEKUNDE: lehnt der Server die Anmeldung ab
+            # (z. B. weil der Agent zu alt ist), wurde daraus eine Dauerschleife,
+            # die den Server mit Verbindungen flutete — gemessen am 2026-10-15:
+            # 1198 peer_connected in wenigen Sekunden.  Verdoppelt bis 30 s.
+            - decl: [backoff_ms, i64, 1000]
+            - while:
+                condition: { eq: [keep, 1] }
+                body:
+                  - if:
+                      condition: { eq: [connected, 0] }
+                      then:
+                        - set: [sess, { call: [mirror.connect_timeout, <.exec_url, 1000] }]
+                        - if:
+                            condition: { neq: [sess, null] }
+                            then:
+                              - call: [sess.update]
+                              - if:
+                                  condition: { eq: [{ call: [<.register, sess] }, 1] }
+                                  then:
+                                    - set: [connected, 1]
+                                    - set: [backoff_ms, 1000]   # geglueckt → wieder zuegig
+                                  else:
+                                    - call: [sess.close]
+                                    - call: [log.warn, "[agent_exec] naechster Anlauf in ${backoff_ms} ms"]
+                                    - call: [time.sleep_ms, backoff_ms]
+                                    - set: [backoff_ms, { '*': [backoff_ms, 2] }]
+                                    - if: { condition: { gt: [backoff_ms, 30000] }, then: [{ set: [backoff_ms, 30000] }] }
+                            else:
+                              # Server nicht erreichbar: ebenfalls warten, sonst
+                              # dreht die Schleife im Leerlauf auf vollem Kern.
+                              - call: [time.sleep_ms, backoff_ms]
+                              - set: [backoff_ms, { '*': [backoff_ms, 2] }]
+                              - if: { condition: { gt: [backoff_ms, 30000] }, then: [{ set: [backoff_ms, 30000] }] }
+                      else:
+                        - call: [sess.update]
+                        - if:
+                            condition: { eq: [{ call: [sess.is_connected] }, 0] }
+                            then:
+                              - call: [log.warn, "[agent_exec] cosmosd connection lost"]
+                              - call: [sess.close]
+                              - set: [connected, 0]
+                            else:
+                              - call: [<.drain, sess]
+                              - call: [<.pump, sess]
+                              - decl: [nowm, i64, { call: [time.now] }]
+                              # doc/spec/103: Schritte ziehen und nachsehen.
+                              # Steht VOR dem Herzschlag, damit ein langer
+                              # Schritt ihn nicht verzoegert — er laeuft
+                              # detached, `tick` sieht nur nach.
+                              - call: [<.worker.tick, sess, nowm]
+                              - call: [<.worker.claim, sess, nowm]
+                              - if:
+                                  condition: { gt: [nowm, { +: [last_beat, 3000] }] }
+                                  then:
+                                    - set: [last_beat, nowm]
+                                    - decl: [beat, AgentBeat]
+                                    - set: [beat.agent_id, <.agent_id]
+                                    # doc/spec/109 F109-7: die Last reist im Heartbeat mit.
+                                    # Gemessen wird im Takt des Heartbeats (3 s), also ist
+                                    # der Wert der Durchschnitt ueber genau dieses Fenster.
+                                    - decl: [usage, ResUsage, { call: [<.res.sample] }]
+                                    - set: [beat.cpu_permille, usage.cpu_permille]
+                                    - set: [beat.rss_kb, usage.rss_kb]
+                                    - call: [sess.send_rpc, 0, "agent_heartbeat", 0, beat]
+                  - if:
+                      condition: { '&&': [{ gt: [<.stop_after, 0] }, { ge: [<.runs_done, <.stop_after] }] }
+                      then: [{ set: [keep, 0] }]
+                  - call: [time.sleep_ms, 100]
+            - if: { condition: { eq: [connected, 1] }, then: [{ call: [sess.close] }] }
+            - return: 0

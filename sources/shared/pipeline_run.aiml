@@ -1,0 +1,39 @@
+# Cosmos pipeline run model.
+
+- import: "sources/shared/pipeline_stage.aiml"
+- import: "sources/shared/push_target.aiml"
+
+# Eine Achse des Parameterraums (doc/spec/96 F96-34): Name und Werte in
+# DEKLARATIONSREIHENFOLGE — die Reihenfolge entscheidet, welche Achse auf
+# Spalten und welche auf Zeilen abbildet (doc/spec/97 F97-12).
+- model:
+    name: PipelineAxis
+    fields:
+      - [name,   string]
+      - [values, list<string>]
+
+- model:
+    name: PipelineRun
+    fields:
+      - [run_id,                string]
+      # doc/spec/106 F106-1: ein Lauf gehoert IMMER zu einem Job und traegt
+      # eine Nummer, die nie neu vergeben wird.  Ein Lauf ohne Job waere
+      # Geschichte, die niemandem gehoert.
+      - [job_id,                string]
+      - [build_number,          i32]
+      - [started_ms,            i64]
+      - [ended_ms,              i64]
+      - [pipeline_name,         string]
+      - [repo_url,              string]
+      - [branch,                string]
+      - [status,                string]
+      - [target_namespace,      string]
+      - [queue_label,           string]
+      - [produced_workload_id,  string]
+      - [produced_job_id,       string]   # Schritt 2: verknüpfter durable Job (Controller/Agent-Welt)
+      - [stages,                list<PipelineStage>]
+      - [axes,                  list<PipelineAxis>]
+      # Wohin das Ergebnis geht (aiml spec/62 §18).  Leer = nirgendwohin, und
+      # das ist die Vorgabe: ein Lauf, der ungefragt ein Abbild veroeffentlicht,
+      # waere eine Ueberraschung.
+      - [pushes,                list<PushTarget>]

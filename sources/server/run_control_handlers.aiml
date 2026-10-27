@@ -1,0 +1,204 @@
+# RPCs zum Anhalten und Weiterlaufen (aiml spec/62 §5.9, doc/spec/101 §101.6).
+#
+# Drei Worte, drei Handler: `pause_run` haelt an, `resume_run` laesst laufen,
+# `step_run` gibt genau so viele Stufen frei, wie gefragt.
+#
+# Ausgefuehrt wird hier nichts — der Controller setzt eine Absicht, und die
+# Zuteilung liest sie beim naechsten Anlauf (F62-53: nur am Stufen-Rand).
+# Darum halten die drei Handler auch keine laufende Stufe an: die laeuft zu
+# Ende (F62-55).  Wer etwas Laufendes stoppen will, bricht ab — ein anderer
+# Akt mit einer anderen Aufzeichnung.
+
+- import: "sources/models/run_control.aiml"
+
+- groupmethods:
+    group: CosmosRuntime
+    instances:
+      - instance: pause_run
+        methods:
+          - def:
+              name: run
+              static_off: ["str_cmp"]
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, RunCtrlReq]
+                - decl: [res, RunCtrlResp]
+                - if:
+                    condition: { neq: [{ call: [session.decode_rpc, rpc, req] }, 0] }
+                    then:
+                      - set: [res.message, "unlesbare Anfrage"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, res]
+                      - return: []
+                - decl: [pid, string, { call: [<.auth.pid_for_token, req.token] }]
+                - if:
+                    condition: { eq: [pid.len, 0] }
+                    then:
+                      - set: [res.message, "nicht angemeldet"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, res]
+                      - return: []
+                - decl: [ctl, RunControl, { call: [<.cluster.set_mode, req.run_id, RunMode.halted, 0, pid] }]
+                - set: [res.accepted, 1]
+                - set: [res.mode, ctl.mode]
+                - set: [res.message, "angehalten — eine laufende Stufe laeuft zu Ende"]
+                - call: [log.info, "[pause_run] ${req.run_id} von pid=${pid}"]
+                - call: [session.reply_rpc, rpc, "set_result", 0, res]
+
+      - instance: resume_run
+        methods:
+          - def:
+              name: run
+              static_off: ["str_cmp"]
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, RunCtrlReq]
+                - decl: [res, RunCtrlResp]
+                - if:
+                    condition: { neq: [{ call: [session.decode_rpc, rpc, req] }, 0] }
+                    then:
+                      - set: [res.message, "unlesbare Anfrage"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, res]
+                      - return: []
+                - decl: [pid, string, { call: [<.auth.pid_for_token, req.token] }]
+                - if:
+                    condition: { eq: [pid.len, 0] }
+                    then:
+                      - set: [res.message, "nicht angemeldet"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, res]
+                      - return: []
+                - decl: [ctl, RunControl, { call: [<.cluster.set_mode, req.run_id, RunMode.free, 0, pid] }]
+                - set: [res.accepted, 1]
+                - set: [res.mode, ctl.mode]
+                # F62-56: ein fortgesetzter Lauf ist nichts Eigenes — er teilt
+                # weiter zu, was noch offen ist.
+                - set: [res.message, "laeuft weiter"]
+                - call: [log.info, "[resume_run] ${req.run_id} von pid=${pid}"]
+                - call: [session.reply_rpc, rpc, "set_result", 0, res]
+
+      - instance: step_run
+        methods:
+          - def:
+              name: run
+              static_off: ["str_cmp"]
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, RunCtrlReq]
+                - decl: [res, RunCtrlResp]
+                - if:
+                    condition: { neq: [{ call: [session.decode_rpc, rpc, req] }, 0] }
+                    then:
+                      - set: [res.message, "unlesbare Anfrage"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, res]
+                      - return: []
+                - decl: [pid, string, { call: [<.auth.pid_for_token, req.token] }]
+                - if:
+                    condition: { eq: [pid.len, 0] }
+                    then:
+                      - set: [res.message, "nicht angemeldet"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, res]
+                      - return: []
+                - decl: [ctl, RunControl, { call: [<.cluster.set_mode, req.run_id, RunMode.stepping, req.steps, pid] }]
+                - set: [res.accepted, 1]
+                - set: [res.mode, ctl.mode]
+                - set: [res.release, ctl.release]
+                - set: [res.message, "${ctl.release} Stufe(n) freigegeben, danach steht er wieder"]
+                - call: [log.info, "[step_run] ${req.run_id} +${ctl.release} von pid=${pid}"]
+                - call: [session.reply_rpc, rpc, "set_result", 0, res]
+
+      # ── Haltepunkt setzen und loeschen (doc/spec/107 §107.1d) ───────────
+      # Die Flagge steht am Rand VOR einer Stufe; getragen wird sie von der
+      # Stufe dahinter (`paused`).  Setzen geht nur an einer wartenden Stufe:
+      # was laeuft, laeuft zu Ende (aiml F62-55).
+      - instance: set_break
+        methods:
+          - def:
+              name: run
+              static_off: ["str_cmp"]
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, RunCtrlReq]
+                - decl: [res, RunCtrlResp]
+                - if:
+                    condition: { neq: [{ call: [session.decode_rpc, rpc, req] }, 0] }
+                    then:
+                      - set: [res.message, "unlesbare Anfrage"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, res]
+                      - return: []
+                - decl: [pid, string, { call: [<.auth.pid_for_token, req.token] }]
+                - if:
+                    condition: { eq: [pid.len, 0] }
+                    then:
+                      - set: [res.message, "nicht angemeldet"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, res]
+                      - return: []
+                - decl: [done_n, i32, { call: [<.cluster.break_set, req.run_id, req.stage_id, 1] }]
+                - set: [res.accepted, done_n]
+                - if:
+                    condition: { eq: [done_n, 1] }
+                    then: [{ set: [res.message, "Flagge gesetzt — der Lauf haelt vor dieser Stufe"] }]
+                    else: [{ set: [res.message, "geht nicht: nur eine WARTENDE Stufe kann eine Flagge tragen"] }]
+                - call: [log.info, "[set_break] ${req.run_id}/${req.stage_id} von pid=${pid} → ${done_n}"]
+                - call: [session.reply_rpc, rpc, "set_result", 0, res]
+
+      - instance: clear_break
+        methods:
+          - def:
+              name: run
+              static_off: ["str_cmp"]
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, RunCtrlReq]
+                - decl: [res, RunCtrlResp]
+                - if:
+                    condition: { neq: [{ call: [session.decode_rpc, rpc, req] }, 0] }
+                    then:
+                      - set: [res.message, "unlesbare Anfrage"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, res]
+                      - return: []
+                - decl: [pid, string, { call: [<.auth.pid_for_token, req.token] }]
+                - if:
+                    condition: { eq: [pid.len, 0] }
+                    then:
+                      - set: [res.message, "nicht angemeldet"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, res]
+                      - return: []
+                - decl: [done_n, i32, { call: [<.cluster.break_set, req.run_id, req.stage_id, 0] }]
+                - set: [res.accepted, done_n]
+                - set: [res.message, "Flagge weg — der Lauf darf weiter"]
+                - call: [log.info, "[clear_break] ${req.run_id}/${req.stage_id} von pid=${pid} → ${done_n}"]
+                - call: [session.reply_rpc, rpc, "set_result", 0, res]
+
+      # ── „ab hier nochmal" (doc/spec/101 §101.8) ─────────────────────────
+      # Diese Stufe und alles danach in derselben Lane wieder wartend machen.
+      # Es rollt NICHTS zurueck: die Stufe laeuft auf dem Stand, den der Lauf
+      # jetzt hat.  Ein echtes Zurueck braucht die Schichten je Stufe.
+      - instance: rewind_run
+        methods:
+          - def:
+              name: run
+              static_off: ["str_cmp"]
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, RunCtrlReq]
+                - decl: [res, RunCtrlResp]
+                - if:
+                    condition: { neq: [{ call: [session.decode_rpc, rpc, req] }, 0] }
+                    then:
+                      - set: [res.message, "unlesbare Anfrage"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, res]
+                      - return: []
+                - decl: [pid, string, { call: [<.auth.pid_for_token, req.token] }]
+                - if:
+                    condition: { eq: [pid.len, 0] }
+                    then:
+                      - set: [res.message, "nicht angemeldet"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, res]
+                      - return: []
+                - decl: [back_n, i32, { call: [<.cluster.rewind_to, req.run_id, req.stage_id] }]
+                - set: [res.accepted, 1]
+                - set: [res.release, back_n]
+                - if:
+                    condition: { gt: [back_n, 0] }
+                    then: [{ set: [res.message, "${back_n} Stufe(n) wieder wartend — der Stand bleibt, wie er ist"] }]
+                    else: [{ set: [res.message, "nichts zurueckgesetzt (Stufe unbekannt oder sie laeuft gerade)"] }]
+                - call: [log.info, "[rewind_run] ${req.run_id} ab ${req.stage_id} von pid=${pid} → ${back_n}"]
+                - call: [session.reply_rpc, rpc, "set_result", 0, res]

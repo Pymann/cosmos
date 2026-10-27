@@ -1,0 +1,58 @@
+# PipeStatus — der Zustand eines Laufs bzw. einer Stufe, als ENUM.
+#
+# Anlass (User 2026-10-18): die Kugel in der Jobliste war rot, obwohl der letzte Lauf
+# gruen war.  Der Client verglich `last_status` mit `"ok"` — ein Wort, das es in diesem
+# System gar nicht gibt (`run_outcome` liefert `"done"` oder `"failed"`).  Der Vergleich
+# traf also NIE zu, und jeder abgeschlossene Lauf wurde rot gefaerbt.
+#
+# Ein Stringvergleich kann so etwas nicht melden: `"ok"` ist ein gueltiger String.  Ein
+# Enum-Member schon — `PipeStatus.ok` ist ein UEBERSETZUNGSFEHLER (aiml spec/14).
+# Darum stehen die Woerter ab hier an GENAU EINER Stelle: in diesem Enum.
+#
+# Warum das Feld trotzdem ein String bleibt: `PipelineRun.status`, `PipelineStage.status`
+# und `JobDef.last_status` liegen in KVs, und ein Typwechsel aendert das Layout und damit
+# den Schema-Fingerprint — jeder bestehende Blob waere unlesbar (doc/spec/108 F108-2).
+# Der Enum ist die Sprache des CODES, der String die Form auf Platte und Draht; die
+# beiden Umrechner unten sind die einzige Naht dazwischen.
+#
+# `unknown` ist bewusst der erste Wert (0): ein nicht gesetztes Feld ist damit
+# „weiss ich nicht" und nicht versehentlich „fertig".
+
+- enum:
+    name: PipeStatus
+    values:
+      - unknown
+      - pending
+      - queued
+      - running
+      # `paused` ist ein LEBENSZUSTAND und nie ein Ausgang (aiml spec/62 F62-44):
+      # ein angehaltener Lauf hat noch kein Ergebnis — genau darum kann er
+      # weitergehen.
+      - paused
+      - done
+      - failed
+
+# Das Wort zu einem Zustand — die einzige Stelle, an der ein Status zu Text wird.
+- def:
+    name: pipe_status_name
+    args: [[code, i32]]
+    return: { type: string, lifetime: producer }
+    body:
+      - if: { condition: { eq: [code, PipeStatus.unknown] }, then: [{ return: "" }] }
+      - return: { call: [enums.name, "PipeStatus", code] }
+
+# Und zurueck: aus dem gespeicherten Wort der Zustand.  Unbekanntes bleibt `unknown` —
+# es zu raten waere genau der Fehler, den dieses Enum verhindern soll.
+- def:
+    name: pipe_status_of
+    static_off: ["str_cmp"]
+    args: [[txt, string]]
+    return: i32
+    body:
+      - if: { condition: { eq: [txt, { call: [enums.name, "PipeStatus", PipeStatus.done] }] },    then: [{ return: PipeStatus.done }] }
+      - if: { condition: { eq: [txt, { call: [enums.name, "PipeStatus", PipeStatus.failed] }] },  then: [{ return: PipeStatus.failed }] }
+      - if: { condition: { eq: [txt, { call: [enums.name, "PipeStatus", PipeStatus.running] }] }, then: [{ return: PipeStatus.running }] }
+      - if: { condition: { eq: [txt, { call: [enums.name, "PipeStatus", PipeStatus.queued] }] },  then: [{ return: PipeStatus.queued }] }
+      - if: { condition: { eq: [txt, { call: [enums.name, "PipeStatus", PipeStatus.pending] }] }, then: [{ return: PipeStatus.pending }] }
+      - if: { condition: { eq: [txt, { call: [enums.name, "PipeStatus", PipeStatus.paused] }] },  then: [{ return: PipeStatus.paused }] }
+      - return: PipeStatus.unknown

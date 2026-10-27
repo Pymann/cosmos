@@ -1,0 +1,31 @@
+# Rueckmeldung der Ausfuehrungskette (doc/spec/103 §103.2).
+# Getrennt von step_dispatch.aiml, weil eine Datei hoechstens drei Typen traegt.
+
+- model:
+    name: StepReportReq
+    fields:
+      - [agent_id,    string]
+      - [run_id,      string]
+      - [stage_id,    string]
+      # Welcher Versuch (F101-7).  0 = ein Agent, der die Nummer noch nicht
+      # kennt; dann gilt die alte Halter-Regel (F101-6), damit ein noch nicht
+      # erneuerter Agent weiterarbeiten kann.
+      - [attempt,     i32]
+      - [exit_code,   i32]
+      - [duration_ms, i64]
+      - [output,      string]
+      # Was die Stufe hinterlassen hat (doc/spec/110 F110-93, doc/spec/107
+      # §107.1c): die Groesse ihres overlayfs-`upper`.  Der Agent misst sie,
+      # weil nur er sie sehen kann — die Schicht liegt auf SEINEM Wirt.  0/0
+      # heisst: keine eigene Schicht (Schritt ohne Container, oder die Stufe
+      # hat nichts geschrieben).
+      - [layer_bytes, i64]
+      - [layer_files, i32]
+
+- model:
+    name: StepAck
+    fields:
+      # accepted = 0 heisst: Lehen abgelaufen, Ergebnis verworfen (F103-4).
+      - [accepted,    i32]
+      - [reason,      string]
+      - [lease_until, i64]

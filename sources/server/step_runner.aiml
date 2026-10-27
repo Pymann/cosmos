@@ -1,0 +1,114 @@
+# StepRunner — bindet CAS und ActionCache zu einem wiederholbaren Schritt
+# zusammen (doc/spec/91 §AP2.D, Scheibe 3).
+#
+# Bis hierher waren die Bausteine fertig, aber unverbunden: der ActionCache war
+# korrekt und von niemandem benutzt (Befund der Pruefung, doc/spec/95 §95.3).
+# Diese Klasse ist die Verdrahtung — und bewusst OHNE Ausfuehrung: sie sagt, ob
+# ein Schritt uebersprungen werden darf, und haelt sein Ergebnis fest.  Wer den
+# Schritt ausfuehrt (Agent, spaeter in overlayfs) bleibt aussen.
+#
+# Dadurch ist die Scheibe pruefbar, obwohl Scheibe 2 (Isolation) noch am
+# AppArmor-Profil des Knotens haengt: der output_tree kommt aus put_tree des
+# Arbeitsverzeichnisses, nicht aus einer upper-Schicht.  Der writeset bleibt
+# damit vorerst grob (ganzer Baum) — konservativ, aber korrekt, genau wie
+# §AP2.D es fuer den readset vorgibt.
+
+- import: "sources/models/step.aiml"
+- import: "sources/server/cas_trees.aiml"
+- import: "sources/server/action_cache.aiml"
+
+- class:
+    name: StepRunner
+    members:
+      - [trees, ref<CasTrees>]
+      - [cache, ref<ActionCache>]
+    methods:
+      - def:
+          name: init
+          access: public
+          args: [[tree_store, ref<CasTrees>], [act_cache, ref<ActionCache>]]
+          body:
+            - set: [<.trees, tree_store]
+            - set: [<.cache, act_cache]
+
+      # key_of: der Schluessel eines Schritts.  body_hash ist der Hash der
+      # Shell-Zeile bzw. der aiml-Quelle — der Schluessel haengt also am INHALT
+      # der Aktion, nicht an ihrer Formulierung im Aufrufer.
+      - def:
+          name: key_of
+          access: public
+          args: [[step, StepDef]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [body_hash, string, { call: [hash.sha256, step.body] }]
+            - return: { call: [<.cache.key, step, body_hash] }
+
+      # lookup: darf der Schritt uebersprungen werden?
+      - def:
+          name: lookup
+          access: public
+          static_off: ["str_cmp"]
+          args: [[step, StepDef]]
+          return: { type: StepOutcome, lifetime: producer }
+          body:
+            - decl: [out, StepOutcome]
+            - set: [out.step_key, { call: [<.key_of, step] }]
+            # doc/spec/92 §92.2: zwei Faelle, die der SCHLUESSEL nicht ausdruecken
+            # kann, weil ein Schluessel nicht sagen kann, dass er ungueltig ist:
+            #   opaque           — trifft ueberhaupt nicht (§96.6 Schritt 7)
+            #   resolve_out == "" — nicht aufgeloest; ein unbekannter Schluessel
+            #                      darf nicht treffen, sonst wird aus "ich konnte
+            #                      nicht nachsehen" ein "es hat sich nichts
+            #                      geaendert"
+            - if: { condition: { eq: [step.cache_class, 0] }, then: [{ return: out }] }
+            - if:
+                condition: { '&&': [{ eq: [step.cache_class, 1] }, { eq: [step.resolve_out.len, 0] }] }
+                then: [{ return: out }]
+            - decl: [hit, ActionResult, { call: [<.cache.lookup, out.step_key] }]
+            # "" als output_tree ist der Fehlschlag-Marker (jeder echte Baum hat
+            # 64 Hex, auch der leere) — doc/spec/92 §92.2.
+            - if: { condition: { eq: [hit.output_tree.len, 0] }, then: [{ return: out }] }
+            - set: [out.cached, 1]
+            - set: [out.output_tree, hit.output_tree]
+            - set: [out.exit_code, hit.exit_code]
+            - set: [out.out_bytes, hit.out_bytes]
+            - set: [out.err_bytes, hit.err_bytes]
+            - return: out
+
+      # restore: das Ergebnis eines Treffers ins Arbeitsverzeichnis legen.
+      # Das ist der eigentliche Nutzen eines Treffers — nicht "nichts tun",
+      # sondern den Zustand herstellen, den die Ausfuehrung erzeugt haette.
+      - def:
+          name: restore
+          access: public
+          args: [[outcome, StepOutcome], [workdir, string]]
+          return: i32
+          body:
+            - if: { condition: { eq: [outcome.output_tree.len, 0] }, then: [{ return: -1 }] }
+            - return: { call: [<.trees.materialize, outcome.output_tree, workdir] }
+
+      # record: Ergebnis einer tatsaechlichen Ausfuehrung festhalten.
+      # Der output_tree ist der Zustand des Arbeitsverzeichnisses NACH dem
+      # Schritt; beim naechsten Mal ersetzt er die Ausfuehrung.
+      - def:
+          name: record
+          access: public
+          args: [[step, StepDef], [workdir, string], [exit_code, i32],
+                 [out_bytes, i64], [err_bytes, i64]]
+          return: { type: StepOutcome, lifetime: producer }
+          body:
+            - decl: [out, StepOutcome]
+            - set: [out.step_key, { call: [<.key_of, step] }]
+            - set: [out.exit_code, exit_code]
+            - set: [out.out_bytes, out_bytes]
+            - set: [out.err_bytes, err_bytes]
+            - decl: [tree_id, string, { call: [<.trees.put_tree, workdir] }]
+            - if: { condition: { eq: [tree_id.len, 0] }, then: [{ return: out }] }
+            - set: [out.output_tree, tree_id]
+            - decl: [res, ActionResult]
+            - set: [res.output_tree, tree_id]
+            - set: [res.exit_code, exit_code]
+            - set: [res.out_bytes, out_bytes]
+            - set: [res.err_bytes, err_bytes]
+            - call: [<.cache.record, out.step_key, res]
+            - return: out

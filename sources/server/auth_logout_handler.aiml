@@ -1,0 +1,33 @@
+# "logout" RPC (TokenReq → AuthResult): invalidiert das Token serverseitig
+# (Lücke: client-only net_logout ließ das Token serverseitig gültig).  Eigene Datei, weil
+# auth_handlers (3) und auth_profile_handlers (3) bereits am spec/49-§14-Klassen-Cap sind.
+
+- import: "sources/models/auth_reqs.aiml"
+- import: "sources/models/auth_result.aiml"
+# Stufe 2 (spec/58): diese Handler waren Klassen, die die Dienste über
+# Globals erreichten.  Jetzt sind sie Instanzen der CosmosRuntime und ihr
+# `run` steht hier als Gruppen-Methode — Zugriff nur über die deklarierten
+# sees-Kanten.  KEIN Import aus dem Server: die Gruppen-Datei importiert
+# diese Datei (§1.1), umgekehrt gäbe es einen Zyklus.
+
+- groupmethods:
+    group: CosmosRuntime
+    instances:
+      - instance: logout
+        methods:
+          - def:
+              name: run
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, TokenReq]
+                - decl: [rc_val, i32, { call: [session.decode_rpc, rpc, req] }]
+                - if:
+                    condition: { neq: [rc_val, 0] }
+                    then:
+                      - decl: [bad, AuthResult]
+                      - set: [bad.success, 0]
+                      - set: [bad.message, "malformed logout payload"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, bad]
+                      - return: []
+                - decl: [res, AuthResult, { call: [<.auth.handle_logout, req.token] }]
+                - call: [session.reply_rpc, rpc, "set_result", 0, res]

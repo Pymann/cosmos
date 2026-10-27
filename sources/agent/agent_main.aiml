@@ -1,0 +1,97 @@
+# Cosmos agent entry point (sys.arg_dump → jedes AgentCfg-Feld ist ein Flag,
+# --foo-bar wird auf foo_bar abgebildet, spec/23).
+#
+#   durable-Job-Pfad (tcp-Controller):  ./agent --port 19870 --agent-id agent-1
+#   AP1-Exec-Pfad (ws/wss zu cosmosd):  ./agent --exec-url ws://127.0.0.1:8765 --agent-id builder-1
+#
+# Enrollment-Token (§AP1.9) in dieser Rangfolge:
+#   1. --agent-token <wert>       — bequem, aber in der Prozessliste sichtbar (ps/
+#                                   /proc/<pid>/cmdline).  Wird mit Warnung akzeptiert.
+#   2. --agent-token-file <pfad>  — Datei (eine Zeile); taucht NICHT in der Prozessliste auf.
+#   3. COSMOS_AGENT_TOKEN         — Umgebung.
+- import: "sources/agent/agent_runner.aiml"
+- import: "sources/agent/agent_exec.aiml"
+- import: "sources/agent/agent_isolation.aiml"
+
+# resolve_agent_token: Token nach obiger Rangfolge beschaffen ("" = keines).
+- def:
+    name: resolve_agent_token
+    args: [[cfg, AgentCfg]]
+    return: { type: string, lifetime: producer }
+    body:
+      - if:
+          condition: { gt: [cfg.agent_token.len, 0] }
+          then:
+            - call: [log.warn, "[agent] Token aus der Kommandozeile — in der Prozessliste sichtbar; --agent-token-file oder COSMOS_AGENT_TOKEN ist sicherer"]
+            - return: cfg.agent_token
+      - if:
+          condition: { gt: [cfg.agent_token_file.len, 0] }
+          then:
+            - if:
+                condition: { eq: [{ call: [io.is_file, cfg.agent_token_file] }, false] }
+                then:
+                  - call: [log.error, "[agent] Token-Datei nicht gefunden: ${cfg.agent_token_file}"]
+                  - return: ""
+            - decl: [src, file_handle, { call: [io.open, cfg.agent_token_file, "r"] }]
+            - if: { condition: { eq: [src, null] }, then: [{ call: [log.error, "[agent] Token-Datei nicht lesbar: ${cfg.agent_token_file}"] }, { return: "" }] }
+            - decl: [raw, string, { call: [io.read_all, src] }]
+            - call: [io.close, src]
+            - return: { call: [raw.trim] }
+      - decl: [envm, map<string:string>, { call: [sys.env] }]
+      - if:
+          condition: { gt: [{ call: [envm.contains, "COSMOS_AGENT_TOKEN"] }, 0] }
+          then:
+            - return: { call: [envm.get, "COSMOS_AGENT_TOKEN"] }
+      - return: ""
+
+- def:
+    name: main
+    return: i32
+    body:
+      - decl: [cfg, AgentCfg]
+      - call: [sys.arg_dump, cfg]
+      # Nur pruefen, nichts tun: der Schritt ruft das INNERHALB seiner Wurzel
+      # auf (doc/spec/110 F110-109).  Die Antwort geht nach stderr, damit sie
+      # im Protokoll der Stufe landet und die Oberflaeche sie zeigt.
+      - if:
+          condition: { gt: [cfg.require_check.len, 0] }
+          then:
+            - decl: [fehlt, string, { call: [sys.require_tools, cfg.require_check] }]
+            - if:
+                condition: { eq: [fehlt.len, 0] }
+                then: [{ return: 0 }]
+            - call: [io.write, io.stderr, "Umgebung unvollstaendig —${fehlt}  (requires:, aiml spec/62 §18.2)\n"]
+            - return: 127
+      # Selbsttest zuerst: braucht weder Token noch Verbindung, und die
+      # Einrichtung ruft genau das auf (doc/spec/94 Schritt 9).
+      - if:
+          condition: { eq: [cfg.verify_isolation, 1] }
+          then:
+            - decl: [probe, ptr<IsolationProbe>, { new: IsolationProbe }]
+            - decl: [iso, IsolationResult, { call: [probe.run, cfg.bwrap_path] }]
+            - if:
+                condition: { eq: [iso.holds, 1] }
+                then:
+                  # Die Marke geht nach STDOUT: sie ist der Vertrag mit der
+                  # Einrichtung (doc/spec/94 Schritt 9).  log.* schreibt nach
+                  # stderr — darueber gepruefte Marken sind unsichtbar.
+                  - call: [io.write, io.stdout, "ISOLATION_OK\n"]
+                  - call: [log.info, "[agent] Isolation traegt: uid 0 innen, eigenes /tmp, Wurzel schreibgeschuetzt"]
+                  - return: 0
+            - call: [log.error, "[agent] Isolation traegt nicht bei: ${iso.step}"]
+            - if: { condition: { gt: [iso.detail.len, 0] }, then: [{ call: [log.error, "[agent] ${iso.detail}"] }] }
+            - return: 1
+      - if:
+          condition: { gt: [cfg.exec_url.len, 0] }
+          then:
+            - decl: [tok, string, { call: [resolve_agent_token, cfg] }]
+            - if:
+                condition: { eq: [tok.len, 0] }
+                then:
+                  - call: [log.error, "[agent] kein Agent-Token — im Web-UI erzeugen (§AP1.9) und per --agent-token, --agent-token-file oder COSMOS_AGENT_TOKEN übergeben"]
+            - decl: [exec, ptr<AgentExec>, { new: AgentExec }]
+            - call: [exec.init, cfg, tok]
+            - return: { call: [exec.run] }
+      - decl: [runner, ptr<AgentRunner>, { new: AgentRunner }]
+      - call: [runner.init, cfg]
+      - return: { call: [runner.run] }

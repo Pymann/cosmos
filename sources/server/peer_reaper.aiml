@@ -1,0 +1,53 @@
+# PeerReaper — räumt auf, wenn eine Verbindung wegfällt (doc/spec/93, Stufe 3).
+#
+# Eine getrennte Verbindung zieht Arbeit an fünf Diensten nach sich: Session
+# markieren, aus beiden Abonnenten-Mengen entfernen, einen noch laufenden Lauf
+# abschliessen und den Agenten als getrennt buchen.  Das lag als drei Methoden
+# (`drop_sub`, `drop_agent_sub`, `peer_gone`) im Daemon und griff über
+# `g_runtime` zu — fachlich ist es EIN Vorgang, darum hier eine Methode.
+#
+# Ohne das Abschliessen des Laufs (exit -1 = Agent verloren) wartet der Browser
+# endlos auf Nachschub, der nie kommt.
+
+- class:
+    name: PeerReaper
+    members:
+      - [lost_runs, i64, 0]   # Läufe, die durch Agenten-Verlust endeten
+
+- groupmethods:
+    group: CosmosRuntime
+    instances:
+      - instance: reaper
+        methods:
+          # peer_gone: der ganze Vorgang für eine weggefallene Verbindung.
+          # Die früheren `pneq: [g_runtime.X, null]`-Wachen sind entfallen: in
+          # der Gruppe sind die sees-Kanten nach Phase 1 verdrahtet, eine
+          # Instanz kann hier nicht null sein (spec/58 §3).
+          - def:
+              name: peer_gone
+              args: [[peer_id, i32], [nowm, i64]]
+              body:
+                - call: [<.conn.mark_disconnected, peer_id, nowm]
+                - decl: [was_cluster_sub, i32, { call: [<.cluster_subs.drop, peer_id] }]
+                - decl: [was_agent_sub, i32, { call: [<.agent_subs.drop, peer_id] }]
+                - call: [log.info, "[reaper] peer_disconnected peer=${peer_id}"]
+                - decl: [lost, string, { call: [<.agents.agent_of_peer, peer_id] }]
+                - if:
+                    condition: { gt: [lost.len, 0] }
+                    then:
+                      - decl: [open_run, string, { call: [<.agents.current_run_of, lost] }]
+                      - if:
+                          condition: { gt: [open_run.len, 0] }
+                          then:
+                            - call: [<.runs.finish, open_run, -1]
+                            - set: [<.lost_runs, { +: [<.lost_runs, 1] }]
+                            - call: [log.warn, "[reaper] agent ${lost} lost during ${open_run}"]
+                      - call: [log.info, "[reaper] agent ${lost} disconnected"]
+                - call: [<.agents.drop_peer, peer_id, nowm]
+
+          # sweep: abgelaufene getrennte Verbindungen endgültig vergessen.
+          - def:
+              name: sweep
+              args: [[nowm, i64]]
+              body:
+                - decl: [gone, list<string>, { call: [<.conn.take_gone_players, nowm] }]
