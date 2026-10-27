@@ -283,6 +283,12 @@ Braucht die aiml-Erweiterung `client.body_file` / `resp.save_to` / `resp.body_le
 `feature/http-client-files-memv3`): der HTTP-Client war nur textsicher und brach an der ersten
 NUL ab — eine Schicht ist Binärdaten.
 
+Belegt: `run_e2e_museum.sh` gegen ein echtes museum — Webhook-ping mit Signatur,
+`package.published` öffnet die Kampagne (Welle 1 läuft), die nächste Veröffentlichung setzt
+**dieselbe** Kampagne fort (Welle 2 startet, Projekt ohne Job → `no_job`), push/pull per Tag
+und Digest byte-gleich, push ohne Token abgewiesen, `image.pushed` kommt bei cosmos an —
+21 Prüfungen.
+
 ---
 
 ## 111.10 Was NICHT läuft, und warum das hier steht
