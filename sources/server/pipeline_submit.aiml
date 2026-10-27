@@ -584,6 +584,11 @@
                   - decl: [lay_at, string, { call: [name.substr, 4] }]
                   - if: { condition: { eq: [{ call: [io.is_file, "${lay_at}/index.json"] }, true] }, then: [{ return: 1 }] }
                   - return: 0
+            # `museum:<repo>:<tag>` (doc/spec/111 §111.9): das Abbild liegt in
+            # museum und wird beim Start geholt (rt_launcher.pull_museum).  Ob
+            # es dort WIRKLICH liegt, zeigt erst das Holen — hier nachzufragen
+            # hiesse, beim Pruefen einer Pipeline ins Netz zu gehen.
+            - if: { condition: { eq: [{ call: [name.starts_with, "museum:"] }, 1] }, then: [{ return: 1 }] }
             - decl: [env_all, map<string:string>, { call: [sys.env] }]
             - if: { condition: { eq: [{ call: [env_all.contains, "COSMOS_RT_IMAGES"] }, 0] }, then: [{ return: 0 }] }
             - decl: [raw, string, { call: [env_all.get, "COSMOS_RT_IMAGES"] }]

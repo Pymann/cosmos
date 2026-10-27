@@ -374,6 +374,11 @@
                       condition: { gt: [nowm, { +: [<.last_push_scan_ms, 2000] }] }
                       then:
                         - set: [<.last_push_scan_ms, nowm]
+                        # doc/spec/111 §111.9: museum-Zugang aus der Erklaerung —
+                        # jede Runde neu, damit ein `config apply` ohne Neustart gilt.
+                        - decl: [m_acc, MuseumAccess, { call: [g_runtime.casc.museum_access] }]
+                        - call: [g_runtime.pusher.set_museum, m_acc]
+                        - if: { condition: { neq: [<.spawner, null] }, then: [{ call: [<.spawner.set_museum, m_acc] }] }
                         - decl: [ready, PushTarget, { call: [g_runtime.cluster.push_ready] }]
                         - if:
                             condition: { eq: [ready.status, "ready"] }

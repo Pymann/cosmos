@@ -14,6 +14,8 @@
 # Static-Check (aiml spec/49 §14): 1 class.
 - import: "sources/models/catalog_entry.aiml"
 
+- import: "sources/shared/museum_access.aiml"
+
 - class:
     name: CascStore
     members:
@@ -300,6 +302,32 @@
       # Immer erlaubt, sobald jemand angemeldet ist: die Selbstbedienung des
       # eigenen Kontos.  Ohne sie koennte sich ein Konto ohne Rolle nicht
       # einmal abmelden.
+      # museum_access: Adresse und Token-QUELLE fuer cosmos-museum (§111.9).
+      - def:
+          name: museum_access
+          access: public
+          static_off: ["str_cmp"]
+          return: { type: MuseumAccess, lifetime: producer }
+          body:
+            - decl: [out, MuseumAccess]
+            - decl: [cfg, CascConfig, { call: [<.current] }]
+            - set: [out.url, cfg.museum.url]
+            - if: { condition: { eq: [cfg.museum.token.len, 0] }, then: [{ return: out }] }
+            - decl: [six, i32, 0]
+            - while:
+                condition: { lt: [six, cfg.secrets.len] }
+                body:
+                  - decl: [sec, CascSecret, { at: [cfg.secrets, six] }]
+                  - if:
+                      condition: { eq: [sec.name, cfg.museum.token] }
+                      then:
+                        - set: [out.token_ref, sec.ref]
+                        - set: [out.token_flag, "--token-env"]
+                        - if: { condition: { eq: [sec.source, "file"] }, then: [{ set: [out.token_flag, "--token-file"] }] }
+                        - return: out
+                  - set: [six, { +: [six, 1] }]
+            - return: out
+
       - def:
           name: self_service
           access: public
