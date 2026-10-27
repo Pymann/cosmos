@@ -133,8 +133,11 @@
                   - call: [log.error, "[museum] Manifest ${<.repo}:${tag}: HTTP ${code} ${answer.body}"]
                   - call: [answer.free]
                   - return: ""
-            - decl: [heads, map<string:string>, answer.headers]
-            - decl: [digest, string, { call: [heads.get, "docker-content-digest"] }]
+            # Den Kopf NICHT an eine Map-Variable binden: unter memV3 gibt deren
+            # Ende die Map frei und `answer.free` danach noch einmal (doppeltes
+            # free, gemessen 2026-10-27).  Der verkettete Zugriff liefert einen
+            # eigenen String.
+            - decl: [digest, string, { call: [answer.headers.get, "docker-content-digest"] }]
             - call: [answer.free]
             - if:
                 condition: { eq: [digest, null] }

@@ -28,6 +28,7 @@ console_snapshot.txt
 /.e2e_pipe/
 /.e2e_api/
 /.e2e_identity/
+/.e2e_museum/
 /.e2e_prov/
 /.liveshape/
 /.lt/
