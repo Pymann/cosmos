@@ -1,76 +1,59 @@
+# ── Was git NICHT sehen soll ─────────────────────────────────────────────
+#
+# WICHTIG: Bau-Artefakte sind mit `/` an die WURZEL gebunden.  Ein
+# unverankertes `server` oder `agent` traf frueher JEDEN Pfadbestandteil
+# dieses Namens — also auch `sources/server/` und `sources/agent/`, die
+# damit komplett unsichtbar waren (gefunden 27.10.2026 nach `git init`).
+# Ein Muster ohne `/` ist in dieser Datei ein Fehler, kein Stil.
+
+# Arbeits- und Laufverzeichnisse
 out/
 __aiml_cache/
+__exodus_cache/
 aiondb/
-server
-controller
-agent
-cosmosd
-client_native
-static_server
-client.html
-client.js
-client.wasm
-test_auth_cluster
-test_agent_exec
-e2e_agent_exec
+# Sicherungen der Datenbank liegen gesammelt unter backups/ (27.10.2026),
+# nicht mehr als `aiondb.bak_<datum>` neben der laufenden DB.
+backups/
 logs/
+run_logs/
+runs/
 .test_run/
 .e2e_run/
 .mem_run/
-run_logs/
-runs/
-probe_peer_disconnect
-e2e_enroll
 .probe_run/
 .tok_run/
-.probe_run/
 .cas_run/
-.cas_run/
-
-# doc/spec/108: Arbeitsverzeichnisse der Konsole und ihrer Abnahme
 .e2e_console/
 console_runs/
-libcosmos_console_offer.so
 
-# Exodus artifacts
-__exodus_cache/
-pipe3d_shot
-probe_copy_set
-libcosmos_probe_offer.so
-purge_demo
-show_state
-static
-submit_work
-test_cas_actions
-test_run_authz
-e2e_console_admin
-test_cas_blobs
-test_cas_mem
-test_cas_trees
-test_console
-test_dashboard
-test_step_dispatch
-e2e_pipeline_run
-e2e_provision
-test_cas_immutable
-test_job_lifecycle
-test_job_params
-test_matrix_live_shape
-test_live_table
-test_matrix_view
-test_pipe_scene
-test_presence
-test_provision_plan
-test_provision_run
-test_live_push_sig
-test_queue_order
-t_res
-test_run_pipeline
-test_step_scheduler
-test_step_runner
-test_step_env
-test_step_notes
-e2e_rpc_surface
-test_cluster_view_roundtrip
-ui_shot
+# ── Bau-Artefakte ────────────────────────────────────────────────────────
+# MUSTER statt Namensliste: jede `exodus-*.json` traegt `artifact_in_cwd:
+# true`, das Artefakt landet also in der Wurzel.  Die frueher hier gepflegte
+# Liste von ~40 Namen brauchte je neuer Config eine neue Zeile — sechs
+# fehlten (cosmos-oci, cosmos-rt, cosmosd_check, rt_probe, test_oci, test_rt).
+/test_*
+/e2e_*
+/probe_*
+!/probe_*.sh
+/rt_probe
+/cosmos-*
+/cosmosd*
+/*.so
+/agent
+/controller
+/server
+/client_native
+/static
+/static_server
+/show_state
+/submit_work
+/purge_demo
+/pipe3d_shot
+/ui_shot
+/t_res
+/client.html
+/client.js
+/client.wasm
+
+# Erzeugte Wortlisten (doc/spec/44_8): stehen im Quelltext, nicht als Datei.
 assets/
