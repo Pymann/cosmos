@@ -4,8 +4,8 @@
 # ruft dieselben RPCs.  Darum gilt jede Pruefung von cosmosd unveraendert —
 # Token, Freigabe, Rollen —, und cosmosd bleibt der einzige Schreiber.
 #
-# Der HTTP-Server laeuft mit einem Faden (aiml spec/32_2 §3), Anfragen kommen
-# also nacheinander; eine Sitzung reicht und braucht keine Sperre.
+# Der HTTP-Server laeuft mit einem Faden je Verbindung (aiml spec/32_2 §3.12);
+# die Sitzung ist nicht fadenfest, darum nimmt ApiGateway.serial jede Route ganz.
 #
 # Static-Check (aiml spec/49 §14): 1 class.
 

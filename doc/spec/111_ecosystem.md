@@ -305,16 +305,22 @@ Neue Programme: `cosmos-api` (`exodus-api.json`), `cosmos-museum` (`exodus-museu
 
 ## 111.11 Was NICHT läuft, und warum das hier steht
 
-- **`pipeline_submit.aiml` ließ sich hier nicht übersetzen** (braucht eine neuere aiml-Fassung
-  als die auf GitHub).  Die Abnahmen liefen mit einem Platzhalter, der nur den Namen aus
-  `# pipeline:` liest.  Die einzige Änderung an der echten Datei ist `known_image` für
-  `museum:` (sechs Zeilen).  → Mit der lokalen aiml einmal `./run_e2e_api.sh` laufen lassen.
 - **`from_code:`** (spec/100 §100.6) fehlt, siehe F111-5.
 - **LDAP/SAML** brauchen den aiml-Zweig `feature/identity-builtins-memv3` (libldap,
   xmlsec1).  `memberOf` als Gruppen-Attribut setzt das memberof-Overlay im Verzeichnis voraus.
 - **Schicht-Annotationen** (`cosmos.stage`, `cosmos.bindings`, …) setzt cosmos-oci noch nicht;
   das Artefakt trägt bisher nur den `artifactType`.
-- **Ob die aiml-Pipeline-Prüfung `push: to: "museum:…"` annimmt**, ist in der lokalen
-  aiml-Fassung zu prüfen (aiml F62-122 kannte nur `oci:`).
 - Beim Holen und Hochladen wird eine Schicht einmal ganz gelesen (Hash-Prüfung) — für
   mehrere GB große Schichten wäre ein Strom-Hash besser.
+
+### 111.11.1 Erledigt (2026-10-28, aiml `mem-v3-compiler` 9810134)
+
+- **`pipeline_submit.aiml` übersetzt** mit der aiml-Fassung, die die Pipeline-Merkmale trägt;
+  `run_e2e_api.sh`, `run_e2e_identity.sh` und `run_e2e_museum.sh` laufen damit ohne Platzhalter.
+- **`push: to: "museum:<repo>"`** nimmt die aiml-Pipeline-Prüfung an und reicht das Ziel
+  unverändert durch (`pipe.push_to`); `push_worker` setzt `museum:` um.
+- **Gateway-Absturz unter gleichzeitigen Anfragen behoben.**  Der aiml-HTTP-Server hat einen
+  Faden je Verbindung (aiml spec/32_2 §3.12), nicht einen für alle — die Annahme in
+  `api_link.aiml` war falsch.  Zwei Fäden lasen dieselbe Mirror-Sitzung (SIGSEGV in
+  `SSL_read`, zwei von vier `run_e2e_museum.sh`-Läufen); `ApiGateway.serial` (ein `lock`)
+  nimmt jetzt jede Route ganz.  Danach fünf von fünf Läufen grün.

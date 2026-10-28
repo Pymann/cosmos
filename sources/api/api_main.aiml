@@ -53,182 +53,234 @@
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
       - call: [g_api.health, xch]
+      - call: [g_api.serial.release]
 
 - def:
     name: on_login
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
       - call: [g_api.login, xch]
+      - call: [g_api.serial.release]
 
 - def:
     name: on_register
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
       - call: [g_api.register, xch]
+      - call: [g_api.serial.release]
 
 - def:
     name: on_logout
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
       - call: [g_api.logout, xch]
+      - call: [g_api.serial.release]
 
 - def:
     name: on_whoami
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
       - call: [g_api.whoami, xch]
+      - call: [g_api.serial.release]
 
 - def:
     name: on_cluster
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
       - call: [g_api.cluster, xch, "all"]
+      - call: [g_api.serial.release]
 
 - def:
     name: on_jobs
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
       - call: [g_api.cluster, xch, "jobs"]
+      - call: [g_api.serial.release]
 
 - def:
     name: on_job_put
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
       - call: [g_api.save_job, xch]
+      - call: [g_api.serial.release]
 
 - def:
     name: on_job_run
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
       - call: [g_api.run_job, xch]
+      - call: [g_api.serial.release]
 
 - def:
     name: on_runs
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
       - call: [g_api.cluster, xch, "runs"]
+      - call: [g_api.serial.release]
 
 - def:
     name: on_pipeline
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
       - call: [g_api.submit, xch]
+      - call: [g_api.serial.release]
 
 - def:
     name: on_run_pause
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
       - call: [g_api.run_ctrl, xch, "pause_run"]
+      - call: [g_api.serial.release]
 
 - def:
     name: on_run_resume
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
       - call: [g_api.run_ctrl, xch, "resume_run"]
+      - call: [g_api.serial.release]
 
 - def:
     name: on_run_step
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
       - call: [g_api.run_ctrl, xch, "step_run"]
+      - call: [g_api.serial.release]
 
 - def:
     name: on_run_rewind
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
       - call: [g_api.run_ctrl, xch, "rewind_run"]
+      - call: [g_api.serial.release]
 
 - def:
     name: on_console
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
       - call: [g_api.console, xch]
+      - call: [g_api.serial.release]
 
 - def:
     name: on_config_get
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
       - call: [g_api.casc, xch, "config_read"]
+      - call: [g_api.serial.release]
 
 - def:
     name: on_config_plan
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
       - call: [g_api.casc, xch, "config_plan"]
+      - call: [g_api.serial.release]
 
 - def:
     name: on_config_apply
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
       - call: [g_api.casc, xch, "config_apply"]
+      - call: [g_api.serial.release]
 
 - def:
     name: on_token_new
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
       - call: [g_api.token_create, xch]
+      - call: [g_api.serial.release]
 
 - def:
     name: on_token_list
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
       - call: [g_api.token_list, xch]
+      - call: [g_api.serial.release]
 
 - def:
     name: on_token_del
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
       - call: [g_api.token_revoke, xch]
+      - call: [g_api.serial.release]
 
 - def:
     name: on_campaigns
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
       - call: [g_api.campaigns, xch]
+      - call: [g_api.serial.release]
 
 - def:
     name: on_museum_hook
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
       - call: [g_api.museum_hook, xch]
+      - call: [g_api.serial.release]
 
 - def:
     name: on_sso_login
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
       - call: [g_api.sso_login, xch]
+      - call: [g_api.serial.release]
 
 - def:
     name: on_sso_acs
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
       - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
       - call: [g_api.sso_acs, xch]
+      - call: [g_api.serial.release]
 
 - def:
     name: main

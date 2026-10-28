@@ -36,6 +36,12 @@
     members:
       - [link,  ApiLink]
       - [style, JsonStyle]
+      # Der HTTP-Server laeuft mit einem Faden JE VERBINDUNG (aiml spec/32_2 §3.12);
+      # die eine Mirror-Sitzung darf aber nur ein Faden zugleich benutzen — zwei
+      # gleichzeitige send_and_await lasen denselben Socket (SIGSEGV in SSL_read,
+      # gemessen in run_e2e_museum.sh: Webhook + Kampagnen-Abfrage).  `serial`
+      # nimmt jede Route ganz; cosmosd ist ohnehin der einzige Schreiber.
+      - [serial, lock, null, { access: public }]
     methods:
       - def:
           name: init
@@ -44,6 +50,7 @@
           body:
             - call: [<.link.init, url]
             - set: [<.style.bare, 1]
+            - call: [<.serial.init]
 
       # up: cosmosd erreichbar?  Sonst 502 senden und 0 liefern.
       - def:
