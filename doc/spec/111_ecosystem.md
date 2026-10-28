@@ -297,9 +297,9 @@ cosmosd braucht ab hier die aiml-Bausteine aus drei Zweigen (alle von `mem-v3-co
 `feature/identity-builtins-memv3` (LDAP/SAML/base64 — `libaiml.so` hängt dann an libldap,
 libxmlsec1, libxml2, libxslt), `feature/http-client-files-memv3` (binäre HTTP-Körper für
 cosmos-museum) und — für museum — `feature/http-registry-support-memv3`.
-`ecosystem/integration-memv3` ist `mem-v3-compiler` mit allen dreien; darauf laufen die
-aiml-Suite (keine neuen Fehler gegenüber `mem-v3-compiler`), museum `tests/run_all.sh` und
-`run_e2e_api.sh`, `run_e2e_identity.sh`, `run_e2e_museum.sh`.
+Seit 2026-10-28 sind alle drei (und die übrigen Ökosystem-Zweige) direkt in `mem-v3-compiler`
+gemergt (34c3340); ein eigener Integrationszweig ist nicht mehr nötig.  Darauf laufen
+museum `tests/run_all.sh` und `run_e2e_api.sh`, `run_e2e_identity.sh`, `run_e2e_museum.sh`.
 
 Neue Programme: `cosmos-api` (`exodus-api.json`), `cosmos-museum` (`exodus-museum-client.json`).
 
