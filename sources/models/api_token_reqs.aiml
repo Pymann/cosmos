@@ -1,0 +1,33 @@
+# Anfragen der API-Token- und Konfigurations-RPCs (doc/spec/111).
+#
+# Static-Check (aiml spec/49 §14): 3 models.
+
+# create_api_token / list_api_tokens / revoke_api_token.  `label` beim
+# Erzeugen, `token_id` beim Widerruf.
+- model:
+    name: ApiTokenReq
+    fields:
+      - [token,    string]
+      - [label,    string]
+      - [token_id, string]
+
+- model:
+    name: ApiTokenMade
+    fields:
+      - [success,  i32]
+      - [message,  string]
+      - [token_id, string]
+      # Das Geheimnis — genau EINMAL, in dieser Antwort.  Danach nicht mehr
+      # abrufbar; gespeichert ist nur sein Hash.
+      - [secret,   string]
+
+# config_plan / config_apply / config_read.  Entweder `path` (eine Datei auf
+# dem Server, relative Quellen gelten ab ihrem Verzeichnis) oder `text` (die
+# Erklaerung selbst, relative Quellen ab `root`).
+- model:
+    name: CascReq
+    fields:
+      - [token, string]
+      - [path,  string]
+      - [text,  string]
+      - [root,  string]

@@ -14,6 +14,7 @@
 # gehoert dieser Aufruf auf den Knoten.
 - import: "sources/runtime/rt_model_oci_img.aiml"
 - import: "sources/shared/push_target.aiml"
+- import: "sources/shared/museum_access.aiml"
 
 - model:
     name: PushJob
@@ -25,12 +26,18 @@
       - [rt_pid,     i64]
       - [status_at,  string]
       - [started_ms, i64]
+      # doc/spec/111 §111.9: Ziel `museum:<repo>:<tag>` — nach dem Schnitt
+      # (Phase 1) laedt cosmos-museum das Layout hoch (Phase 2).
+      - [museum_ref, string]
+      - [phase,      i32]
+      - [dir,        string]
 
 - class:
     name: PushWorker
     members:
       - [oci_bin, string]
       - [running, list<PushJob>]
+      - [museum,  MuseumAccess]
     methods:
       - def:
           name: init
@@ -39,6 +46,32 @@
           args: [[oci_bin, string]]
           body:
             - set: [<.oci_bin, oci_bin]
+
+      - def:
+          name: set_museum
+          access: public
+          args: [[acc, MuseumAccess]]
+          body: [{ set: [<.museum, acc] }]
+
+      # upload: Phase 2 eines museum-Ziels — das fertige Layout hochladen.
+      # Liefert die pid oder 0.
+      - def:
+          name: upload
+          access: public
+          args: [[job, PushJob]]
+          return: i64
+          body:
+            - if:
+                condition: { eq: [<.museum.url.len, 0] }
+                then: [{ call: [log.error, "[push] museum:${job.museum_ref}: kein museum erklaert (config.museum.url)"] }, { return: 0 }]
+            - decl: [argv, list<string>, ["./cosmos-museum", "--mode", "push", "--layout", job.layout, "--url", <.museum.url, "--ref", job.museum_ref]]
+            - if:
+                condition: { gt: [<.museum.token_flag.len, 0] }
+                then: [{ call: [argv.push, <.museum.token_flag] }, { call: [argv.push, <.museum.token_ref] }]
+            - decl: [proc, process, { call: [sys.exe, argv, { detach: true, stdout: "${job.dir}/upload.out", stderr: "${job.dir}/upload.log", status_file: "${job.dir}/upload.status" }] }]
+            - if: { condition: { eq: [proc, null] }, then: [{ call: [log.error, "[push] cosmos-museum liess sich nicht starten"] }, { return: 0 }] }
+            - call: [log.info, "[push] ${job.run_id}/${job.from_stage} → museum:${job.museum_ref} (pid ${proc.pid})"]
+            - return: proc.pid
 
       # start: den Schnitt anstossen.  `target` traegt das Schema aus der
       # Pipeline ("oci:<pfad>"); ohne Schema waere es eine Registry-Adresse,
@@ -75,12 +108,23 @@
           args: [[run_id, string], [from_stage, string], [target, string], [rootfs, string]]
           return: i32
           body:
+            # `oci:<pfad>` oder `museum:<repo>:<tag>` (doc/spec/111 §111.9).
+            # Fuer museum wird zuerst in ein Layout NEBEN dem Protokoll
+            # geschnitten und dieses dann hochgeladen.
+            - decl: [is_museum, i32, { call: [target.starts_with, "museum:"] }]
             - if:
-                condition: { eq: [{ call: [target.starts_with, "oci:"] }, 0] }
+                condition: { '&&': [{ eq: [{ call: [target.starts_with, "oci:"] }, 0] }, { eq: [is_museum, 0] }] }
                 then:
-                  - call: [log.error, "[push] '${target}': nur 'oci:<pfad>' ist umgesetzt — eine Registry-Adresse kann diese Scheibe nicht (aiml F62-122)"]
+                  - call: [log.error, "[push] '${target}': umgesetzt sind 'oci:<pfad>' und 'museum:<repo>:<tag>'"]
                   - return: 0
-            - decl: [layout, string, { call: [target.substr, 4] }]
+            - decl: [layout, string, ""]
+            - decl: [museum_ref, string, ""]
+            - if:
+                condition: { eq: [is_museum, 1] }
+                then:
+                  - set: [museum_ref, { call: [target.substr, 7] }]
+                  - set: [layout, "logs/pushes/${run_id}-${from_stage}/oci"]
+                else: [{ set: [layout, { call: [target.substr, 4] }] }]
             # Erst die SCHICHTEN, dann die Wurzel (doc/spec/110 F110-95): ein
             # Abbild aus N Schichten statt einer Scheibe.  Die Reihenfolge ist
             # nicht Geschmack — die Schichten ueberleben den Container, die
@@ -122,6 +166,9 @@
             - set: [job.rt_pid, proc.pid]
             - set: [job.status_at, "${dir}/push.status"]
             - set: [job.started_ms, { call: [time.now] }]
+            - set: [job.museum_ref, museum_ref]
+            - set: [job.phase, 1]
+            - set: [job.dir, dir]
             - call: [<.running.push, job]
             - call: [log.info, "[push] ${run_id}/${from_stage} → ${layout} (pid ${proc.pid})"]
             - return: 1
@@ -147,13 +194,44 @@
                       condition: { neq: [back, null] }
                       then:
                         - if: { condition: { eq: [{ call: [back.running] }, true] }, then: [{ set: [alive, 1] }] }
+                  - decl: [handled, i32, 0]
+                  - if: { condition: { eq: [alive, 1] }, then: [{ set: [idx, { +: [idx, 1] }] }, { set: [handled, 1] }] }
+                  # Schnitt fertig, Ziel museum: jetzt hochladen (Phase 2).
                   - if:
-                      condition: { eq: [alive, 1] }
-                      then: [{ set: [idx, { +: [idx, 1] }] }]
-                      else:
+                      condition: { '&&': [{ eq: [handled, 0] }, { '&&': [{ eq: [job.phase, 1] }, { gt: [job.museum_ref.len, 0] }] }] }
+                      then:
+                        - decl: [cut_digest, string, { call: [<.digest_of, job.layout] }]
+                        - if:
+                            condition: { gt: [cut_digest.len, 0] }
+                            then:
+                              - decl: [up_pid, i64, { call: [<.upload, job] }]
+                              - if:
+                                  condition: { gt: [up_pid, 0] }
+                                  then:
+                                    - set: [job.rt_pid, up_pid]
+                                    - set: [job.status_at, "${job.dir}/upload.status"]
+                                    - set: [job.phase, 2]
+                                    - idx: [<.running, idx, job]
+                                    - set: [idx, { +: [idx, 1] }]
+                                    - set: [handled, 1]
+                  - if:
+                      condition: { eq: [handled, 0] }
+                      then:
                         - set: [out.from_stage, "${job.from_stage}"]
                         - set: [out.target, "oci:${job.layout}"]
                         - set: [out.digest, { call: [<.digest_of, job.layout] }]
+                        # museum: die Digest meldet museum (eine Zeile stdout).
+                        - if:
+                            condition: { gt: [job.museum_ref.len, 0] }
+                            then:
+                              - set: [out.target, "museum:${job.museum_ref}"]
+                              - set: [out.digest, ""]
+                              - if:
+                                  condition: { eq: [job.phase, 2] }
+                                  then:
+                                    - decl: [said, string, { call: [io.read_file, "${job.dir}/upload.out"] }]
+                                    - decl: [said_trim, string, { call: [said.trim] }]
+                                    - if: { condition: { eq: [{ call: [said_trim.starts_with, "sha256:"] }, 1] }, then: [{ set: [out.digest, said_trim] }] }
                         - if:
                             condition: { gt: [out.digest.len, 0] }
                             then:

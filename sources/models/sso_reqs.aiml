@@ -1,0 +1,27 @@
+# SAML-Anmeldung ueber cosmosd (doc/spec/111 §111.5).
+#
+# Zwei Schritte, beide als RPC, damit cosmosd allein die offenen Anfragen
+# kennt (das Gateway bleibt zustandslos):
+#   saml_begin  → Adresse beim IdP (HTTP-Redirect-Binding) + Anfrage-Kennung
+#   saml_finish → die SAMLResponse (base64, vom Browser per POST an den ACS)
+#                 pruefen und eine Sitzung ausstellen (Antwort: AuthResult)
+#
+# Static-Check (aiml spec/49 §14): 3 models.
+
+- model:
+    name: SamlBeginReq
+    fields:
+      - [relay_state, string]
+
+- model:
+    name: SamlBegin
+    fields:
+      - [success,    i32]
+      - [message,    string]
+      - [url,        string]
+      - [request_id, string]
+
+- model:
+    name: SamlFinishReq
+    fields:
+      - [saml_response, string]

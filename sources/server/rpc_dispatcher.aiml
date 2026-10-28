@@ -37,4 +37,7 @@
             # Peer der laufenden RPC für die zentrale Token-Auflösung merken, damit
             # resolve_token* die Verbindung ohne Handler-Änderung touchen kann (Befund 1).
             - set: [g_current_peer_id, rpc.peer_id]
+            # … und welche RPC das ist: das Rollen-Tor in email_for_token fragt danach
+            # (doc/spec/111 §111.3).
+            - set: [g_current_method, rpc.method]
             - call: [hnd.run, rpc, session]

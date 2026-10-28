@@ -98,6 +98,17 @@
             - call: [disp.register, "clear_break",       g_runtime.clear_break]
             - call: [disp.register, "rewind_run",        g_runtime.rewind_run]
             - call: [disp.register, "run_pipeline",      g_runtime.run_pipeline]
+            - call: [disp.register, "config_plan",       g_runtime.config_plan]
+            - call: [disp.register, "config_apply",      g_runtime.config_apply]
+            - call: [disp.register, "config_read",       g_runtime.config_read]
+            - call: [disp.register, "create_api_token",  g_runtime.create_api_token]
+            - call: [disp.register, "list_api_tokens",   g_runtime.list_api_tokens]
+            - call: [disp.register, "revoke_api_token",  g_runtime.revoke_api_token]
+            - call: [disp.register, "saml_begin",        g_runtime.saml_begin]
+            - call: [disp.register, "saml_finish",       g_runtime.saml_finish]
+            - call: [disp.register, "may_call",          g_runtime.may_call]
+            - call: [disp.register, "museum_event",      g_runtime.museum_event]
+            - call: [disp.register, "list_campaigns",    g_runtime.list_campaigns]
             - call: [<.install_agent_handlers, disp]
             - call: [log.info, "[cosmos_daemon] registered auth + logout + cluster + agent handlers"]
       # AP1 (doc/spec/90 §AP1.4): Agenten-Registrierung, Kommando-Dispatch, Ausgabe-Relay
@@ -136,6 +147,31 @@
       - def:
           name: run
           body:
+            # doc/spec/111 §111.1 (das Gegenstueck zu JCasC): ist COSMOS_CASC
+            # gesetzt, wird die Erklaerung VOR dem Horchen angewandt.  Ist sie
+            # fehlerhaft, startet der Dienst NICHT — ein Server, der mit einer
+            # halb gelesenen Rechtevergabe laeuft, waere schlimmer als keiner.
+            - decl: [boot_env, map<string:string>, { call: [sys.env] }]
+            - if:
+                condition: { gt: [{ call: [boot_env.contains, "COSMOS_CASC"] }, 0] }
+                then:
+                  - decl: [boot_req, CascReq]
+                  - set: [boot_req.path, { call: [boot_env.get, "COSMOS_CASC"] }]
+                  - decl: [boot_doc, CascDoc, { call: [g_runtime.casc.doc_for, boot_req] }]
+                  - decl: [boot_plan, CascPlan, { call: [g_runtime.casc.apply, boot_doc] }]
+                  - if:
+                      condition: { neq: [boot_plan.success, 1] }
+                      then:
+                        - decl: [eix, i32, 0]
+                        - while:
+                            condition: { lt: [eix, boot_plan.errors.len] }
+                            body:
+                              - decl: [boot_err, string, { call: [boot_plan.errors.get, eix] }]
+                              - call: [log.error, "[casc] ${boot_req.path}: ${boot_err}"]
+                              - set: [eix, { +: [eix, 1] }]
+                        - call: [log.error, "[casc] Erklaerung ${boot_req.path} fehlerhaft — cosmosd startet nicht"]
+                        - return: []
+                  - call: [log.info, "[casc] ${boot_req.path} angewandt (${boot_plan.changes.len} Aenderung(en))"]
             - decl: [sess, mirror_session]
             - decl: [with_tls, i32, 0]
             - if:
@@ -239,6 +275,8 @@
                         # (gemessen 2026-10-15 — die Rechnung dafuer gab es, nur
                         # rief sie niemand auf).
                         - call: [g_runtime.cluster.expire_leases, nowm]
+                        # doc/spec/111 §111.6: laufende Kampagnen-Posten nachsehen.
+                        - call: [g_runtime.campaigns.tick]
                   # Disconnect-Sweep (~alle 5s): abgelaufene getrennte Verbindungen aufräumen.
                   - if:
                       condition: { gt: [nowm, { +: [<.last_sweep_ms, 5000] }] }
@@ -338,6 +376,11 @@
                       condition: { gt: [nowm, { +: [<.last_push_scan_ms, 2000] }] }
                       then:
                         - set: [<.last_push_scan_ms, nowm]
+                        # doc/spec/111 §111.9: museum-Zugang aus der Erklaerung —
+                        # jede Runde neu, damit ein `config apply` ohne Neustart gilt.
+                        - decl: [m_acc, MuseumAccess, { call: [g_runtime.casc.museum_access] }]
+                        - call: [g_runtime.pusher.set_museum, m_acc]
+                        - if: { condition: { neq: [<.spawner, null] }, then: [{ call: [<.spawner.set_museum, m_acc] }] }
                         - decl: [ready, PushTarget, { call: [g_runtime.cluster.push_ready] }]
                         - if:
                             condition: { eq: [ready.status, "ready"] }

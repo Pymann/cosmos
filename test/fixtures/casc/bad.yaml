@@ -1,0 +1,11 @@
+- config:
+    grnats:
+      - grant: { user: x@y, role: r }
+    roles:
+      - role: { name: r, may: [a], extra: 1 }
+- catalog:
+    jobs:
+      - job: { name: dup, source: ci/core.aiml }
+      - job: { name: dup, source: ci/core.aiml }
+      - job: { name: missing, source: ci/nope.aiml }
+- whatever: {}

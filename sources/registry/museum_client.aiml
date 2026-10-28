@@ -1,0 +1,233 @@
+# MuseumClient — OCI-Abbilder zwischen einem lokalen OCI-Layout und museum
+# bewegen (museum doc/ecosystem.md §2/§3, OCI Distribution v1.1).
+#
+# cosmos bleibt beim Layout-Verzeichnis als seiner Form (doc/spec/110 §110.25):
+# `cosmos-oci` schreibt und liest Layouts, dieser Client bringt sie zu museum
+# und zurueck.  Damit braucht weder der Laufzeit-Pfad noch der Push-Pfad
+# Netzcode — beide sehen weiter nur `oci:<pfad>`.
+#
+#   push: index.json → Manifest → jede fehlende Blob (HEAD, dann monolithisches
+#         POST ?digest=) → Manifest unter dem Tag (PUT).
+#   pull: Manifest (GET) → jede Blob (GET, gestreamt, Hash geprueft) →
+#         index.json + oci-layout.
+#
+# Static-Check (aiml spec/49 §14): 1 class.
+
+- import: "sources/runtime/rt_model_oci_img.aiml"
+
+- class:
+    name: MuseumClient
+    members:
+      - [base,  string]   # "http://museum:8081" (ohne / am Ende)
+      - [token, string]
+      - [repo,  string]
+    methods:
+      - def:
+          name: init
+          access: public
+          args: [[base, string], [token, string], [repo, string]]
+          body:
+            - decl: [trimmed, string, base]
+            - if: { condition: { eq: [{ call: [trimmed.ends_with, "/"] }, 1] }, then: [{ set: [trimmed, { call: [trimmed.substr, 0, { -: [trimmed.len, 1] }] }] }] }
+            - set: [<.base, trimmed]
+            - set: [<.token, token]
+            - set: [<.repo, repo]
+
+      - def:
+          name: request
+          args: [[method, string], [tail, string]]
+          return: http_client_handle
+          body:
+            - decl: [dest, url, { call: [http.parse_url, "${<.base}/v2/${<.repo}/${tail}"] }]
+            - decl: [client, http_client_handle, { call: [http.new_request, method, dest] }]
+            - if: { condition: { gt: [<.token.len, 0] }, then: [{ call: [client.headers.put, "Authorization", "Bearer ${<.token}"] }] }
+            - call: [client.headers.put, "User-Agent", "cosmos-museum/1"]
+            - set: [client.timeout, 600000]
+            - return: client
+
+      - def:
+          name: has_blob
+          access: public
+          args: [[digest, string]]
+          return: i32
+          body:
+            - decl: [client, http_client_handle, { call: [<.request, "HEAD", "blobs/${digest}"] }]
+            - decl: [answer, http_response_handle, { call: [client.send] }]
+            - if: { condition: { eq: [answer, null] }, then: [{ return: 0 }] }
+            - decl: [code, i32, { call: [answer.status] }]
+            - call: [answer.free]
+            - if: { condition: { eq: [code, 200] }, then: [{ return: 1 }] }
+            - return: 0
+
+      # put_blob: 1 = liegt jetzt in museum (hochgeladen oder schon da).
+      - def:
+          name: put_blob
+          access: public
+          args: [[layout, string], [digest, string]]
+          return: i32
+          body:
+            - if: { condition: { eq: [{ call: [<.has_blob, digest] }, 1] }, then: [{ call: [log.info, "[museum] ${digest}: schon vorhanden"] }, { return: 1 }] }
+            - decl: [hex, string, { call: [digest.substr, 7] }]
+            - decl: [src, string, "${layout}/blobs/sha256/${hex}"]
+            - if: { condition: { eq: [{ call: [io.is_file, src] }, false] }, then: [{ call: [log.error, "[museum] ${src} fehlt im Layout"] }, { return: 0 }] }
+            - decl: [client, http_client_handle, { call: [<.request, "POST", "blobs/uploads/?digest=${digest}"] }]
+            - call: [client.headers.put, "Content-Type", "application/octet-stream"]
+            # Gestreamt aus der Datei: eine Schicht sind leicht hunderte MB.
+            - set: [client.body_file, src]
+            - decl: [answer, http_response_handle, { call: [client.send] }]
+            - if: { condition: { eq: [answer, null] }, then: [{ call: [log.error, "[museum] ${<.base} nicht erreichbar"] }, { return: 0 }] }
+            - decl: [code, i32, { call: [answer.status] }]
+            - if:
+                condition: { neq: [code, 201] }
+                then:
+                  - call: [log.error, "[museum] Blob ${digest}: HTTP ${code} ${answer.body}"]
+                  - call: [answer.free]
+                  - return: 0
+            - call: [answer.free]
+            - call: [log.info, "[museum] ${digest}: hochgeladen"]
+            - return: 1
+
+      # push: Layout → museum unter `tag`.  Liefert die Digest des Manifests
+      # (wie museum sie meldet) oder "".  `artifact_type` (optional) wird ins
+      # Manifest geschrieben — so werden die Stufen-Schichten eines Laufs zum
+      # Artefakt `application/vnd.cosmos.run-layers.v1+json` (§3).
+      - def:
+          name: push
+          access: public
+          args: [[layout, string], [tag, string], [artifact_type, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [raw, string, { call: [io.read_file, "${layout}/index.json"] }]
+            - if: { condition: { eq: [raw.len, 0] }, then: [{ call: [log.error, "[museum] ${layout}/index.json fehlt"] }, { return: "" }] }
+            - decl: [index, OciIndex, { call: [sys.deserialize, raw, "OciIndex"] }]
+            - if: { condition: { eq: [index.manifests.len, 0] }, then: [{ call: [log.error, "[museum] ${layout}: index.json ohne Manifest"] }, { return: "" }] }
+            - decl: [first, OciRef, { at: [index.manifests, 0] }]
+            - decl: [mhex, string, { call: [first.digest.substr, 7] }]
+            - decl: [mtext, string, { call: [io.read_file, "${layout}/blobs/sha256/${mhex}"] }]
+            - decl: [mani, OciManifest, { call: [sys.deserialize, mtext, "OciManifest"] }]
+            - if: { condition: { eq: [{ call: [<.put_blob, layout, mani.config.digest] }, 0] }, then: [{ return: "" }] }
+            - decl: [lix, i32, 0]
+            - while:
+                condition: { lt: [lix, mani.layers.len] }
+                body:
+                  - decl: [lay, OciDesc, { at: [mani.layers, lix] }]
+                  - if: { condition: { eq: [{ call: [<.put_blob, layout, lay.digest] }, 0] }, then: [{ return: "" }] }
+                  - set: [lix, { +: [lix, 1] }]
+            - decl: [body, string, { call: [mtext.trim] }]
+            - if:
+                condition: { '&&': [{ gt: [artifact_type.len, 0] }, { eq: [{ call: [body.starts_with, "{"] }, 1] }] }
+                then:
+                  - decl: [rest, string, { call: [body.substr, 1] }]
+                  - set: [body, "{\"artifactType\":\"${artifact_type}\",${rest}"]
+            - decl: [client, http_client_handle, { call: [<.request, "PUT", "manifests/${tag}"] }]
+            - decl: [mtype, string, mani.mediaType]
+            - if: { condition: { eq: [mtype.len, 0] }, then: [{ set: [mtype, "application/vnd.oci.image.manifest.v1+json"] }] }
+            - call: [client.headers.put, "Content-Type", mtype]
+            - set: [client.body, body]
+            - decl: [answer, http_response_handle, { call: [client.send] }]
+            - if: { condition: { eq: [answer, null] }, then: [{ call: [log.error, "[museum] ${<.base} nicht erreichbar"] }, { return: "" }] }
+            - decl: [code, i32, { call: [answer.status] }]
+            - if:
+                condition: { neq: [code, 201] }
+                then:
+                  - call: [log.error, "[museum] Manifest ${<.repo}:${tag}: HTTP ${code} ${answer.body}"]
+                  - call: [answer.free]
+                  - return: ""
+            # Den Kopf NICHT an eine Map-Variable binden: unter memV3 gibt deren
+            # Ende die Map frei und `answer.free` danach noch einmal (doppeltes
+            # free, gemessen 2026-10-27).  Der verkettete Zugriff liefert einen
+            # eigenen String.
+            - decl: [digest, string, { call: [answer.headers.get, "docker-content-digest"] }]
+            - call: [answer.free]
+            - if:
+                condition: { eq: [digest, null] }
+                then:
+                  - decl: [own, string, { call: [hash.sha256, body] }]
+                  - set: [digest, "sha256:${own}"]
+            - return: digest
+
+      # fetch: eine Blob nach `dest` streamen und pruefen.  1 = ok.
+      - def:
+          name: fetch
+          args: [[tail, string], [digest, string], [dest, string], [accept, string]]
+          return: i32
+          body:
+            - decl: [client, http_client_handle, { call: [<.request, "GET", tail] }]
+            - if: { condition: { gt: [accept.len, 0] }, then: [{ call: [client.headers.put, "Accept", accept] }] }
+            - decl: [answer, http_response_handle, { call: [client.send] }]
+            - if: { condition: { eq: [answer, null] }, then: [{ call: [log.error, "[museum] ${<.base} nicht erreichbar"] }, { return: 0 }] }
+            - decl: [code, i32, { call: [answer.status] }]
+            - if:
+                condition: { neq: [code, 200] }
+                then: [{ call: [log.error, "[museum] GET ${tail}: HTTP ${code}"] }, { call: [answer.free] }, { return: 0 }]
+            - decl: [saved, i32, { call: [answer.save_to, "${dest}.part"] }]
+            - call: [answer.free]
+            - if: { condition: { neq: [saved, 0] }, then: [{ call: [log.error, "[museum] ${dest}: nicht schreibbar"] }, { return: 0 }] }
+            - if: { condition: { eq: [digest.len, 0] }, then: [{ call: [io.rename, "${dest}.part", dest] }, { return: 1 }] }
+            # Ganz lesen, um den Hash zu pruefen (aiml hat keinen Strom-Hash).
+            - decl: [part_len, i64, { call: [io.file_size, "${dest}.part"] }]
+            - decl: [inp, file_handle, { call: [io.open_binary, "${dest}.part"] }]
+            - if: { condition: { eq: [inp, null] }, then: [{ return: 0 }] }
+            - decl: [got, buffer<u8>, { call: [io.read_bytes, inp, part_len] }]
+            - call: [io.close, inp]
+            - decl: [want, string, { call: [digest.substr, 7] }]
+            - if:
+                condition: { neq: [{ call: [hash.sha256, got] }, want] }
+                then:
+                  - call: [log.error, "[museum] ${tail}: Inhalt passt nicht zu ${digest} — verworfen"]
+                  - call: [io.remove, "${dest}.part"]
+                  - return: 0
+            - call: [io.rename, "${dest}.part", dest]
+            - return: 1
+
+      # pull: `reference` (Tag oder Digest) → Layout `layout`.  Liefert die
+      # Manifest-Digest oder "".
+      - def:
+          name: pull
+          access: public
+          args: [[reference, string], [layout, string], [ref_name, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - call: [io.mkdir_all, "${layout}/blobs/sha256"]
+            - decl: [mpath, string, "${layout}/manifest.tmp"]
+            - decl: [accept, string, "application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json"]
+            - if: { condition: { eq: [{ call: [<.fetch, "manifests/${reference}", "", mpath, accept] }, 0] }, then: [{ return: "" }] }
+            - decl: [mtext, string, { call: [io.read_file, mpath] }]
+            - decl: [mhex, string, { call: [hash.sha256, mtext] }]
+            - if:
+                condition: { eq: [{ call: [reference.starts_with, "sha256:"] }, 1] }
+                then:
+                  - if:
+                      condition: { neq: [{ call: [reference.substr, 7] }, mhex] }
+                      then: [{ call: [log.error, "[museum] Manifest passt nicht zu ${reference}"] }, { return: "" }]
+            - call: [io.rename, mpath, "${layout}/blobs/sha256/${mhex}"]
+            - decl: [mani, OciManifest, { call: [sys.deserialize, mtext, "OciManifest"] }]
+            - decl: [blobs, list<OciDesc>]
+            - call: [blobs.push, mani.config]
+            - decl: [layers, list<OciDesc>, mani.layers]
+            - call: [blobs.extend, layers]
+            - decl: [bix, i32, 0]
+            - while:
+                condition: { lt: [bix, blobs.len] }
+                body:
+                  - decl: [one, OciDesc, { at: [blobs, bix] }]
+                  - decl: [hex, string, { call: [one.digest.substr, 7] }]
+                  - decl: [dest, string, "${layout}/blobs/sha256/${hex}"]
+                  - if:
+                      condition: { eq: [{ call: [io.is_file, dest] }, false] }
+                      then:
+                        - if: { condition: { eq: [{ call: [<.fetch, "blobs/${one.digest}", one.digest, dest, ""] }, 0] }, then: [{ return: "" }] }
+                  - set: [bix, { +: [bix, 1] }]
+            - decl: [entry, OciRef]
+            - set: [entry.mediaType, mani.mediaType]
+            - set: [entry.digest, "sha256:${mhex}"]
+            - set: [entry.size, mtext.len]
+            - call: [entry.annotations.put, "org.opencontainers.image.ref.name", ref_name]
+            - decl: [index, OciIndex]
+            - call: [index.manifests.push, entry]
+            - decl: [style, JsonStyle]
+            - set: [style.bare, 1]
+            - call: [io.write_file, "${layout}/index.json", { call: [sys.serialize, index, style] }]
+            - decl: [marker, OciLayout]
+            - call: [io.write_file, "${layout}/oci-layout", { call: [sys.serialize, marker, style] }]
+            - return: "sha256:${mhex}"

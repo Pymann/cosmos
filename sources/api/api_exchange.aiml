@@ -1,0 +1,153 @@
+# ApiExchange — eine HTTP-Anfrage mit ihren Antwort-Helfern (doc/spec/111 §111.8).
+#
+# Fehler sind JSON {"error": "...", "code": "..."} mit passendem Status
+# (museum doc/ecosystem.md §7).
+#
+# Static-Check (aiml spec/49 §14): 1 class.
+
+- class:
+    name: ApiExchange
+    members:
+      - [req,  http_request_handle, null, { access: public }]
+      - [resp, http_response_handle, null, { access: public }]
+    methods:
+      - def:
+          name: param
+          access: public
+          args: [[key, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [params, map<string:string>]
+            - set: [params, <.req.params]
+            - decl: [val, string, { call: [params.get, key] }]
+            - if: { condition: { eq: [val, null] }, then: [{ return: "" }] }
+            - return: val
+
+      - def:
+          name: query
+          access: public
+          args: [[key, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [qurl, url]
+            - set: [qurl, <.req.url]
+            - decl: [qmap, map<string:string>]
+            - set: [qmap, qurl.get_param]
+            - decl: [val, string, { call: [qmap.get, key] }]
+            - if: { condition: { eq: [val, null] }, then: [{ return: "" }] }
+            - return: val
+
+      - def:
+          name: header
+          access: public
+          args: [[key, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [inreq, http_request_handle, <.req]
+            - decl: [val, string, { call: [inreq.header, key] }]
+            - if: { condition: { eq: [val, null] }, then: [{ return: "" }] }
+            - return: val
+
+      # bearer: das Token aus `Authorization: Bearer <token>`.  "" ohne.
+      - def:
+          name: bearer
+          access: public
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [auth, string, { call: [<.header, "authorization"] }]
+            - if: { condition: { eq: [{ call: [auth.starts_with, "Bearer "] }, 1] }, then: [{ return: { call: [auth.substr, 7] } }] }
+            - if: { condition: { eq: [{ call: [auth.starts_with, "bearer "] }, 1] }, then: [{ return: { call: [auth.substr, 7] } }] }
+            - return: ""
+
+      - def:
+          name: text
+          access: public
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [inreq, http_request_handle, <.req]
+            - decl: [val, string, inreq.body]
+            - if: { condition: { eq: [val, null] }, then: [{ return: "" }] }
+            - return: val
+
+      - def:
+          name: json
+          access: public
+          args: [[status, i32], [payload, string]]
+          body:
+            - decl: [out, http_response_handle, <.resp]
+            - call: [out.headers.put, "content-type", "application/json"]
+            - set: [out.status, status]
+            - set: [out.body, "${payload}\n"]
+            - call: [out.send]
+
+      - def:
+          name: redirect
+          access: public
+          args: [[target, string]]
+          body:
+            - decl: [out, http_response_handle, <.resp]
+            - call: [out.headers.put, "location", target]
+            - call: [out.headers.put, "cache-control", "no-store"]
+            - set: [out.status, 302]
+            - set: [out.body, ""]
+            - call: [out.send]
+
+      # form: ein Feld aus einem `application/x-www-form-urlencoded`-Koerper
+      # (die SAML-POST-Bindung).  Der URL-Leser dekodiert Prozentzeichen schon.
+      - def:
+          name: form
+          access: public
+          args: [[key, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [raw, string, { call: [<.text] }]
+            - decl: [furl, url, { call: [http.parse_url, "http://form.invalid/?${raw}"] }]
+            - decl: [fmap, map<string:string>]
+            - set: [fmap, furl.get_param]
+            - decl: [val, string, { call: [fmap.get, key] }]
+            - if: { condition: { eq: [val, null] }, then: [{ return: "" }] }
+            - return: val
+
+      # quote: Text als JSON-Zeichenkette (mit Anfuehrungszeichen).
+      - def:
+          name: quote
+          access: public
+          args: [[raw, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [msg, string, { call: [raw.replace, "\\", "\\\\"] }]
+            - set: [msg, { call: [msg.replace, "\"", "\\\""] }]
+            - set: [msg, { call: [msg.replace, "\n", "\\n"] }]
+            - set: [msg, { call: [msg.replace, "\t", "\\t"] }]
+            - set: [msg, { call: [msg.replace, "\r", "\\r"] }]
+            - return: "\"${msg}\""
+
+      - def:
+          name: error
+          access: public
+          args: [[status, i32], [code, string], [message, string]]
+          body:
+            - decl: [msg, string, { call: [<.quote, message] }]
+            - call: [<.json, status, "{\"error\":${msg},\"code\":\"${code}\"}"]
+
+      # status_for: HTTP-Status aus dem Ergebnis eines RPC.  cosmosd meldet
+      # Ablehnungen als Text; die drei Klassen (nicht angemeldet, keine
+      # Freigabe, sonst ungueltig) werden hier auf 401/403/400 abgebildet.
+      #
+      # Das Gateway fragt VOR jedem Aufruf `my_clearance` (immer erlaubt): ein
+      # Token, das dort gilt und beim eigentlichen RPC trotzdem „nicht
+      # angemeldet" ergibt, wurde vom Rollen-Gate abgewiesen (§111.3) — das
+      # ist 403, nicht 401.
+      - def:
+          name: status_for
+          access: public
+          args: [[success, i32], [message, string]]
+          return: i32
+          body:
+            - if: { condition: { eq: [success, 1] }, then: [{ return: 200 }] }
+            - decl: [low, string, { call: [message.lower] }]
+            - if: { condition: { ge: [{ call: [low.index_of, "nicht angemeldet"] }, 0] }, then: [{ return: 403 }] }
+            - if: { condition: { ge: [{ call: [low.index_of, "token"] }, 0] }, then: [{ return: 403 }] }
+            - if: { condition: { ge: [{ call: [low.index_of, "freigabe"] }, 0] }, then: [{ return: 403 }] }
+            - if: { condition: { ge: [{ call: [low.index_of, "clearance"] }, 0] }, then: [{ return: 403 }] }
+            - return: 400

@@ -54,6 +54,12 @@
 - import: "sources/server/pipeline_submit.aiml"
 - import: "sources/server/pipeline_handlers.aiml"
 - import: "sources/server/run_control_handlers.aiml"
+- import: "sources/auth/api_token_store.aiml"        # API-Tokens (doc/spec/111 §111.7)
+- import: "sources/server/casc_store.aiml"           # erklaerte Konfiguration (doc/spec/111)
+- import: "sources/server/casc_catalog.aiml"         # … ihr Katalog-Teil + start_job_now
+- import: "sources/server/casc_handlers.aiml"        # config_plan/apply/read + API-Token-RPCs
+- import: "sources/server/campaign_logic.aiml"       # Rebuild-Kampagnen (doc/spec/111 §111.6)
+- import: "sources/auth/identity_login.aiml"         # LDAP/SAML (doc/spec/111 §111.5)
 
 - classgroup:
     name: CosmosRuntime
@@ -66,33 +72,47 @@
       - class: AuthService
         instance: auth
         constructor: [init, db_dir]
-        sees: [conn]
+        sees: [conn, casc, api_tokens]
         methods:
-          # Was bisher die freie Funktion `resolve_token_pid` tat: Token prüfen,
-          # die Verbindung als lebend stempeln und die opake player_id liefern
-          # ("" = ungültig).  Als Gruppen-Methode, weil sie Basis-Zustand UND
-          # den Kollaborateur `conn` braucht — eine Basis-Methode kann das nicht.
+          # Die ZENTRALE Token-Aufloesung: jeder Nutzer-Handler geht hier durch
+          # (vorher die freie Funktion `resolve_token_pid`).  Darum sitzen hier
+          # auch das API-Token als zweiter Weg und das Rollen-Tor
+          # (doc/spec/111) — an einer Stelle statt in vierzig Handlern.
+          # pid_for_token liefert die opake player_id ("" = ungueltig), damit die
+          # email den Auth-Layer nicht verlaesst.
           - def:
               name: pid_for_token
               args: [[token, string]]
               return: { type: string, lifetime: producer }
               body:
-                - decl: [req, TokenReq]
-                - set: [req.token, token]
-                - decl: [res, AuthResult, { call: [<.handle_validate, req] }]
-                - if:
-                    condition: { eq: [res.success, 1] }
-                    then:
-                      - call: [<.conn.touch, g_current_peer_id, res.player_id, { call: [time.now] }]
-                      - return: res.player_id
-                - return: ""
+                - decl: [eml, string, { call: [<.email_for_token, token] }]
+                - if: { condition: { eq: [eml.len, 0] }, then: [{ return: "" }] }
+                - return: { call: [<.pid_for, eml] }
 
-          # Dasselbe, liefert aber die email statt der player_id.  Nur die
-          # Profil-Handler brauchen sie (das Nutzer-KV ist email-keyed); alles
-          # andere nimmt pid_for_token, damit die email den Auth-Layer nicht
-          # verlässt.
+          # Dasselbe, liefert aber die email (die Profil-Handler brauchen sie,
+          # das Nutzer-KV ist email-keyed).
           - def:
               name: email_for_token
+              args: [[token, string]]
+              return: { type: string, lifetime: producer }
+              body:
+                - decl: [eml, string, { call: [<.identity_for_token, token] }]
+                - if: { condition: { eq: [eml.len, 0] }, then: [{ return: "" }] }
+                # Rollen-Tor (doc/spec/111 §111.3): welche RPC gerade laeuft,
+                # setzt der Dispatcher in g_current_method.
+                - decl: [grp, list<string>, { call: [<.api_tokens.groups_of, eml] }]
+                - decl: [lvl, i32, { call: [<.clearance_for_email, eml] }]
+                - if:
+                    condition: { eq: [{ call: [<.casc.allows, eml, grp, lvl, g_current_method] }, 0] }
+                    then:
+                      - call: [log.warn, "[rollen] ${eml}: '${g_current_method}' gehoert zu keiner seiner Rollen — abgelehnt"]
+                      - return: ""
+                - return: eml
+
+          # identity_for_token: Sitzungs-Token ODER API-Token → email, ohne Tor.
+          # Stempelt die Verbindung als lebend.
+          - def:
+              name: identity_for_token
               args: [[token, string]]
               return: { type: string, lifetime: producer }
               body:
@@ -104,6 +124,24 @@
                     then:
                       - call: [<.conn.touch, g_current_peer_id, res.player_id, { call: [time.now] }]
                       - return: res.email
+                - decl: [api_eml, string, { call: [<.api_tokens.email_for, token] }]
+                - if:
+                    condition: { gt: [api_eml.len, 0] }
+                    then:
+                      - call: [<.conn.touch, g_current_peer_id, { call: [<.pid_for, api_eml] }, { call: [time.now] }]
+                      - return: api_eml
+                - return: ""
+
+          # admin_gate: "" = Freigabe 1; sonst der Grund (genannt, spec/65 F65-12).
+          - def:
+              name: admin_gate
+              args: [[token, string]]
+              return: { type: string, lifetime: producer }
+              body:
+                - decl: [eml, string, { call: [<.email_for_token, token] }]
+                - if: { condition: { eq: [eml.len, 0] }, then: [{ return: "nicht angemeldet" }] }
+                - decl: [lvl, i32, { call: [<.clearance_for_email, eml] }]
+                - if: { condition: { neq: [lvl, 1] }, then: [{ return: "Freigabe 1 (Admin) noetig — diese Sitzung hat ${lvl}" }] }
                 - return: ""
 
       - class: ConnRegistry
@@ -291,6 +329,33 @@
 
       # doc/spec/96 §96.13: eingereichte Pipelines pruefen und ausfalten.  Der
       # Pruefer ist eine eigene Instanz, damit er ohne RPC testbar bleibt.
+      - class: ApiTokenStore
+        instance: api_tokens
+        constructor: [init, db_dir]
+
+      - class: CascStore
+        instance: casc
+        constructor: [init, db_dir]
+        sees: [cluster]
+
+      # doc/spec/111 §111.6: Rebuild-Kampagnen aus museum-Webhooks.
+      - class: CampaignStore
+        instance: campaigns
+        constructor: [init, db_dir]
+        sees: [casc, cluster]
+      - { class: RpcHandlerBase, instance: saml_begin,       sees: [auth], implements: [mirror.RpcHandler] }
+      - { class: RpcHandlerBase, instance: saml_finish,      sees: [auth], implements: [mirror.RpcHandler] }
+      - { class: RpcHandlerBase, instance: may_call,         sees: [auth], implements: [mirror.RpcHandler] }
+      - { class: RpcHandlerBase, instance: museum_event,     sees: [campaigns], implements: [mirror.RpcHandler] }
+      - { class: RpcHandlerBase, instance: list_campaigns,   sees: [auth, campaigns], implements: [mirror.RpcHandler] }
+
+      - { class: RpcHandlerBase, instance: config_plan,      sees: [auth, casc], implements: [mirror.RpcHandler] }
+      - { class: RpcHandlerBase, instance: config_apply,     sees: [auth, casc], implements: [mirror.RpcHandler] }
+      - { class: RpcHandlerBase, instance: config_read,      sees: [auth, casc], implements: [mirror.RpcHandler] }
+      - { class: RpcHandlerBase, instance: create_api_token, sees: [auth, api_tokens], implements: [mirror.RpcHandler] }
+      - { class: RpcHandlerBase, instance: list_api_tokens,  sees: [auth, api_tokens], implements: [mirror.RpcHandler] }
+      - { class: RpcHandlerBase, instance: revoke_api_token, sees: [auth, api_tokens], implements: [mirror.RpcHandler] }
+
       - class: PipelineSubmit
         instance: submitter
       - { class: RpcHandlerBase, instance: run_pipeline, sees: [auth, cluster, submitter], implements: [mirror.RpcHandler] }

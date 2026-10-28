@@ -1,0 +1,5 @@
+# pipeline: tools
+- pipeline:
+    name: tools
+    steps:
+      - stage: { name: build, run: "echo tools" }

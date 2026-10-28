@@ -46,6 +46,16 @@
                 # per-IP-Bann des Login-Throttles.
                 - decl: [client_ip, string, { call: [session.peer_ip, rpc.peer_id] }]
                 - decl: [res, AuthResult, { call: [<.auth.handle_login, req, client_ip] }]
+                # doc/spec/111 §111.5: ist LDAP erklaert, ist das Verzeichnis die
+                # zweite Quelle — fuer unbekannte Konten und fuer Konten, deren
+                # lokales Passwort nicht passt (ein LDAP-Konto hat nur ein
+                # Zufalls-Passwort).  Lokale Konten (Notfall-Admin) gehen vor.
+                - if:
+                    condition: { '&&': [{ neq: [res.success, 1] }, { eq: [{ call: [<.auth.ldap_enabled] }, 1] }] }
+                    then:
+                      - if:
+                          condition: { '||': [{ eq: [{ call: [res.message.starts_with, "unknown user"] }, 1] }, { eq: [{ call: [res.message.starts_with, "wrong password"] }, 1] }] }
+                          then: [{ set: [res, { call: [<.auth.ldap_login, req.email, req.password] }] }]
                 # Ein abgelehnter Login stand bisher NUR in der Antwort an den
                 # Browser.  Wer am Server sitzt und sucht, warum sich niemand
                 # anmelden kann, sah ein stilles Protokoll — und ein stilles

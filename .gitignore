@@ -26,6 +26,9 @@ console_snapshot.txt
 /.chk/
 /.e2e_chaos/
 /.e2e_pipe/
+/.e2e_api/
+/.e2e_identity/
+/.e2e_museum/
 /.e2e_prov/
 /.liveshape/
 /.lt/
