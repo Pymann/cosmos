@@ -754,6 +754,11 @@
                         - if:
                             condition: { gt: [tossed, 0] }
                             then: [{ call: [log.info, "[schicht] ${got.stage_id}: ${tossed} Schicht(en) ab ${sidx} verworfen"] }]
+                        # Herkunft neben die Schicht (museum doc/ecosystem.md §3): beim
+                        # Export werden daraus die Annotationen cosmos.* — so weiss ein
+                        # Leser des Abbilds (ufo layer pull), welche Stufe sie schrieb.
+                        - call: [io.mkdir_all, ldir]
+                        - call: [io.write_file, "${ldir}/layer.meta", "stage=${got.stage_name}\nbindings=${got.bindings}\nagent=${<.agent_id}\nrun=${got.run_id}\n"]
                         - call: [io.write_file, script, { call: [<.layer_script, ldir, { call: [<.lower_chain, got.run_id, sidx, got.base] }, <.step_dir, got.requires, <.run_ws] }]
                         - call: [argv.push, "unshare"]
                         - call: [argv.push, "-m"]

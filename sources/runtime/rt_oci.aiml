@@ -384,6 +384,7 @@
                 condition: { lt: [nix, 256] }
                 body:
                   - decl: [updir, string, "${layers}/${nix}/upper"]
+                  - decl: [meta_at, string, "${layers}/${nix}/layer.meta"]
                   - decl: [up_p, path, updir]
                   - set: [nix, { +: [nix, 1] }]
                   - if:
@@ -435,6 +436,25 @@
                         - set: [lay.mediaType, "application/vnd.oci.image.layer.v1.tar+gzip"]
                         - set: [lay.digest, "sha256:${lhex}"]
                         - set: [lay.size, lsz]
+                        # Herkunft der Schicht (vom Agenten neben `upper` abgelegt):
+                        # `schluessel=wert` je Zeile → Annotation `cosmos.<schluessel>`.
+                        - if:
+                            condition: { eq: [{ call: [io.is_file, meta_at] }, true] }
+                            then:
+                              - decl: [meta_txt, string, { call: [io.read_file, meta_at] }]
+                              - decl: [meta_rows, list<string>, { call: [meta_txt.split, "\n"] }]
+                              - decl: [mdx, i32, 0]
+                              - while:
+                                  condition: { lt: [mdx, meta_rows.len] }
+                                  body:
+                                    - decl: [mrow, string, { call: [meta_rows.get, mdx] }]
+                                    - set: [mdx, { +: [mdx, 1] }]
+                                    - decl: [meq, i32, { call: [mrow.index_of, "="] }]
+                                    - if:
+                                        condition: { gt: [meq, 0] }
+                                        then:
+                                          - decl: [mkey, string, { call: [mrow.substr, 0, meq] }]
+                                          - call: [lay.annotations.put, "cosmos.${mkey}", { call: [mrow.substr, { +: [meq, 1] }] }]
                         - call: [man.layers.push, lay]
                         - set: [built, { +: [built, 1] }]
                         - if: { condition: { eq: [<.quiet, 0] }, then: [{ call: [log.info, "[oci] Schicht ${built}: ${lsz} B (diff_id sha256:${diff_id})"] }] }

@@ -259,6 +259,7 @@
           then:
             - call: [log.info, "  skip Kernel-Upper (mknod/xattr nicht erlaubt — braucht root)"]
           else:
+            - call: [io.write_file, "${root}/ovl/1/layer.meta", "stage=bauen\nbindings=arch=amd64\nagent=a7\nrun=r42\n"]
             - decl: [rc11, i32, { call: [tool.export_layers, "${root}/ovl", "${root}/image_o", "ovl", "amd64"] }]
             - set: [fails, { +: [fails, { call: [expect, "Kernel-Upper laesst sich schneiden", { eq: [rc11, 0] }] }] }]
             - decl: [rc12, i32, { call: [tool.import_image, "${root}/image_o", "${root}/ovl_back", "amd64"] }]
@@ -278,6 +279,11 @@
             - decl: [lo_a, OciDesc, { at: [man_o.layers, 1] }]
             - decl: [lo_b, OciDesc, { at: [man_o2.layers, 1] }]
             - set: [fails, { +: [fails, { call: [expect, "zweimal geschnitten, ein Digest", { and: [{ eq: [rc13, 0] }, { eq: [lo_a.digest, lo_b.digest] }] }] }] }]
+            # Herkunft: layer.meta → Annotationen cosmos.* (museum §3)
+            - set: [fails, { +: [fails, { call: [expect, "Schicht nennt ihre Stufe", { eq: [{ call: [lo_a.annotations.get, "cosmos.stage"] }, "bauen"] }] }] }]
+            - set: [fails, { +: [fails, { call: [expect, "und Bindungen, Agent, Lauf", { and: [{ eq: [{ call: [lo_a.annotations.get, "cosmos.bindings"] }, "arch=amd64"] }, { and: [{ eq: [{ call: [lo_a.annotations.get, "cosmos.agent"] }, "a7"] }, { eq: [{ call: [lo_a.annotations.get, "cosmos.run"] }, "r42"] }] }] }] }] }]
+            - decl: [lo_0, OciDesc, { at: [man_o.layers, 0] }]
+            - set: [fails, { +: [fails, { call: [expect, "ohne layer.meta keine Annotation", { eq: [lo_0.annotations.len, 0] }] }] }]
 
       - call: [io.remove_all, root]
       - if:

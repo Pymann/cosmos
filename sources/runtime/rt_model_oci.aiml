@@ -16,13 +16,16 @@
       - [osname,       string, "linux", { alias: "os" }]
       - [variant,      string, ""]
 
-# Zeigt auf einen Blob: Konfiguration oder eine Schicht.
+# Zeigt auf einen Blob: Konfiguration oder eine Schicht.  `annotations` traegt
+# bei einer Stufen-Schicht, woher sie kommt (cosmos.stage, cosmos.bindings,
+# cosmos.agent, cosmos.run — museum doc/ecosystem.md §3); leer sonst.
 - model:
     name: OciDesc
     fields:
-      - [mediaType, string]
-      - [digest,    string]
-      - [size,      i64]
+      - [mediaType,   string]
+      - [digest,      string]
+      - [size,        i64]
+      - [annotations, map<string:string>]
 
 # Zeigt auf ein Manifest im Index — mit Plattform, denn ein Index kann
 # dasselbe Image fuer x86_64 UND aarch64 fuehren (das Zielbild: Pi und x86).
