@@ -1,19 +1,19 @@
 # CampaignStore — Kampagnen und gesehene Zustellungen (doc/spec/111 §111.6).
 #
 # Hier steht nur, was ohne den Cluster geht: Speicher, Signaturpruefung und das
-# Lesen des museum-Ereignisses.  Das Starten der Laeufe steht in
+# Lesen des kontor-Ereignisses.  Das Starten der Laeufe steht in
 # campaign_logic.aiml (Gruppen-Methoden, braucht `cluster` und `casc`).
 #
 # Static-Check (aiml spec/49 §14): 1 class.
 
 - import: "sources/models/campaign.aiml"
-- import: "sources/models/museum_event.aiml"
+- import: "sources/models/kontor_event.aiml"
 
 - class:
     name: CampaignStore
     members:
       - [camps, Kv<string:Campaign>]
-      # X-Museum-Delivery → Eingangszeit.  museum stellt mindestens einmal zu
+      # X-Kontor-Delivery → Eingangszeit.  kontor stellt mindestens einmal zu
       # (Wiederholung nach Zeitablauf); dieselbe Zustellung zaehlt nur einmal.
       - [seen,  Kv<string:i64>]
     methods:
@@ -23,7 +23,7 @@
           args: [[db_dir, path]]
           body:
             - set: [<.camps, { call: [db.open_kv, "campaigns", {persist: true}] }]
-            - set: [<.seen,  { call: [db.open_kv, "museum_deliveries", {persist: true}] }]
+            - set: [<.seen,  { call: [db.open_kv, "kontor_deliveries", {persist: true}] }]
 
       - def:
           name: was_seen

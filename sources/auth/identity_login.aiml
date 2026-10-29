@@ -1,4 +1,4 @@
-# Anmeldung ueber LDAP und SAML (doc/spec/111 §111.5, museum doc/ecosystem.md §6).
+# Anmeldung ueber LDAP und SAML (doc/spec/111 §111.5, kontor doc/ecosystem.md §6).
 #
 # Die Mechanik steckt in aiml (spec/67: `ldap.*`, `saml.*`); hier steht nur die
 # Politik: welche Quelle, welche DN, welche Attribute.  Alles kommt aus der

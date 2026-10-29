@@ -754,7 +754,7 @@
                         - if:
                             condition: { gt: [tossed, 0] }
                             then: [{ call: [log.info, "[schicht] ${got.stage_id}: ${tossed} Schicht(en) ab ${sidx} verworfen"] }]
-                        # Herkunft neben die Schicht (museum doc/ecosystem.md §3): beim
+                        # Herkunft neben die Schicht (kontor doc/ecosystem.md §3): beim
                         # Export werden daraus die Annotationen cosmos.* — so weiss ein
                         # Leser des Abbilds (ufo layer pull), welche Stufe sie schrieb.
                         - call: [io.mkdir_all, ldir]

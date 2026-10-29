@@ -1,0 +1,27 @@
+# KontorAccess — wie cosmos kontor erreicht (doc/spec/111 §111.9).
+#
+# Kommt aus der erklaerten Konfiguration (`config.kontor`).  Das Token reist
+# NIE als Wert: nur als Verweis auf seine Quelle (Datei oder Umgebungsvariable,
+# F100-10), den `cosmos-kontor` selbst aufloest.  So steht es in keiner
+# Kommandozeile (`ps`), keinem Log und keinem Modell auf Platte.
+#
+# Static-Check (aiml spec/49 §14): 1 model.
+
+- model:
+    name: KontorAccess
+    fields:
+      - [url,        string]   # "" = kein kontor erklaert
+      - [token_flag, string]   # "--token-file" | "--token-env" | ""
+      - [token_ref,  string]   # Pfad oder Variablenname
+
+# The reference in a pipeline image/push target: `kontor:<repo>:<tag>` →
+# `<repo>:<tag>`; "" when it is no kontor target.  The old prefix `museum:`
+# (before the rename) is still accepted, so existing pipelines keep working.
+- def:
+    name: kontor_ref_of
+    args: [[target, string]]
+    return: string
+    body:
+      - if: { condition: { eq: [{ call: [target.starts_with, "kontor:"] }, 1] }, then: [{ return: [{ call: [target.substr, 7] }] }] }
+      - if: { condition: { eq: [{ call: [target.starts_with, "museum:"] }, 1] }, then: [{ return: [{ call: [target.substr, 7] }] }] }
+      - return: [""]

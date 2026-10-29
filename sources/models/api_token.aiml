@@ -1,4 +1,4 @@
-# API-Tokens fuer Maschinen (REST, CI, museum) — doc/spec/111 §111.7.
+# API-Tokens fuer Maschinen (REST, CI, kontor) — doc/spec/111 §111.7.
 #
 # Warum nicht das Sitzungs-Token: eine neue Anmeldung macht aeltere Sitzungen
 # ungueltig (eine Sitzung je Konto, doc/architecture.md §7.1), und sie laeuft

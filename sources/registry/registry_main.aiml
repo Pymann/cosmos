@@ -1,16 +1,16 @@
-# cosmos-museum — OCI-Layouts zu museum bringen und von dort holen
-# (museum doc/ecosystem.md §2/§3).
+# cosmos-kontor — OCI-Layouts zu kontor bringen und von dort holen
+# (kontor doc/ecosystem.md §2/§3).
 #
-#   cosmos-museum --mode push --layout <dir> --url <museum> --ref <repo>:<tag>
+#   cosmos-kontor --mode push --layout <dir> --url <kontor> --ref <repo>:<tag>
 #                 [--token-file <datei> | --token-env <VAR>] [--artifact-type <typ>]
-#   cosmos-museum --mode pull --layout <dir> --url <museum> --ref <repo>:<tag>|<repo>@sha256:<hex>
+#   cosmos-kontor --mode pull --layout <dir> --url <kontor> --ref <repo>:<tag>|<repo>@sha256:<hex>
 #                 [--token-file <datei>]
 #
-# Das Token kommt aus einer DATEI (oder COSMOS_MUSEUM_TOKEN), nie von der
+# Das Token kommt aus einer DATEI (oder COSMOS_KONTOR_TOKEN), nie von der
 # Kommandozeile: die waere fuer jeden Nutzer des Rechners in `ps` lesbar.
 # Ausgabe auf stdout: die Manifest-Digest (eine Zeile) — sonst nichts.
 
-- import: "sources/registry/museum_client.aiml"
+- import: "sources/registry/kontor_client.aiml"
 
 - model:
     name: RegArgs
@@ -33,7 +33,7 @@
       - if:
           condition: { '||': [{ eq: [args.layout.len, 0] }, { '||': [{ eq: [args.url.len, 0] }, { eq: [args.ref.len, 0] }] }] }
           then:
-            - call: [log.error, "cosmos-museum: --mode push|pull --layout <dir> --url <museum> --ref <repo>:<tag> [--token-file f]"]
+            - call: [log.error, "cosmos-kontor: --mode push|pull --layout <dir> --url <kontor> --ref <repo>:<tag> [--token-file f]"]
             - return: 2
       - decl: [token, string, ""]
       - if:
@@ -43,7 +43,7 @@
             - set: [token, { call: [raw.trim] }]
           else:
             - decl: [envm, map<string:string>, { call: [sys.env] }]
-            - decl: [env_name, string, "COSMOS_MUSEUM_TOKEN"]
+            - decl: [env_name, string, "COSMOS_KONTOR_TOKEN"]
             - if: { condition: { gt: [args.token_env.len, 0] }, then: [{ set: [env_name, args.token_env] }] }
             - if: { condition: { gt: [{ call: [envm.contains, env_name] }, 0] }, then: [{ set: [token, { call: [envm.get, env_name] }] }] }
       # <repo>@sha256:<hex> oder <repo>:<tag> — der Tag ist alles nach dem
@@ -63,7 +63,7 @@
                 then:
                   - set: [reference, { call: [parts.get, { -: [parts.len, 1] }] }]
                   - set: [repo, { call: [args.ref.substr, 0, { -: [{ -: [args.ref.len, reference.len] }, 1] }] }]
-      - decl: [client, ptr<MuseumClient>, { new: MuseumClient }]
+      - decl: [client, ptr<KontorClient>, { new: KontorClient }]
       - call: [client.init, args.url, token, repo]
       - if:
           condition: { eq: [args.mode, "push"] }
@@ -79,5 +79,5 @@
             - if: { condition: { eq: [pulled.len, 0] }, then: [{ return: 1 }] }
             - print: ["${pulled}"]
             - return: 0
-      - call: [log.error, "cosmos-museum: --mode muss push oder pull sein"]
+      - call: [log.error, "cosmos-kontor: --mode muss push oder pull sein"]
       - return: 2

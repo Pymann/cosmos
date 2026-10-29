@@ -18,7 +18,7 @@
 
 # Zeigt auf einen Blob: Konfiguration oder eine Schicht.  `annotations` traegt
 # bei einer Stufen-Schicht, woher sie kommt (cosmos.stage, cosmos.bindings,
-# cosmos.agent, cosmos.run — museum doc/ecosystem.md §3); leer sonst.
+# cosmos.agent, cosmos.run — kontor doc/ecosystem.md §3); leer sonst.
 - model:
     name: OciDesc
     fields:

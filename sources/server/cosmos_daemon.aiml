@@ -107,7 +107,7 @@
             - call: [disp.register, "saml_begin",        g_runtime.saml_begin]
             - call: [disp.register, "saml_finish",       g_runtime.saml_finish]
             - call: [disp.register, "may_call",          g_runtime.may_call]
-            - call: [disp.register, "museum_event",      g_runtime.museum_event]
+            - call: [disp.register, "kontor_event",      g_runtime.kontor_event]
             - call: [disp.register, "list_campaigns",    g_runtime.list_campaigns]
             - call: [<.install_agent_handlers, disp]
             - call: [log.info, "[cosmos_daemon] registered auth + logout + cluster + agent handlers"]
@@ -376,11 +376,11 @@
                       condition: { gt: [nowm, { +: [<.last_push_scan_ms, 2000] }] }
                       then:
                         - set: [<.last_push_scan_ms, nowm]
-                        # doc/spec/111 §111.9: museum-Zugang aus der Erklaerung —
+                        # doc/spec/111 §111.9: kontor-Zugang aus der Erklaerung —
                         # jede Runde neu, damit ein `config apply` ohne Neustart gilt.
-                        - decl: [m_acc, MuseumAccess, { call: [g_runtime.casc.museum_access] }]
-                        - call: [g_runtime.pusher.set_museum, m_acc]
-                        - if: { condition: { neq: [<.spawner, null] }, then: [{ call: [<.spawner.set_museum, m_acc] }] }
+                        - decl: [m_acc, KontorAccess, { call: [g_runtime.casc.kontor_access] }]
+                        - call: [g_runtime.pusher.set_kontor, m_acc]
+                        - if: { condition: { neq: [<.spawner, null] }, then: [{ call: [<.spawner.set_kontor, m_acc] }] }
                         - decl: [ready, PushTarget, { call: [g_runtime.cluster.push_ready] }]
                         - if:
                             condition: { eq: [ready.status, "ready"] }

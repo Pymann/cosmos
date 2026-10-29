@@ -11,7 +11,7 @@
       - [roles,   list<CascRole>]
       - [grants,  list<CascGrant>]
       - [secrets, list<CascSecret>]
-      - [museum,  CascMuseum]
+      - [kontor,  CascKontor]
       - [ldap,    CascLdap]
       - [saml,    CascSaml]
       # 1 = die Rollen gelten (doc/spec/111 §111.3).  0 = wie bisher, nur die

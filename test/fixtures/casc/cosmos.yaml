@@ -7,10 +7,10 @@
       - grant: { group: devs, role: viewer }
     secrets:
       - secret: { name: hook, file: secrets/hook.secret }
-      - secret: { name: mtok, env: COSMOS_TEST_MUSEUM_TOKEN }
-    museum: { url: "http://127.0.0.1:18081", webhook_secret: hook, token: mtok }
+      - secret: { name: mtok, env: COSMOS_TEST_KONTOR_TOKEN }
+    kontor: { url: "http://127.0.0.1:18081", webhook_secret: hook, token: mtok }
 - catalog:
     jobs:
-      - job: { name: net, source: ci/core.aiml, project: net, triggers: [museum] }
+      - job: { name: net, source: ci/core.aiml, project: net, triggers: [kontor] }
     from_dir:
-      - { path: ci, triggers: [museum] }
+      - { path: ci, triggers: [kontor] }

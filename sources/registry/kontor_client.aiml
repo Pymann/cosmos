@@ -1,8 +1,8 @@
-# MuseumClient — OCI-Abbilder zwischen einem lokalen OCI-Layout und museum
-# bewegen (museum doc/ecosystem.md §2/§3, OCI Distribution v1.1).
+# KontorClient — OCI-Abbilder zwischen einem lokalen OCI-Layout und kontor
+# bewegen (kontor doc/ecosystem.md §2/§3, OCI Distribution v1.1).
 #
 # cosmos bleibt beim Layout-Verzeichnis als seiner Form (doc/spec/110 §110.25):
-# `cosmos-oci` schreibt und liest Layouts, dieser Client bringt sie zu museum
+# `cosmos-oci` schreibt und liest Layouts, dieser Client bringt sie zu kontor
 # und zurueck.  Damit braucht weder der Laufzeit-Pfad noch der Push-Pfad
 # Netzcode — beide sehen weiter nur `oci:<pfad>`.
 #
@@ -16,9 +16,9 @@
 - import: "sources/runtime/rt_model_oci_img.aiml"
 
 - class:
-    name: MuseumClient
+    name: KontorClient
     members:
-      - [base,  string]   # "http://museum:8081" (ohne / am Ende)
+      - [base,  string]   # "http://kontor:8081" (ohne / am Ende)
       - [token, string]
       - [repo,  string]
     methods:
@@ -41,7 +41,7 @@
             - decl: [dest, url, { call: [http.parse_url, "${<.base}/v2/${<.repo}/${tail}"] }]
             - decl: [client, http_client_handle, { call: [http.new_request, method, dest] }]
             - if: { condition: { gt: [<.token.len, 0] }, then: [{ call: [client.headers.put, "Authorization", "Bearer ${<.token}"] }] }
-            - call: [client.headers.put, "User-Agent", "cosmos-museum/1"]
+            - call: [client.headers.put, "User-Agent", "cosmos-kontor/1"]
             - set: [client.timeout, 600000]
             - return: client
 
@@ -59,36 +59,36 @@
             - if: { condition: { eq: [code, 200] }, then: [{ return: 1 }] }
             - return: 0
 
-      # put_blob: 1 = liegt jetzt in museum (hochgeladen oder schon da).
+      # put_blob: 1 = liegt jetzt in kontor (hochgeladen oder schon da).
       - def:
           name: put_blob
           access: public
           args: [[layout, string], [digest, string]]
           return: i32
           body:
-            - if: { condition: { eq: [{ call: [<.has_blob, digest] }, 1] }, then: [{ call: [log.info, "[museum] ${digest}: schon vorhanden"] }, { return: 1 }] }
+            - if: { condition: { eq: [{ call: [<.has_blob, digest] }, 1] }, then: [{ call: [log.info, "[kontor] ${digest}: schon vorhanden"] }, { return: 1 }] }
             - decl: [hex, string, { call: [digest.substr, 7] }]
             - decl: [src, string, "${layout}/blobs/sha256/${hex}"]
-            - if: { condition: { eq: [{ call: [io.is_file, src] }, false] }, then: [{ call: [log.error, "[museum] ${src} fehlt im Layout"] }, { return: 0 }] }
+            - if: { condition: { eq: [{ call: [io.is_file, src] }, false] }, then: [{ call: [log.error, "[kontor] ${src} fehlt im Layout"] }, { return: 0 }] }
             - decl: [client, http_client_handle, { call: [<.request, "POST", "blobs/uploads/?digest=${digest}"] }]
             - call: [client.headers.put, "Content-Type", "application/octet-stream"]
             # Gestreamt aus der Datei: eine Schicht sind leicht hunderte MB.
             - set: [client.body_file, src]
             - decl: [answer, http_response_handle, { call: [client.send] }]
-            - if: { condition: { eq: [answer, null] }, then: [{ call: [log.error, "[museum] ${<.base} nicht erreichbar"] }, { return: 0 }] }
+            - if: { condition: { eq: [answer, null] }, then: [{ call: [log.error, "[kontor] ${<.base} nicht erreichbar"] }, { return: 0 }] }
             - decl: [code, i32, { call: [answer.status] }]
             - if:
                 condition: { neq: [code, 201] }
                 then:
-                  - call: [log.error, "[museum] Blob ${digest}: HTTP ${code} ${answer.body}"]
+                  - call: [log.error, "[kontor] Blob ${digest}: HTTP ${code} ${answer.body}"]
                   - call: [answer.free]
                   - return: 0
             - call: [answer.free]
-            - call: [log.info, "[museum] ${digest}: hochgeladen"]
+            - call: [log.info, "[kontor] ${digest}: hochgeladen"]
             - return: 1
 
-      # push: Layout → museum unter `tag`.  Liefert die Digest des Manifests
-      # (wie museum sie meldet) oder "".  `artifact_type` (optional) wird ins
+      # push: Layout → kontor unter `tag`.  Liefert die Digest des Manifests
+      # (wie kontor sie meldet) oder "".  `artifact_type` (optional) wird ins
       # Manifest geschrieben — so werden die Stufen-Schichten eines Laufs zum
       # Artefakt `application/vnd.cosmos.run-layers.v1+json` (§3).
       - def:
@@ -98,9 +98,9 @@
           return: { type: string, lifetime: producer }
           body:
             - decl: [raw, string, { call: [io.read_file, "${layout}/index.json"] }]
-            - if: { condition: { eq: [raw.len, 0] }, then: [{ call: [log.error, "[museum] ${layout}/index.json fehlt"] }, { return: "" }] }
+            - if: { condition: { eq: [raw.len, 0] }, then: [{ call: [log.error, "[kontor] ${layout}/index.json fehlt"] }, { return: "" }] }
             - decl: [index, OciIndex, { call: [sys.deserialize, raw, "OciIndex"] }]
-            - if: { condition: { eq: [index.manifests.len, 0] }, then: [{ call: [log.error, "[museum] ${layout}: index.json ohne Manifest"] }, { return: "" }] }
+            - if: { condition: { eq: [index.manifests.len, 0] }, then: [{ call: [log.error, "[kontor] ${layout}: index.json ohne Manifest"] }, { return: "" }] }
             - decl: [first, OciRef, { at: [index.manifests, 0] }]
             - decl: [mhex, string, { call: [first.digest.substr, 7] }]
             - decl: [mtext, string, { call: [io.read_file, "${layout}/blobs/sha256/${mhex}"] }]
@@ -125,12 +125,12 @@
             - call: [client.headers.put, "Content-Type", mtype]
             - set: [client.body, body]
             - decl: [answer, http_response_handle, { call: [client.send] }]
-            - if: { condition: { eq: [answer, null] }, then: [{ call: [log.error, "[museum] ${<.base} nicht erreichbar"] }, { return: "" }] }
+            - if: { condition: { eq: [answer, null] }, then: [{ call: [log.error, "[kontor] ${<.base} nicht erreichbar"] }, { return: "" }] }
             - decl: [code, i32, { call: [answer.status] }]
             - if:
                 condition: { neq: [code, 201] }
                 then:
-                  - call: [log.error, "[museum] Manifest ${<.repo}:${tag}: HTTP ${code} ${answer.body}"]
+                  - call: [log.error, "[kontor] Manifest ${<.repo}:${tag}: HTTP ${code} ${answer.body}"]
                   - call: [answer.free]
                   - return: ""
             # Den Kopf NICHT an eine Map-Variable binden: unter memV3 gibt deren
@@ -155,14 +155,14 @@
             - decl: [client, http_client_handle, { call: [<.request, "GET", tail] }]
             - if: { condition: { gt: [accept.len, 0] }, then: [{ call: [client.headers.put, "Accept", accept] }] }
             - decl: [answer, http_response_handle, { call: [client.send] }]
-            - if: { condition: { eq: [answer, null] }, then: [{ call: [log.error, "[museum] ${<.base} nicht erreichbar"] }, { return: 0 }] }
+            - if: { condition: { eq: [answer, null] }, then: [{ call: [log.error, "[kontor] ${<.base} nicht erreichbar"] }, { return: 0 }] }
             - decl: [code, i32, { call: [answer.status] }]
             - if:
                 condition: { neq: [code, 200] }
-                then: [{ call: [log.error, "[museum] GET ${tail}: HTTP ${code}"] }, { call: [answer.free] }, { return: 0 }]
+                then: [{ call: [log.error, "[kontor] GET ${tail}: HTTP ${code}"] }, { call: [answer.free] }, { return: 0 }]
             - decl: [saved, i32, { call: [answer.save_to, "${dest}.part"] }]
             - call: [answer.free]
-            - if: { condition: { neq: [saved, 0] }, then: [{ call: [log.error, "[museum] ${dest}: nicht schreibbar"] }, { return: 0 }] }
+            - if: { condition: { neq: [saved, 0] }, then: [{ call: [log.error, "[kontor] ${dest}: nicht schreibbar"] }, { return: 0 }] }
             - if: { condition: { eq: [digest.len, 0] }, then: [{ call: [io.rename, "${dest}.part", dest] }, { return: 1 }] }
             # Ganz lesen, um den Hash zu pruefen (aiml hat keinen Strom-Hash).
             - decl: [part_len, i64, { call: [io.file_size, "${dest}.part"] }]
@@ -174,7 +174,7 @@
             - if:
                 condition: { neq: [{ call: [hash.sha256, got] }, want] }
                 then:
-                  - call: [log.error, "[museum] ${tail}: Inhalt passt nicht zu ${digest} — verworfen"]
+                  - call: [log.error, "[kontor] ${tail}: Inhalt passt nicht zu ${digest} — verworfen"]
                   - call: [io.remove, "${dest}.part"]
                   - return: 0
             - call: [io.rename, "${dest}.part", dest]
@@ -199,7 +199,7 @@
                 then:
                   - if:
                       condition: { neq: [{ call: [reference.substr, 7] }, mhex] }
-                      then: [{ call: [log.error, "[museum] Manifest passt nicht zu ${reference}"] }, { return: "" }]
+                      then: [{ call: [log.error, "[kontor] Manifest passt nicht zu ${reference}"] }, { return: "" }]
             - call: [io.rename, mpath, "${layout}/blobs/sha256/${mhex}"]
             - decl: [mani, OciManifest, { call: [sys.deserialize, mtext, "OciManifest"] }]
             - decl: [blobs, list<OciDesc>]

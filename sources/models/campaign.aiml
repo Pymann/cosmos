@@ -1,15 +1,15 @@
-# Rebuild-Kampagnen (doc/spec/111 §111.6, museum doc/ecosystem.md §5).
+# Rebuild-Kampagnen (doc/spec/111 §111.6, kontor doc/ecosystem.md §5).
 #
-# museum rechnet aus, WAS von einer neuen Paketversion abhaengt (Wellen +
+# kontor rechnet aus, WAS von einer neuen Paketversion abhaengt (Wellen +
 # `needs`); cosmos entscheidet, WANN es laeuft.  Eine Kampagne ist ein
 # Ausloeser (name@version) und je betroffenem Projekt ein Posten.
 #
 # Zustaende eines Postens:
 #   waiting    wartet auf seine Abhaengigkeiten (needs)
 #   running    Lauf gestartet (run_id)
-#   built      Lauf fertig, museum hat (noch) nichts veroeffentlicht → gilt als geaendert
-#   published  museum meldet eine neue Version
-#   unchanged  museum meldet byte-gleiche Ausgabe (unchanged: true)
+#   built      Lauf fertig, kontor hat (noch) nichts veroeffentlicht → gilt als geaendert
+#   published  kontor meldet eine neue Version
+#   unchanged  kontor meldet byte-gleiche Ausgabe (unchanged: true)
 #   skipped    nicht gebaut: alle needs blieben byte-gleich (§5 Punkt 5)
 #   no_job     kein Katalog-Job fuer das Projekt — wartet auf fremde Veroeffentlichung
 #   failed     Lauf gescheitert oder nicht startbar
@@ -34,7 +34,7 @@
       - [campaign_id, string]
       - [trigger,     string]   # Projekt, dessen Veroeffentlichung sie oeffnete
       - [version,     string]
-      - [delivery,    string]   # X-Museum-Delivery des oeffnenden Ereignisses
+      - [delivery,    string]   # X-Kontor-Delivery des oeffnenden Ereignisses
       - [status,      string]   # running | done | failed
       - [created_ms,  i64]
       - [updated_ms,  i64]

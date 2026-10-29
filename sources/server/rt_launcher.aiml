@@ -29,13 +29,13 @@
       - [rt_pid,    i64]
       - [status_at, string]
 
-- import: "sources/shared/museum_access.aiml"
+- import: "sources/shared/kontor_access.aiml"
 
 - class:
     name: RtLauncher
     members:
-      # doc/spec/111 §111.9: `image: museum:<repo>:<tag>` wird von dort geholt.
-      - [museum, MuseumAccess]
+      # doc/spec/111 §111.9: `image: kontor:<repo>:<tag>` wird von dort geholt.
+      - [kontor, KontorAccess]
       # Vorlage: ein fertiges rootfs (deploy/runtime.tar.gz + agent), das ALLE
       # Läufe teilen.  Leer = nicht eingerichtet, dann startet nichts.
       - [tmpl_root, string]
@@ -65,40 +65,40 @@
             - call: [io.mkdir_all, work]
 
       - def:
-          name: set_museum
+          name: set_kontor
           access: public
-          args: [[acc, MuseumAccess]]
-          body: [{ set: [<.museum, acc] }]
+          args: [[acc, KontorAccess]]
+          body: [{ set: [<.kontor, acc] }]
 
-      # pull_museum: `museum:<repo>:<tag>` (oder `@sha256:`) in den Abbild-Speicher
+      # pull_kontor: `kontor:<repo>:<tag>` (oder `@sha256:`) in den Abbild-Speicher
       # des Wirts holen; liefert "oci:<layout>" oder "" (Fehler steht im Log).
       # Vorhandene Blobs werden nicht neu geladen — ein Tag kostet beim zweiten
       # Mal nur das Manifest.  Blockiert wie das Auslegen danach (cosmos-oci).
       - def:
-          name: pull_museum
+          name: pull_kontor
           access: public
           static_off: ["str_cmp"]
           args: [[image, string]]
           return: { type: string, lifetime: producer }
           body:
             - if:
-                condition: { eq: [<.museum.url.len, 0] }
-                then: [{ call: [log.error, "[rt_launch] '${image}': kein museum erklaert (config.museum.url)"] }, { return: "" }]
-            - decl: [ref, string, { call: [image.substr, 7] }]
+                condition: { eq: [<.kontor.url.len, 0] }
+                then: [{ call: [log.error, "[rt_launch] '${image}': kein kontor erklaert (config.kontor.url)"] }, { return: "" }]
+            - decl: [ref, string, { call: [kontor_ref_of, image] }]
             - decl: [slot, string, { call: [ref.replace, "/", "+"] }]
             - set: [slot, { call: [slot.replace, ":", "_"] }]
             - set: [slot, { call: [slot.replace, "@", "_"] }]
-            - decl: [layout, string, "${<.work_dir}/museum_cache/${slot}"]
-            - decl: [argv, list<string>, ["./cosmos-museum", "--mode", "pull", "--layout", layout, "--url", <.museum.url, "--ref", ref]]
+            - decl: [layout, string, "${<.work_dir}/kontor_cache/${slot}"]
+            - decl: [argv, list<string>, ["./cosmos-kontor", "--mode", "pull", "--layout", layout, "--url", <.kontor.url, "--ref", ref]]
             - if:
-                condition: { gt: [<.museum.token_flag.len, 0] }
-                then: [{ call: [argv.push, <.museum.token_flag] }, { call: [argv.push, <.museum.token_ref] }]
+                condition: { gt: [<.kontor.token_flag.len, 0] }
+                then: [{ call: [argv.push, <.kontor.token_flag] }, { call: [argv.push, <.kontor.token_ref] }]
             - decl: [proc, process, { call: [sys.exe, argv, { capture: true, timeout: 1800000 }] }]
-            - if: { condition: { eq: [proc, null] }, then: [{ call: [log.error, "[rt_launch] cosmos-museum nicht startbar"] }, { return: "" }] }
+            - if: { condition: { eq: [proc, null] }, then: [{ call: [log.error, "[rt_launch] cosmos-kontor nicht startbar"] }, { return: "" }] }
             - decl: [rc_pull, i32, { call: [proc.wait] }]
             - if:
                 condition: { neq: [rc_pull, 0] }
-                then: [{ call: [log.error, "[rt_launch] ${image} von ${<.museum.url} nicht holbar (${rc_pull}): ${proc.stderr_buffer}"] }, { return: "" }]
+                then: [{ call: [log.error, "[rt_launch] ${image} von ${<.kontor.url} nicht holbar (${rc_pull}): ${proc.stderr_buffer}"] }, { return: "" }]
             - call: [log.info, "[rt_launch] ${image} geholt nach ${layout}"]
             - return: "oci:${layout}"
 
@@ -175,13 +175,14 @@
             # `oci:<pfad>` (aiml F62-122/F62-129).  Dann wird es MATERIALISIERT,
             # nicht kopiert: der Wandler legt das Layout als Wurzel aus
             # (doc/spec/110 §110.25).
-            # `museum:<repo>:<tag>` (doc/spec/111 §111.9): erst holen, dann wie
+            # `kontor:<repo>:<tag>` (doc/spec/111 §111.9): erst holen, dann wie
             # ein eigenes Layout auslegen — danach ist es dasselbe wie `oci:`.
             - decl: [img, string, image]
+            - decl: [kontor_at, string, { call: [kontor_ref_of, img] }]
             - if:
-                condition: { eq: [{ call: [img.starts_with, "museum:"] }, 1] }
+                condition: { gt: [kontor_at.len, 0] }
                 then:
-                  - set: [img, { call: [<.pull_museum, image] }]
+                  - set: [img, { call: [<.pull_kontor, image] }]
                   - if: { condition: { eq: [img.len, 0] }, then: [{ return: "" }] }
             - decl: [from_layout, i32, 0]
             - if:
