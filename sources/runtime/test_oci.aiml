@@ -237,6 +237,54 @@
       - decl: [rc10, i32, { call: [tool.export_layers, "${root}/stapel_leer", "${root}/image_l", "leer", "amd64"] }]
       - set: [fails, { +: [fails, { call: [expect, "ein Stapel ohne Schichten wird abgelehnt", { neq: [rc10, 0] }] }] }]
 
+      # ── 7. Ein Upper, wie der KERNEL es schreibt ───────────────────────
+      # Loeschen = Geraetedatei 0:0, ersetzter Ordner = xattr
+      # trusted.overlay.opaque=y — nicht `.wh.`-Dateien wie in Teil 6.  Dazu ein
+      # xattr und setuid, die das Abbild ueberleben muessen.  mknod und
+      # trusted.* brauchen root: ohne geht dieser Teil als SKIP durch.
+      - call: [put_file, "${root}/ovl/0/upper/etc", "marke", "unten"]
+      - call: [put_file, "${root}/ovl/0/upper/opt/alt", "eins.txt", "unten"]
+      - call: [put_file, "${root}/ovl/0/upper/opt/alt/tief", "x", "unten"]
+      - call: [put_file, "${root}/ovl/0/upper/usr/bin", "werkzeug", "#!/bin/sh"]
+      - call: [fsmeta.chmod, "${root}/ovl/0/upper/usr/bin/werkzeug", 2541]
+      - decl: [probe_val, buffer<u8>, { call: [bytes.from_string, "probe"] }]
+      - decl: [xa_rc, i32, { call: [fsmeta.xattr_set, "${root}/ovl/0/upper/usr/bin/werkzeug", "user.cosmos", probe_val] }]
+      - call: [io.mkdir_all, "${root}/ovl/1/upper/etc"]
+      - decl: [mk_rc, i32, { call: [fsmeta.mknod, "${root}/ovl/1/upper/etc/marke", 8192, 0, 0] }]
+      - call: [put_file, "${root}/ovl/1/upper/opt/alt", "zwei.txt", "oben"]
+      - decl: [yes_val, buffer<u8>, { call: [bytes.from_string, "y"] }]
+      - decl: [op_rc, i32, { call: [fsmeta.xattr_set, "${root}/ovl/1/upper/opt/alt", "trusted.overlay.opaque", yes_val] }]
+      - if:
+          condition: { or: [{ neq: [mk_rc, 0] }, { or: [{ neq: [op_rc, 0] }, { neq: [xa_rc, 0] }] }] }
+          then:
+            - call: [log.info, "  skip Kernel-Upper (mknod/xattr nicht erlaubt — braucht root)"]
+          else:
+            - call: [io.write_file, "${root}/ovl/1/layer.meta", "stage=bauen\nbindings=arch=amd64\nagent=a7\nrun=r42\n"]
+            - decl: [rc11, i32, { call: [tool.export_layers, "${root}/ovl", "${root}/image_o", "ovl", "amd64"] }]
+            - set: [fails, { +: [fails, { call: [expect, "Kernel-Upper laesst sich schneiden", { eq: [rc11, 0] }] }] }]
+            - decl: [rc12, i32, { call: [tool.import_image, "${root}/image_o", "${root}/ovl_back", "amd64"] }]
+            - set: [fails, { +: [fails, { call: [expect, "und zurueckholen", { eq: [rc12, 0] }] }] }]
+            - decl: [back, string, "${root}/ovl_back/rootfs"]
+            - set: [fails, { +: [fails, { call: [expect, "Geraetedatei 0:0 loescht etc/marke", { lt: [{ call: [fsmeta.stat, "${back}/etc/marke", 0] }, 0] }] }] }]
+            - set: [fails, { +: [fails, { call: [expect, "opaker Ordner (xattr) verliert eins.txt", { eq: [{ call: [io.is_file, "${back}/opt/alt/eins.txt"] }, false] }] }] }]
+            - set: [fails, { +: [fails, { call: [expect, "und den tieferen Ordner", { eq: [{ call: [io.is_dir, "${back}/opt/alt/tief"] }, false] }] }] }]
+            - set: [fails, { +: [fails, { call: [expect, "und behaelt zwei.txt", { eq: [{ call: [io.read_file, "${back}/opt/alt/zwei.txt"] }, "oben"] }] }] }]
+            - set: [fails, { +: [fails, { call: [expect, "kein Overlay-xattr im Abbild", { eq: [{ call: [bytes.text, { call: [fsmeta.xattr_get, "${back}/opt/alt", "trusted.overlay.opaque"] }] }, ""] }] }] }]
+            - set: [fails, { +: [fails, { call: [expect, "user-xattr ueberlebt", { eq: [{ call: [bytes.text, { call: [fsmeta.xattr_get, "${back}/usr/bin/werkzeug", "user.cosmos"] }] }, "probe"] }] }] }]
+            - set: [fails, { +: [fails, { call: [expect, "setuid ueberlebt", { eq: [{ band: [{ call: [fsmeta.stat, "${back}/usr/bin/werkzeug", 0] }, 4095] }, 2541] }] }] }]
+            # Derselbe Stand → derselbe Digest (pax-Koepfe ohne PID/atime).
+            - decl: [rc13, i32, { call: [tool.export_layers, "${root}/ovl", "${root}/image_o2", "ovl", "amd64"] }]
+            - decl: [man_o, OciManifest, { call: [man_of, "${root}/image_o"] }]
+            - decl: [man_o2, OciManifest, { call: [man_of, "${root}/image_o2"] }]
+            - decl: [lo_a, OciDesc, { at: [man_o.layers, 1] }]
+            - decl: [lo_b, OciDesc, { at: [man_o2.layers, 1] }]
+            - set: [fails, { +: [fails, { call: [expect, "zweimal geschnitten, ein Digest", { and: [{ eq: [rc13, 0] }, { eq: [lo_a.digest, lo_b.digest] }] }] }] }]
+            # Herkunft: layer.meta → Annotationen cosmos.* (museum §3)
+            - set: [fails, { +: [fails, { call: [expect, "Schicht nennt ihre Stufe", { eq: [{ call: [lo_a.annotations.get, "cosmos.stage"] }, "bauen"] }] }] }]
+            - set: [fails, { +: [fails, { call: [expect, "und Bindungen, Agent, Lauf", { and: [{ eq: [{ call: [lo_a.annotations.get, "cosmos.bindings"] }, "arch=amd64"] }, { and: [{ eq: [{ call: [lo_a.annotations.get, "cosmos.agent"] }, "a7"] }, { eq: [{ call: [lo_a.annotations.get, "cosmos.run"] }, "r42"] }] }] }] }] }]
+            - decl: [lo_0, OciDesc, { at: [man_o.layers, 0] }]
+            - set: [fails, { +: [fails, { call: [expect, "ohne layer.meta keine Annotation", { eq: [lo_0.annotations.len, 0] }] }] }]
+
       - call: [io.remove_all, root]
       - if:
           condition: { neq: [fails, 0] }

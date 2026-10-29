@@ -316,6 +316,36 @@
       # Ordner opak machen (`.wh..wh..opq`).  Wer das ueberspringt, bekommt
       # geloeschte Dateien zurueck — und das ist der haeufigste Fehler in
       # selbstgebauten Image-Lesern.
+      # collect_opaque: relative Pfade der Ordner unter `dir`, die overlayfs opak
+      # markiert hat (trusted.overlay.opaque=y, bei userxattr-Mounts user.overlay.opaque).
+      # Folgt keinem symbolischen Link.
+      - def:
+          name: collect_opaque
+          static_off: ["str_cmp"]
+          args: [[dir, string], [rel, string], [found, list<string>]]
+          body:
+            - decl: [items, list<path>, { call: [io.list_dir, dir] }]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, items.len] }
+                body:
+                  - decl: [item, path, { call: [items.get, idx] }]
+                  - decl: [name, string, { call: [item.name] }]
+                  - set: [idx, { +: [idx, 1] }]
+                  - decl: [full, string, "${dir}/${name}"]
+                  - decl: [relp, string, name]
+                  - if: { condition: { gt: [rel.len, 0] }, then: [{ set: [relp, "${rel}/${name}"] }] }
+                  - decl: [mode, i64, { call: [fsmeta.stat, full, 0] }]
+                  - if:
+                      condition: { eq: [{ band: [mode, 61440] }, 16384] }
+                      then:
+                        - decl: [one, buffer<u8>, { call: [fsmeta.xattr_get, full, "trusted.overlay.opaque"] }]
+                        - decl: [two, buffer<u8>, { call: [fsmeta.xattr_get, full, "user.overlay.opaque"] }]
+                        - if:
+                            condition: { or: [{ eq: [{ call: [bytes.text, one] }, "y"] }, { eq: [{ call: [bytes.text, two] }, "y"] }] }
+                            then: [{ call: [found.push, relp] }]
+                        - call: [<.collect_opaque, full, relp, found]
+
       # ── export_layers: ein Abbild aus den SCHICHTEN eines Laufs ─────────
       # (doc/spec/110 F110-95)
       #
@@ -354,6 +384,7 @@
                 condition: { lt: [nix, 256] }
                 body:
                   - decl: [updir, string, "${layers}/${nix}/upper"]
+                  - decl: [meta_at, string, "${layers}/${nix}/layer.meta"]
                   - decl: [up_p, path, updir]
                   - set: [nix, { +: [nix, 1] }]
                   - if:
@@ -362,10 +393,31 @@
                         - decl: [out_dir, string, "${<.work}/lay"]
                         - call: [io.remove_all, out_dir]
                         - call: [io.mkdir_all, out_dir]
+                        # Opake Ordner liest aiml, nicht die Shell: das Basis-rootfs hat
+                        # kein getfattr, und `trusted.*` sieht nur, wer CAP_SYS_ADMIN hat.
+                        - decl: [opq, list<string>]
+                        - call: [<.collect_opaque, updir, "", opq]
+                        - decl: [opq_txt, string, ""]
+                        - decl: [odx, i32, 0]
+                        - while:
+                            condition: { lt: [odx, opq.len] }
+                            body:
+                              - set: [opq_txt, "${opq_txt}${{ call: [opq.get, odx] }}\n"]
+                              - set: [odx, { +: [odx, 1] }]
+                        - call: [io.write_file, "${out_dir}/opaque.list", opq_txt]
                         - decl: [cmd, string, 'set -e; rm -rf /out/w; mkdir -p /out/w; cp -al /src/. /out/w/ 2>/dev/null || cp -a /src/. /out/w/']
                         # Gerätedatei 0:0 → `.wh.<name>` (OCI).
-                        - set: [cmd, '${cmd}; cd /out/w; find . -type c | while read -r w; do mm=$(stat -c "%t %T" "$w" 2>/dev/null); if [ "$mm" = "0 0" ]; then rm -f "$w"; : > "$(dirname "$w")/.wh.$(basename "$w")"; fi; done']
-                        - set: [cmd, '${cmd}; tar --numeric-owner --sort=name -C /out/w -cf /out/layer.tar .']
+                        - set: [cmd, '${cmd}; cd /out/w; find . -type c | while read -r w; do mm=$(stat -c "%t %T" "$w" 2>/dev/null); if [ "$mm" = "0 0" ]; then mk="$(dirname "$w")/.wh.$(basename "$w")"; rm -f "$w"; : > "$mk"; touch -h -r "/src/$w" "$mk"; touch -h -r "/src/$(dirname "$w")" "$(dirname "$w")"; fi; done']
+                        # Opaker Ordner (xattr *.overlay.opaque=y) → `.wh..wh..opq` darin.
+                        # Marker und ihr Ordner tragen die Zeit der QUELLE (touch -r):
+                        # ein frisch angelegter Marker haette „jetzt" im tar, und derselbe
+                        # Stand bekaeme bei jedem Schnitt einen neuen Digest.
+                        - set: [cmd, '${cmd}; while IFS= read -r d; do if [ -n "$d" ] && [ -d "/out/w/$d" ]; then : > "/out/w/$d/.wh..wh..opq"; touch -h -r "/src/$d" "/out/w/$d/.wh..wh..opq" "/out/w/$d"; fi; done < /out/opaque.list']
+                        # xattrs reisen mit (security.capability, user.*), die Overlay-
+                        # eigenen nicht.  POSIX-Format mit festen pax-Kopfnamen und ohne
+                        # atime/ctime: sonst stuende die PID im tar und derselbe Stand
+                        # bekaeme jedes Mal einen anderen Digest.
+                        - set: [cmd, '${cmd}; tar --numeric-owner --sort=name --format=posix --pax-option=exthdr.name=%d/PaxHeaders/%f,delete=atime,delete=ctime --xattrs --xattrs-include="*" --xattrs-exclude="trusted.overlay.*" --xattrs-exclude="user.overlay.*" -C /out/w -cf /out/layer.tar .']
                         - set: [cmd, '${cmd}; sha256sum /out/layer.tar | cut -c1-64 > /out/diffid; gzip -n -6 /out/layer.tar; rm -rf /out/w']
                         - decl: [code, i32, { call: [<.ns_run, cmd, updir, out_dir] }]
                         - if:
@@ -384,6 +436,25 @@
                         - set: [lay.mediaType, "application/vnd.oci.image.layer.v1.tar+gzip"]
                         - set: [lay.digest, "sha256:${lhex}"]
                         - set: [lay.size, lsz]
+                        # Herkunft der Schicht (vom Agenten neben `upper` abgelegt):
+                        # `schluessel=wert` je Zeile → Annotation `cosmos.<schluessel>`.
+                        - if:
+                            condition: { eq: [{ call: [io.is_file, meta_at] }, true] }
+                            then:
+                              - decl: [meta_txt, string, { call: [io.read_file, meta_at] }]
+                              - decl: [meta_rows, list<string>, { call: [meta_txt.split, "\n"] }]
+                              - decl: [mdx, i32, 0]
+                              - while:
+                                  condition: { lt: [mdx, meta_rows.len] }
+                                  body:
+                                    - decl: [mrow, string, { call: [meta_rows.get, mdx] }]
+                                    - set: [mdx, { +: [mdx, 1] }]
+                                    - decl: [meq, i32, { call: [mrow.index_of, "="] }]
+                                    - if:
+                                        condition: { gt: [meq, 0] }
+                                        then:
+                                          - decl: [mkey, string, { call: [mrow.substr, 0, meq] }]
+                                          - call: [lay.annotations.put, "cosmos.${mkey}", { call: [mrow.substr, { +: [meq, 1] }] }]
                         - call: [man.layers.push, lay]
                         - set: [built, { +: [built, 1] }]
                         - if: { condition: { eq: [<.quiet, 0] }, then: [{ call: [log.info, "[oci] Schicht ${built}: ${lsz} B (diff_id sha256:${diff_id})"] }] }
@@ -487,7 +558,7 @@
                   # Zweig nicht nach Medientyp: Docker nennt dieselbe Schicht
                   # anders als OCI, der Inhalt ist derselbe.
                   - decl: [cmd, string, 'set -e; rm -rf /out/.lay; mkdir -p /out/.lay /out/rootfs']
-                  - set: [cmd, '${cmd}; tar --numeric-owner -xf /src/blobs/sha256/${lhex} -C /out/.lay; cd /out/.lay']
+                  - set: [cmd, '${cmd}; tar --numeric-owner --xattrs --xattrs-include="*" -xf /src/blobs/sha256/${lhex} -C /out/.lay; cd /out/.lay']
                   # Opake Ordner zuerst: der Marker sagt „was unten liegt, gilt
                   # nicht mehr" — also leeren, BEVOR diese Schicht einzieht.
                   - set: [cmd, '${cmd}; find . -name ".wh..wh..opq" | while read -r mrk; do dir=$(dirname "$mrk"); rm -rf "/out/rootfs/$dir"; mkdir -p "/out/rootfs/$dir"; rm -f "$mrk"; done']
