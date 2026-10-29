@@ -4,7 +4,7 @@ Stand 2026-10-29.  Diese Datei **zeigt** das Zusammenspiel; die Verträge stehen
 gehen vor: kontor `doc/ecosystem.md` (Wire-Formate), [spec/111](spec/111_ecosystem.md) (cosmos'
 Hälfte), [spec/96](spec/96_layer_cache.md) und [spec/110](spec/110_runtime.md) (Schichten,
 Laufzeit), ufo `README.md` / `doc/kit.md` (Schichten als Git-Commits, Layer-Kit), aiml
-`spec/62` (Pipelines) und `spec/69` (venv).
+`spec/62` (Pipelines) und `spec/68` (venv).
 
 **Legende** (gilt für alle Flussdiagramme): durchgezogene Kante = gebaut und getestet,
 gestrichelte Kante `-.->` = geplant oder nur teilweise da; `⟨…⟩` an einer Kante nennt das
@@ -608,7 +608,7 @@ flowchart LR
 
 ## 10. Vom nackten Ubuntu zur aiml-venv — und weiter
 
-Die Werkzeug-Schicht entsteht selbst als cosmos-Lauf.  Seit aiml `spec/69` ist ihr Ergebnis eine
+Die Werkzeug-Schicht entsteht selbst als cosmos-Lauf.  Seit aiml `spec/68` ist ihr Ergebnis eine
 **venv** unter `/opt/aiml`, die ohne Wirtspfade, `ldconfig` oder Symlinks auskommt.
 
 ```mermaid
