@@ -102,11 +102,11 @@
           run: "set -e; cd /ws/aiml; export PATH=/opt/venv/bin:$PATH AIML_MEM_V3=1; exodus build --all 2>&1 | tee /ws/build.log | grep --line-buffered -E 'compiling |linking |ERROR|error:' || true; echo '== nicht baubar (mit Grund) =='; grep -E '_run_config.*ERROR' /ws/build.log | sed -E 's/.*for //; s/: \\[Errno 2\\] No such file or directory: /  → fehlt: /' | head -5; echo '== gebaut =='; grep -E 'linking' /ws/build.log | sed -E 's/.*linking //' | tr '\\n' ' '; echo; ls -lh out/aiml/aiml out/libaiml/libaiml.so"
 
       # Die aiml-venv in die WURZEL legen — nur so reist sie im Abbild mit
-      # (doc/spec/110 F110-112).  `aiml venv` (aiml spec/68) legt das ganze
+      # (doc/spec/110 F110-112).  `aiml venv` (aiml spec/69) legt das ganze
       # Layout an: bin/aiml, lib/libaiml.so, lib/aiml/ fuer Pakete und `env`.
       # Mehr braucht die Schicht nicht: bin/aiml findet lib/ ueber
       # RUNPATH $ORIGIN/../lib, also weder ein Eintrag in ld.so.conf.d noch ein
-      # Symlink auf einen Wirtspfad (F68-40).  Wer Pfade fest eintraegt (9rooms),
+      # Symlink auf einen Wirtspfad (F69-40).  Wer Pfade fest eintraegt (9rooms),
       # verdrahtet sie in SEINER Pipeline (9rooms_vom_stapel: compiler_verdrahten).
       - stage:
           name: aiml_ablegen
@@ -116,5 +116,5 @@
       - stage:
           name: nachweis
           timeout: 300000
-          # Aus der venv, nicht aus dem Bau: `aiml` kommt aus PATH (aiml spec/68 F68-21).
+          # Aus der venv, nicht aus dem Bau: `aiml` kommt aus PATH (aiml spec/69 F69-21).
           run: "set -e; . /opt/aiml/env; printf -- '- def:\\n    name: main\\n    return: i32\\n    body:\\n      - print: [\"hallo aus der aiml-venv\"]\\n      - return: 0\\n' > /tmp/hallo.aiml; cd /tmp; command -v aiml; aiml /tmp/hallo.aiml"

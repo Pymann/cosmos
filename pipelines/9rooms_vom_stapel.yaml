@@ -31,11 +31,11 @@
           run: "set -e; echo '== Wurzel =='; cat /etc/os-release | head -2; echo '== aus dem Unterbau =='; ls -d /opt/venv /opt/aiml 2>/dev/null || true; git --version; gcc --version | head -1; /opt/venv/bin/exodus --help | head -3; echo '== Arbeitsbereich des Wirts =='; ls /work | head -5"
 
       # Den Compiler FINDEN, nicht vermuten: erst die aiml-venv in der Wurzel
-      # (dort liegt sie, wenn `aiml_ablegen` lief — aiml spec/68), sonst der Bau
+      # (dort liegt sie, wenn `aiml_ablegen` lief — aiml spec/69), sonst der Bau
       # im Arbeitsplatz des anderen Laufs.  Die Wirtspfade sind noetig, weil die
       # exodus-*.json von 9rooms sie 51× fest eintragen — eine Kopie dieser
       # Dateien zu pflegen waere die Aenderung, die man spaeter nicht mehr
-      # findet.  Sie gehoeren darum HIERHER, nicht in die venv-Schicht (F68-40):
+      # findet.  Sie gehoeren darum HIERHER, nicht in die venv-Schicht (F69-40):
       # zwei Verweise in die venv, sonst nichts.
       - stage:
           name: compiler_verdrahten
