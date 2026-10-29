@@ -1,0 +1,33 @@
+# Die Parameter EINES Jobs (doc/spec/106 §106.6).
+#
+# Warum ein eigener Datensatz und kein Feld am JobDef: ein neues Feld aendert
+# den Schema-Fingerprint, und jeder gespeicherte Job waere unlesbar
+# (doc/spec/108 F108-2, F106-24).  Dieselbe Form haelt die Werte EINES LAUFS
+# — das ist der Schnappschuss aus F106-14: der Job traegt die Liste, der Lauf
+# die Werte von damals.
+#
+# Static-Check (aiml spec/49 §14): 2 models.
+- model:
+    name: ParamRow
+    fields:
+      - [name,  string]
+      # text | langtext | zahl | bool | datei (F106-17).  Ein NAME und keine
+      # Zahl: er steht im Datensatz, in der Oberflaeche und in der erzeugten
+      # Quelle — drei Stellen, an denen `3` nichts erklaert haette.
+      - [kind,  string]
+      # Der Wert als TEXT, auch bei `zahl` und `bool`: so traegt EIN Feld jeden
+      # Typ, und die Umwandlung passiert an einer Stelle (beim Erzeugen des
+      # Bundles).  Bei `datei` steht hier der CAS-Verweis des Inhalts.
+      - [value, string]
+      # Nur bei `datei`: woher die Datei kam und wie gross sie ist.  Beides nur
+      # fuer die Anzeige — der Lauf braucht den Pfad, nicht die Herkunft.
+      - [file_name, string]
+      - [file_size, i64]
+
+- model:
+    name: JobParams
+    fields:
+      # Job ODER Lauf — derselbe Datensatz, zwei Speicher (`job_params`,
+      # `run_params`).  Die Kennung sagt, welcher gemeint ist.
+      - [owner_id, string]
+      - [rows,     list<ParamRow>]

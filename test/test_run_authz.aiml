@@ -1,0 +1,113 @@
+# Abnahme §AP1.6a (Befund 2 und 3): Autorisierung, nicht nur Anmeldung.
+#
+# Beide Lücken hatten dieselbe Ursache — der Handler prüfte, WER jemand ist,
+# und hielt das für die Frage, WORAUF er zugreifen darf.
+#
+# 1 (Befund 2) Ein run_ref ist ein Bezeichner, kein Pfadbestandteil. Geprüft
+#   wird an der Stelle, wo der Pfad entsteht (RunStore), damit die Prüfung
+#   JEDEN Aufrufer schützt und nicht nur den einen, der sie hat.
+# 2 (Befund 3) Ein Agent darf nur über SEINEN Lauf berichten — der gemeldete
+#   run_ref muss der ihm zugewiesene sein.
+# Expected exit code: 0
+
+- import: "sources/server/run_store.aiml"
+- import: "sources/server/agent_registry.aiml"
+- import: "sources/models/agent_proto.aiml"
+
+- def:
+    name: expect
+    args: [[what, string], [cond, i32]]
+    return: i32
+    body:
+      - if:
+          condition: { eq: [cond, 1] }
+          then: [{ print: ["  ok   ${what}"] }, { return: 0 }]
+      - print: ["  FAIL ${what}"]
+      - return: 1
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      - decl: [work, string, "/tmp/cosmos_authz"]
+      - decl: [work_p, path, work]
+      - call: [io.remove_all, work_p]
+      - decl: [logs_p, path, "${work}/run_logs"]
+      - call: [io.mkdir_all, logs_p]
+
+      # Eine Datei AUSSERHALB des Log-Verzeichnisses, die niemand lesen darf.
+      - decl: [secret_p, path, "${work}/geheim.txt"]
+      - call: [io.write_file, secret_p, "NICHT-FUER-DEN-CLIENT"]
+
+      - decl: [runs, ptr<RunStore>, { new: RunStore }]
+      - call: [runs.init, "${work}/run_logs"]
+
+      # ── 1. Form des Bezeichners ─────────────────────────────────────────
+      # Gueltig ist ein Bezeichner aus Buchstaben, Ziffern, `-`, `_` (3–120),
+      # nicht mit `-` beginnend — der Zeichensatz schliesst `/`, `.` und `..`
+      # aus, und darum geht es (doc/spec/90 §AP1.6a-1).
+      - set: [fails, { +: [fails, { call: [expect, "gueltiger ref wird angenommen", { eq: [{ call: [runs.valid_ref, "run-1760000000000-7"] }, 1] }] }] }]
+      # Kurzform, die test_agent_exec seit je benutzt — der Zeichensatz
+      # entscheidet, nicht die Gruppierung.
+      - set: [fails, { +: [fails, { call: [expect, "Kurzform run-1 wird angenommen", { eq: [{ call: [runs.valid_ref, "run-1"] }, 1] }] }] }]
+      # Kein Trenner am Rand, keine doppelten: ein Bezeichner sieht aus wie das,
+      # was `Ids.slug` erzeugt (doc/spec/106 F106-9).
+      - set: [fails, { +: [fails, { call: [expect, "doppelter Trenner abgelehnt", { eq: [{ call: [runs.valid_ref, "run---"] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Trenner am Ende abgelehnt", { eq: [{ call: [runs.valid_ref, "run-7-"] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Pfadausbruch abgelehnt", { eq: [{ call: [runs.valid_ref, "../geheim"] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Schraegstrich abgelehnt", { eq: [{ call: [runs.valid_ref, "run-1-2/../../etc/passwd"] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "leerer ref abgelehnt", { eq: [{ call: [runs.valid_ref, ""] }, 0] }] }] }]
+      # Praefix und Ziffern-Regel sind am 15.10.2026 GEFALLEN (doc/spec/90
+      # §AP1.6a-1): sie koppelten den Store an die AP1-Kennungen, und eine
+      # STUFEN-Kennung fiel durch — ihr Protokoll landete nirgends (F103-19).
+      # Sicherheitsrelevant ist der Zeichensatz, und der bleibt streng.
+      - set: [fails, { +: [fails, { call: [expect, "Stufen-Kennung wird angenommen", { eq: [{ call: [runs.valid_ref, "mein-job-7-0-1"] }, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Unterstrich ist erlaubt", { eq: [{ call: [runs.valid_ref, "mein_job-7-0-1"] }, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "fuehrender Trenner abgelehnt", { eq: [{ call: [runs.valid_ref, "-run-1"] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Leerzeichen abgelehnt", { eq: [{ call: [runs.valid_ref, "run 1"] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Tilde-Pfad abgelehnt", { eq: [{ call: [runs.valid_ref, "~/.ssh/id_rsa"] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Nullbyte-Trick abgelehnt", { eq: [{ call: [runs.valid_ref, "run-1-2."] }, 0] }] }] }]
+
+      # ── Und die Pfadbildung selbst muss abweisen ────────────────────────
+      - decl: [bad_path, string, { call: [runs.stream_path, "../geheim", OutStream.out] }]
+      - set: [fails, { +: [fails, { call: [expect, "stream_path bildet fuer Unsinn KEINEN Pfad", { eq: [bad_path.len, 0] }] }] }]
+      - decl: [good_path, string, { call: [runs.stream_path, "run-5-5", OutStream.out] }]
+      - set: [fails, { +: [fails, { call: [expect, "stream_path bildet fuer gueltigen ref einen Pfad", { gt: [good_path.len, 0] }] }] }]
+
+      # Das Lesefenster darf fuer einen ungueltigen ref nichts liefern —
+      # genau der Weg, ueber den die fremde Datei lesbar war.
+      - decl: [zero_off, i64, 0]
+      - decl: [esc_ref, string, "../geheim"]
+      - decl: [win, RunWindow, { call: [runs.window, esc_ref, OutStream.out, zero_off, 4096] }]
+      - set: [fails, { +: [fails, { call: [expect, "Befund 2 window liefert fuer Pfadausbruch nichts", { eq: [win.data.len, 0] }] }] }]
+      - decl: [esc2, string, "../geheim.txt"]
+      - decl: [win2, RunWindow, { call: [runs.window, esc2, OutStream.out, zero_off, 4096] }]
+      - set: [fails, { +: [fails, { call: [expect, "Befund 2 auch mit Endung nichts", { eq: [win2.data.len, 0] }] }] }]
+
+      # ── 2. Agent darf nur ueber SEINEN Lauf berichten ───────────────────
+      - decl: [agents, ptr<AgentRegistry>, { new: AgentRegistry }]
+      - decl: [nowm, i64, { call: [time.now] }]
+      - decl: [reg_a, AgentRegister]
+      - set: [reg_a.agent_id, "agent-eins"]
+      - decl: [rc_a, i32, { call: [agents.upsert, reg_a, 11, nowm] }]
+      - decl: [reg_b, AgentRegister]
+      - set: [reg_b.agent_id, "agent-zwei"]
+      - decl: [rc_b, i32, { call: [agents.upsert, reg_b, 22, nowm] }]
+      - call: [agents.set_current_run, "agent-eins", "run-100-11"]
+      - call: [agents.set_current_run, "agent-zwei", "run-200-22"]
+
+      - set: [fails, { +: [fails, { call: [expect, "eigener Lauf wird erkannt", { eq: [{ call: [agents.current_run_of, "agent-eins"] }, "run-100-11"] }] }] }]
+      # Die Bindung, die vorher fehlte: der Lauf von agent-zwei ist NICHT der
+      # von agent-eins.  Darauf muss der Handler pruefen.
+      - set: [fails, { +: [fails, { call: [expect, "Befund 3 fremder Lauf ist unterscheidbar", { neq: [{ call: [agents.current_run_of, "agent-eins"] }, { call: [agents.current_run_of, "agent-zwei"] }] }] }] }]
+      - decl: [none_run, string, { call: [agents.current_run_of, "agent-unbekannt"] }]
+      - set: [fails, { +: [fails, { call: [expect, "Agent ohne Lauf meldet leer", { eq: [none_run.len, 0] }] }] }]
+
+      - call: [io.remove_all, work_p]
+      - if:
+          condition: { neq: [fails, 0] }
+          then: [{ print: ["test_run_authz FAIL (${fails})"] }, { return: 1 }]
+      - print: ["test_run_authz PASS"]
+      - return: 0

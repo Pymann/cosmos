@@ -1,0 +1,121 @@
+# AgentTokenStore — Enrollment-Tokens für Agenten (doc/spec/90 §AP1.9).
+#
+# Verbindlich: gespeichert wird NUR hash.sha256(secret).  Das Klartext-Token
+# verlässt den Server genau einmal — als Rückgabe von `create`.  Es gibt keinen
+# Weg, es später wieder auszulesen; wer es verliert, erzeugt ein neues.
+#
+# Format: "<token_id>.<secret>" — token_id (16 Hex) erlaubt O(1)-Lookup,
+# secret (64 Hex = 256 bit CSPRNG) ist das Geheimnis.
+# Vergleich constant-time (hash.const_time_eq) — kein Timing-Orakel.
+
+- import: "sources/models/agent_token.aiml"
+- import: "sources/models/agent_token_reqs.aiml"
+
+- class:
+    name: AgentTokenStore
+    members:
+      - [tokens, Kv<string:AgentToken>]
+    methods:
+      - def:
+          name: init
+          access: public
+          args: [[db_dir, path]]
+          body:
+            - set: [<.tokens, { call: [db.open_kv, "agent_tokens", {persist: true, path: db_dir}] }]
+
+      - def:
+          name: count
+          access: public
+          return: i32
+          body:
+            - decl: [num, i32, 0]
+            - decl: [tit, iterator<string>, { call: [<.tokens.iter] }]
+            - while:
+                condition: { gt: [{ call: [tit.has_next] }, 0] }
+                body:
+                  - decl: [tky, string, { call: [tit.next] }]
+                  - set: [num, { +: [num, 1] }]
+            - return: num
+
+      # create: neues Token erzeugen.  Rückgabe trägt das EINZIGE Mal das Klartext-Token.
+      - def:
+          name: create
+          access: public
+          args: [[label, string], [owner_pid, string]]
+          return: { type: AgentTokenNew, lifetime: producer }
+          body:
+            - decl: [res, AgentTokenNew]
+            - decl: [tid, string, { call: [math.random_hex, 8] }]
+            - decl: [sec, string, { call: [math.random_hex, 32] }]
+            - decl: [rec, AgentToken]
+            - set: [rec.token_id, tid]
+            - set: [rec.label, label]
+            - set: [rec.created_by, owner_pid]
+            - set: [rec.created_ms, { call: [time.now] }]
+            - set: [rec.last_used_ms, 0]
+            - set: [rec.use_count, 0]
+            - set: [rec.revoked, 0]
+            - set: [rec.secret_hash, { call: [hash.sha256, sec] }]
+            - call: [<.tokens.set, tid, rec]
+            - set: [res.accepted, 1]
+            - set: [res.token_id, tid]
+            - set: [res.secret, "${tid}.${sec}"]
+            - return: res
+
+      # verify: Agent-Token prüfen.  1 = gültig (und Nutzung fortgeschrieben), 0 = abgelehnt.
+      # Das Token wird NICHT geloggt, auch nicht teilweise.
+      - def:
+          name: verify
+          access: public
+          args: [[presented, string]]
+          return: i32
+          body:
+            - decl: [dot, i32, { call: [presented.index_of, "."] }]
+            - if: { condition: { le: [dot, 0] }, then: [{ return: 0 }] }
+            - decl: [tid, string, { call: [presented.substr, 0, dot] }]
+            - decl: [sec, string, { call: [presented.substr, { +: [dot, 1] }] }]
+            - if: { condition: { eq: [sec.len, 0] }, then: [{ return: 0 }] }
+            - if: { condition: { eq: [{ call: [<.tokens.has, tid] }, 0] }, then: [{ return: 0 }] }
+            - decl: [rec, AgentToken, { call: [<.tokens.get_copy, tid] }]
+            - if: { condition: { neq: [rec.revoked, 0] }, then: [{ return: 0 }] }
+            - decl: [want, string, { call: [hash.sha256, sec] }]
+            - if: { condition: { neq: [{ call: [hash.const_time_eq, want, rec.secret_hash] }, 1] }, then: [{ return: 0 }] }
+            - set: [rec.last_used_ms, { call: [time.now] }]
+            - set: [rec.use_count, { +: [rec.use_count, 1] }]
+            - call: [<.tokens.set, tid, rec]
+            - return: 1
+
+      - def:
+          name: revoke
+          access: public
+          args: [[token_id, string]]
+          return: i32
+          body:
+            - if: { condition: { eq: [{ call: [<.tokens.has, token_id] }, 0] }, then: [{ return: 0 }] }
+            - decl: [rec, AgentToken, { call: [<.tokens.get_copy, token_id] }]
+            - set: [rec.revoked, 1]
+            - call: [<.tokens.set, token_id, rec]
+            - return: 1
+
+      # snapshot: UI-Sicht OHNE Geheimnis und OHNE Hash.
+      - def:
+          name: snapshot
+          access: public
+          return: AgentTokenList
+          body:
+            - decl: [lst, AgentTokenList]
+            - decl: [tit, iterator<string>, { call: [<.tokens.iter] }]
+            - while:
+                condition: { gt: [{ call: [tit.has_next] }, 0] }
+                body:
+                  - decl: [tky, string, { call: [tit.next] }]
+                  - decl: [rec, AgentToken, { call: [<.tokens.get_copy, tky] }]
+                  - decl: [row, AgentTokenInfo]
+                  - set: [row.token_id, rec.token_id]
+                  - set: [row.label, rec.label]
+                  - set: [row.created_ms, rec.created_ms]
+                  - set: [row.last_used_ms, rec.last_used_ms]
+                  - set: [row.use_count, rec.use_count]
+                  - set: [row.revoked, rec.revoked]
+                  - call: [lst.tokens.push, row]
+            - return: lst

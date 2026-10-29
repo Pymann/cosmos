@@ -1,0 +1,37 @@
+# API-Tokens fuer Maschinen (REST, CI, museum) — doc/spec/111 §111.7.
+#
+# Warum nicht das Sitzungs-Token: eine neue Anmeldung macht aeltere Sitzungen
+# ungueltig (eine Sitzung je Konto, doc/architecture.md §7.1), und sie laeuft
+# nach 24 h ab.  Ein Skript, das sich anmeldet, wuerfe also den Browser des
+# Nutzers hinaus.  Ein API-Token ist langlebig, einzeln widerrufbar und lebt
+# neben den Sitzungen.  Gespeichert wird nur sha256(Geheimnis) — wie bei den
+# Agenten-Tokens (§AP1.9).
+#
+# Static-Check (aiml spec/49 §14): 3 models.
+
+- model:
+    name: ApiToken
+    fields:
+      - [token_id,     string]
+      - [email,        string]
+      - [label,        string]
+      - [created_ms,   i64]
+      - [last_used_ms, i64]
+      - [revoked,      i32]
+
+# Die Gruppen eines Kontos, wie die Identitaetsquelle sie bei der Anmeldung
+# meldet (LDAP-Attribut, SAML-Attribut).  Lokale Konten haben keine.
+- model:
+    name: UserGroups
+    fields:
+      - [email,      string]
+      - [source,     string]   # "local" | "ldap" | "saml"
+      - [groups,     list<string>]
+      - [updated_ms, i64]
+
+- model:
+    name: ApiTokenList
+    fields:
+      - [success, i32]
+      - [message, string]
+      - [tokens,  list<ApiToken>]

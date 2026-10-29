@@ -1,0 +1,14 @@
+# Cosmos job record: controller-side persisted state of one durable job.
+
+- model:
+    name: JobRecord
+    fields:
+      - [job_id,      string]
+      - [command,     string]
+      - [state,       i32]
+      - [agent_id,    string]
+      - [pid,         i64]
+      - [exit_code,   i32]
+      - [log,         string]
+      - [disconnects, i32]
+      - [updated_ms,  i64]

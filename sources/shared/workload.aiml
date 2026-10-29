@@ -1,0 +1,17 @@
+# Cosmos workload model.
+
+- model:
+    name: Workload
+    fields:
+      - [workload_id,        string]
+      - [name,               string]
+      - [namespace,          string]
+      - [kind,               string]
+      - [status,             string]
+      - [required_label,     string]
+      - [desired_replicas,   i32]
+      - [ready_replicas,     i32]
+      - [cpu_request,        i32]
+      - [memory_request,     i32]
+      - [assigned_node_ids,  list<string>]
+      - [image_ref,          string]

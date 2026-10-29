@@ -1,0 +1,121 @@
+# Ein GLOBAL gehaltener ptr<Model> wird an einen ref<Model>-Parameter
+# uebergeben — und der Aufrufer liest danach weiter.
+#
+# Genau die Form, in der der WASM-Client abgestuerzt ist (2026-10-14):
+#   AgentsScreen.apply_agents(lst: ptr<AgentList>)
+#     -> LiveTable.agents(lst: ref<AgentList>, ...)   <- Absturz HIER
+#     -> danach liest apply_agents weiter: lst.agents.len
+#
+# spec/61 §8: ptr<> uebergeben VERSCHIEBT den Besitz, ref<> leiht nur.  Wird ein
+# ptr an einen ref-Parameter gereicht, darf daraus kein Move werden — sonst ist
+# der Aufrufer-Zeiger danach tot.  Nativ faellt das still durch; WASM prueft.
+# Expected exit code: 0
+
+- model:
+    name: ProbeRow
+    fields:
+      - [name,         string]
+      - [last_seen_ms, i64]
+
+- model:
+    name: ProbeList
+    fields:
+      - [rows, list<ProbeRow>]
+
+- decl: [g_probe_list, ptr<ProbeList>, null]
+- decl: [g_probe_screen, ptr<ProbeScreen>, null]
+
+- def:
+    name: expect
+    args: [[what, string], [cond, i32]]
+    return: i32
+    body:
+      - if:
+          condition: { eq: [cond, 1] }
+          then: [{ call: [log.info, "  ok   ${what}"] }, { return: 0 }]
+      - call: [log.info, "  FAIL ${what}"]
+      - return: 1
+
+# So fuellt der Push-Handler das Global: frisch anlegen, fuellen, zuweisen.
+- def:
+    name: fill_global
+    args: [[count, i32]]
+    return: i32
+    body:
+      - decl: [fresh, ptr<ProbeList>, { new: ProbeList }]
+      - decl: [fix, i32, 0]
+      - while:
+          condition: { lt: [fix, count] }
+          body:
+            - decl: [row, ProbeRow]
+            - set: [row.name, "agent-${fix}"]
+            - set: [row.last_seen_ms, 1760000000000]
+            - call: [fresh.rows.push, row]
+            - set: [fix, { +: [fix, 1] }]
+      - set: [g_probe_list, fresh]
+      - return: 1
+
+# Die Form des Bildschirms: eine METHODE nimmt den ptr entgegen.  Genau so
+# steht es im Client — und genau diese Form hat der Compiler durchgelassen,
+# waehrend er dieselbe freie Funktion ablehnt.
+- class:
+    name: ProbeScreen
+    methods:
+      - def:
+          name: render
+          access: public
+          static_off: ["str_cmp"]
+          args: [[lst, ref<ProbeList>], [now_ms, i64], [runs, list<i32>]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [out, string, ""]
+            - if: { condition: { eq: [lst.rows.len, 0] }, then: [{ return: "(leer)" }] }
+            - decl: [rix, i32, 0]
+            - while:
+                condition: { lt: [rix, lst.rows.len] }
+                body:
+                  - decl: [row, ProbeRow, { at: [lst.rows, rix] }]
+                  - call: [runs.push, out.len]
+                  - set: [out, "${out}${row.name} "]
+                  - set: [rix, { +: [rix, 1] }]
+            - return: out
+      - def:
+          name: apply_like_screen
+          access: public
+          args: [[lst, ref<ProbeList>]]
+          return: i32
+          body:
+            - decl: [runs, list<i32>]
+            - decl: [txt, string, { call: [<.render, lst, 1760000000000, runs] }]
+            - decl: [seen, i32, lst.rows.len]
+            - if: { condition: { eq: [txt.len, 0] }, then: [{ return: -2 }] }
+            - return: seen
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      - set: [g_probe_screen, { new: ProbeScreen }]
+
+      - call: [fill_global, 3]
+      - set: [fails, { +: [fails, { call: [expect, "ptr an ref: Tabelle gelesen", { eq: [{ call: [g_probe_screen.apply_like_screen, g_probe_list] }, 3] }] }] }]
+      # Zweimal nacheinander: ein Move waere beim zweiten Mal toedlich.
+      - set: [fails, { +: [fails, { call: [expect, "zweiter Aufruf mit demselben Global", { eq: [{ call: [g_probe_screen.apply_like_screen, g_probe_list] }, 3] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Global danach noch lesbar", { eq: [g_probe_list.rows.len, 3] }] }] }]
+
+      # Wie beim Bildschirmwechsel: neuer Schnappschuss, erneut anzeigen.
+      - decl: [round, i32, 0]
+      - while:
+          condition: { lt: [round, 8] }
+          body:
+            - call: [fill_global, { +: [round, 1] }]
+            - set: [fails, { +: [fails, { call: [expect, "Runde ${round}", { eq: [{ call: [g_probe_screen.apply_like_screen, g_probe_list] }, { +: [round, 1] }] }] }] }]
+            - set: [round, { +: [round, 1] }]
+
+      - if:
+          condition: { eq: [fails, 0] }
+          then: [{ call: [log.info, "test_ptr_into_ref_param PASS"] }, { return: 0 }]
+      - call: [log.info, "test_ptr_into_ref_param FAIL (${fails})"]
+      - return: 1

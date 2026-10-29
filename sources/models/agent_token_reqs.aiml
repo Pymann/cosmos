@@ -1,0 +1,23 @@
+# AP1.9 (doc/spec/90): Anfragen rund um Enrollment-Tokens.
+# AgentTokenNew.secret wird GENAU EINMAL ausgeliefert (beim Erzeugen) und ist
+# danach serverseitig nicht mehr rekonstruierbar.
+
+- model:
+    name: AgentTokenReq
+    fields:
+      - [token, string]    # Nutzer-Session-Token
+      - [label, string]    # Bezeichnung, z.B. "builder-1"
+
+- model:
+    name: AgentTokenNew
+    fields:
+      - [accepted, i32]
+      - [reason,   string]
+      - [token_id, string]
+      - [secret,   string]   # vollständiges Agent-Token "<token_id>.<secret>"
+
+- model:
+    name: AgentTokenRevoke
+    fields:
+      - [token,    string]
+      - [token_id, string]

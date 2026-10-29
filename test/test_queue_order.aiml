@@ -1,0 +1,114 @@
+# Abnahme doc/spec/101 §101.9: die Warteschlange hat eine ORDNUNG.
+#
+# Geprueft wird ohne Netz und ohne Agenten, was der Server anbietet:
+#   1. hoeherer Vorrang zuerst (F101-29),
+#   2. bei gleichem Vorrang der AELTERE Lauf zuerst — die Regel, die
+#      Verhungern verhindert,
+#   3. der Vorrang des LAUFS zaehlt, nicht der des Jobs von jetzt (F101-30),
+#   4. ein Job ohne Eintrag hat 0 und braucht keinen Datensatz (F101-32).
+# Expected exit code: 0
+
+- import: "sources/server/cluster_bootstrap.aiml"
+
+- def:
+    name: expect
+    args: [[what, string], [cond, i32]]
+    return: i32
+    body:
+      - if:
+          condition: { eq: [cond, 1] }
+          then: [{ call: [log.info, "  ok   ${what}"] }, { return: 0 }]
+      - call: [log.info, "  FAIL ${what}"]
+      - return: 1
+
+- def:
+    name: expect_str
+    static_off: ["str_cmp"]
+    args: [[what, string], [got, string], [want, string]]
+    return: i32
+    body:
+      - if:
+          condition: { eq: [got, want] }
+          then: [{ call: [log.info, "  ok   ${what}"] }, { return: 0 }]
+      - call: [log.info, "  FAIL ${what}: '${got}' statt '${want}'"]
+      - return: 1
+
+# Ein Lauf mit EINER offenen Stufe, die jeder nehmen darf.
+- def:
+    name: add_run
+    static_off: ["str_cmp"]
+    args: [[boot, ref<ClusterBootstrap>], [run_id, string], [started_ms, i64]]
+    return: i32
+    body:
+      - decl: [run, PipelineRun]
+      - set: [run.run_id, run_id]
+      - set: [run.status, "queued"]
+      - set: [run.started_ms, started_ms]
+      - decl: [stg, PipelineStage]
+      - set: [stg.stage_id, "${run_id}-0"]
+      - set: [stg.name, "bauen"]
+      - set: [stg.status, "pending"]
+      - set: [stg.command, "echo ${run_id}"]
+      - call: [run.stages.push, stg]
+      - call: [boot.add_pipeline, run]
+      - return: 0
+
+- def:
+    name: nth_of
+    static_off: ["str_cmp"]
+    args: [[boot, ref<ClusterBootstrap>], [pos, i32]]
+    return: { type: string, lifetime: producer }
+    body:
+      - decl: [order, list<string>, { call: [boot.queue_order] }]
+      - if: { condition: { ge: [pos, order.len] }, then: [{ return: "" }] }
+      - return: { at: [order, pos] }
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      - decl: [boot, ptr<ClusterBootstrap>, { new: ClusterBootstrap }]
+      - call: [boot.init]
+
+      # Drei Laeufe: alt, mittel, neu — alle ohne Vorrang.
+      - call: [add_run, boot, "lauf-alt", 1000]
+      - call: [add_run, boot, "lauf-mittel", 2000]
+      - call: [add_run, boot, "lauf-neu", 3000]
+
+      - set: [fails, { +: [fails, { call: [expect_str, "ohne Vorrang zuerst der aelteste", { call: [nth_of, boot, 0] }, "lauf-alt"] }] }]
+      - set: [fails, { +: [fails, { call: [expect_str, "dann der naechstaeltere", { call: [nth_of, boot, 1] }, "lauf-mittel"] }] }]
+      - set: [fails, { +: [fails, { call: [expect_str, "dann der juengste", { call: [nth_of, boot, 2] }, "lauf-neu"] }] }]
+
+      # Der juengste bekommt Vorrang — und ueberholt beide.
+      - call: [boot.jobcfg.freeze_run_priority, "lauf-neu", 5]
+      - set: [fails, { +: [fails, { call: [expect_str, "hoeherer Vorrang zuerst", { call: [nth_of, boot, 0] }, "lauf-neu"] }] }]
+      - set: [fails, { +: [fails, { call: [expect_str, "darunter bleibt das Alter die Regel", { call: [nth_of, boot, 1] }, "lauf-alt"] }] }]
+
+      # Ein NEGATIVER Vorrang schiebt nach hinten.
+      - call: [boot.jobcfg.freeze_run_priority, "lauf-alt", -3]
+      - set: [fails, { +: [fails, { call: [expect_str, "negativer Vorrang geht zuletzt", { call: [nth_of, boot, 2] }, "lauf-alt"] }] }]
+
+      # Und die Zuteilung FOLGT der Ordnung: der erste Agent bekommt den Lauf
+      # mit Vorrang, nicht den, der zufaellig frueh im Speicher steht.
+      - decl: [who, ClaimWho]
+      - set: [who.agent_id, "agent-1"]
+      - decl: [erste, StepAssignment, { call: [boot.claim_for, who, 1760000000000] }]
+      - set: [fails, { +: [fails, { call: [expect, "ein Schritt wird zugeteilt", { eq: [erste.found, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect_str, "und zwar aus dem Lauf mit Vorrang", erste.run_id, "lauf-neu"] }] }]
+      - decl: [zweite, StepAssignment, { call: [boot.claim_for, who, 1760000001000] }]
+      - set: [fails, { +: [fails, { call: [expect_str, "der naechste aus dem aelteren ohne Vorrang", zweite.run_id, "lauf-mittel"] }] }]
+
+      # F101-32: ein Job ohne Eintrag hat 0 — ohne Datensatz.
+      - set: [fails, { +: [fails, { call: [expect, "ein Job ohne Eintrag hat Vorrang 0", { eq: [{ call: [boot.jobcfg.priority_of_job, "gibtesnicht"] }, 0] }] }] }]
+      - call: [boot.jobcfg.set_job_priority, "job-eins", 4]
+      - set: [fails, { +: [fails, { call: [expect, "gesetzt wird gelesen", { eq: [{ call: [boot.jobcfg.priority_of_job, "job-eins"] }, 4] }] }] }]
+      - call: [boot.jobcfg.set_job_priority, "job-eins", 0]
+      - set: [fails, { +: [fails, { call: [expect, "auf 0 gesetzt heisst: kein Datensatz", { eq: [{ call: [boot.jobcfg.has_policy, "job-eins"] }, 0] }] }] }]
+
+      - if:
+          condition: { neq: [fails, 0] }
+          then: [{ call: [log.info, "test_queue_order FAIL (${fails})"] }, { return: 1 }]
+      - call: [log.info, "test_queue_order PASS"]
+      - return: 0

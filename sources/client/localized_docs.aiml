@@ -1,0 +1,27 @@
+# localized_docs.aiml — Whole-file localization ("vocab Ganzdatei-Mechanik").
+#
+# Lange Texte (Hilfe, Tutorials, Lore) leben als echte Text-Assets (.txt/.md),
+# je Sprache eine Datei.  Die pro-Sprache Asset-Stems liegen in vocab.json:
+#
+#   "help_rules_en": ["help_rules_en", "help_rules_de"]
+#            ^Key = englischer Stem      ^[en, de, ...]  (Index = Sprache)
+#
+# localized_doc(en_stem):
+#   - vocab.lookup(en_stem) wählt den Stem der AKTUELLEN Sprache.
+#       Sprache 0 (en): Fast-Path → gibt den Key (= en_stem) zurück.
+#       Sprache 1 (de): gibt vocab-Array[1] (= de_stem) zurück.
+#   - io.read_asset(stem) streamt den Dateiinhalt (data-Kind, spec/44_7:
+#       .txt/.md sind seit dem Asset-Scanner-Update registriert).
+#
+# Vorteil: Übersetzer pflegen ganze Prosa-Dateien statt vieler Einzel-Strings;
+# neue Sprache = neue Datei + ein vocab-Array-Slot.  Kein "|"-Gefummel.
+#
+# Static-Check (spec/49 §14): 0 model/class — reine Funktion.
+
+- def:
+    name: localized_doc
+    args: [[en_stem, string]]
+    return: string
+    body:
+      - decl: [stem, string, { call: [vocab.lookup, en_stem] }]
+      - return: { call: [io.read_asset, stem] }

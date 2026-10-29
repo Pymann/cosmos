@@ -1,0 +1,333 @@
+# Die raeumliche Pipeline als RECHNUNG (doc/spec/107 §107.1b) — ohne Fenster.
+#
+# Zwei Dinge koennen hier still kaputtgehen: die Anordnung (welcher Koerper
+# wohin gehoert) und der Auswahl-Strahl.  Beide sind reine Mathematik, also
+# gehoeren sie in einen Test und nicht ins Auge des Betrachters.
+# Expected exit code: 0
+
+- import: "sources/client/gfx/pipe3d.aiml"
+
+- def:
+    name: expect
+    args: [[what, string], [cond, i32]]
+    return: i32
+    body:
+      - if:
+          condition: { eq: [cond, 1] }
+          then: [{ call: [log.info, "  ok   ${what}"] }, { return: 0 }]
+      - call: [log.info, "  FAIL ${what}"]
+      - return: 1
+
+# Eine Schicht, wie die Laufzeit sie meldet (doc/spec/107 §107.1c).
+- def:
+    name: make_layer
+    args: [[stage, string], [bytes, i64], [reuse, i32], [stored, i32]]
+    return: { type: StageLayer, lifetime: producer }
+    body:
+      - decl: [lay, StageLayer]
+      - set: [lay.stage, stage]
+      - set: [lay.bindings, "arch=x86_64"]
+      - set: [lay.bytes, bytes]
+      - set: [lay.reuse, reuse]
+      - set: [lay.stored, stored]
+      - return: lay
+
+- def:
+    name: make_stage
+    args: [[stage_id, string], [name, string], [bindings, string], [status, string]]
+    return: { type: PipelineStage, lifetime: producer }
+    body:
+      - decl: [stg, PipelineStage]
+      - set: [stg.stage_id, stage_id]
+      - set: [stg.name, name]
+      - set: [stg.bindings, bindings]
+      - set: [stg.status, status]
+      - return: stg
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      - decl: [scene, ptr<PipeScene>, { new: PipeScene }]
+
+      # ── Anordnung: zwei Lanes, drei Stufen ──────────────────────────────
+      - decl: [run, PipelineRun]
+      - call: [run.stages.push, { call: [make_stage, "a0", "checkout [arch=x86_64]", "arch=x86_64", "done"] }]
+      - call: [run.stages.push, { call: [make_stage, "a1", "build [arch=x86_64]", "arch=x86_64", "running"] }]
+      - call: [run.stages.push, { call: [make_stage, "b0", "checkout [arch=arm64]", "arch=arm64", "done"] }]
+      - call: [run.stages.push, { call: [make_stage, "b1", "build [arch=arm64]", "arch=arm64", "failed"] }]
+      - decl: [items, list<SceneItem>, { call: [scene.of_run, run, "a1"] }]
+      # 4 Kugeln + 2 Verbindungsrohre + 2 EINLAUFSTUECKE (je Lane eines).
+      # Das Einlaufstueck gibt auch der ERSTEN Stufe einen Rand — ohne ihn
+      # haette eine Flagge davor nichts, woran sie haengt (doc/spec/107
+      # §107.1d; ein Lauf haelt am Rand, aiml F62-53).
+      - set: [fails, { +: [fails, { call: [expect, "vier Kugeln und vier Rohre (${items.len})", { eq: [items.len, 8] }] }] }]
+
+      - decl: [balls, i32, 0]
+      - decl: [pipes, i32, 0]
+      - decl: [flowing, i32, 0]
+      - decl: [picked_r, f32, 0.0]
+      - decl: [iix, i32, 0]
+      - while:
+          condition: { lt: [iix, items.len] }
+          body:
+            - decl: [one, SceneItem, { at: [items, iix] }]
+            - set: [iix, { +: [iix, 1] }]
+            - if: { condition: { eq: [one.kind, 0] }, then: [{ set: [balls, { +: [balls, 1] }] }] }
+            - if: { condition: { eq: [one.kind, 1] }, then: [{ set: [pipes, { +: [pipes, 1] }] }] }
+            - if: { condition: { eq: [one.kind, 5] }, then: [{ set: [flowing, { +: [flowing, 1] }] }, { set: [pipes, { +: [pipes, 1] }] }] }
+            - if: { condition: { eq: [one.tag, "a1"] }, then: [{ set: [picked_r, one.radius] }] }
+      - set: [fails, { +: [fails, { call: [expect, "vier Kugeln", { eq: [balls, 4] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "vier Rohre: zwei Verbindungen, zwei Einlaeufe", { eq: [pipes, 4] }] }] }]
+      # F107-14: Bewegung heisst GENAU eine Sache — hier laeuft eine Stufe.
+      - set: [fails, { +: [fails, { call: [expect, "genau ein Rohr flieszt", { eq: [flowing, 1] }] }] }]
+      # Die Auswahl ist groesser (auch schraeg von der Seite lesbar).
+      - set: [fails, { +: [fails, { call: [expect, "die gewaehlte Kugel ist groesser", { gt: [picked_r, 0.7] }] }] }]
+
+      # Lanes liegen hintereinander, Stufen nebeneinander.
+      - decl: [first_ball, SceneItem]
+      - decl: [lane2_ball, SceneItem]
+      - decl: [jix, i32, 0]
+      - while:
+          condition: { lt: [jix, items.len] }
+          body:
+            - decl: [one, SceneItem, { at: [items, jix] }]
+            - set: [jix, { +: [jix, 1] }]
+            - if: { condition: { eq: [one.tag, "a0"] }, then: [{ set: [first_ball, one] }] }
+            - if: { condition: { eq: [one.tag, "b0"] }, then: [{ set: [lane2_ball, one] }] }
+      - set: [fails, { +: [fails, { call: [expect, "die erste Stufe sitzt im Ursprung", { lt: [first_ball.pos_x, 0.001] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "die zweite Lane liegt dahinter", { lt: [lane2_ball.pos_z, -1.0] }] }] }]
+
+      # ── Der Auswahl-Strahl ──────────────────────────────────────────────
+      # Kamera auf die erste Kugel ausgerichtet: die Bildmitte MUSS sie
+      # treffen, der Rand nicht.  Ohne diesen Test faellt eine vertauschte
+      # Achse erst dem Nutzer auf, und zwar als „Klick waehlt das Falsche".
+      - decl: [solo, list<SceneItem>]
+      - decl: [ball, SceneItem]
+      - set: [ball.kind, 0]
+      - set: [ball.radius, 0.6]
+      - set: [ball.tag, "mitte"]
+      - call: [solo.push, ball]
+      - decl: [space, ptr<Pipe3D>, { new: Pipe3D }]
+      - call: [space.fit, solo]
+      - call: [space.set_view, 30.0, 20.0, 10.0]
+      - decl: [centre_hit, string, { call: [space.pick, solo, 0.0, 0.0, 0.8] }]
+      - set: [fails, { +: [fails, { call: [expect, "die Bildmitte trifft die Kugel", { eq: [centre_hit, "mitte"] }] }] }]
+      - decl: [edge_hit, string, { call: [space.pick, solo, 0.95, -0.95, 0.8] }]
+      - set: [fails, { +: [fails, { call: [expect, "die Ecke trifft nichts", { eq: [edge_hit.len, 0] }] }] }]
+      # Spiegelung faellt sonst nicht auf: die Bildmitte trifft auch bei
+      # verdrehter Kamerabasis.  Also zwei Kugeln LINKS und RECHTS — wer links
+      # klickt, muss links treffen (gefunden 2026-10-16, beide Achsen waren
+      # vertauscht).
+      - decl: [sides, list<SceneItem>]
+      - decl: [left_ball, SceneItem]
+      - set: [left_ball.kind, 0]
+      - set: [left_ball.radius, 0.6]
+      - set: [left_ball.tag, "links"]
+      - set: [left_ball.pos_x, -2.0]
+      - decl: [right_ball, SceneItem]
+      - set: [right_ball.kind, 0]
+      - set: [right_ball.radius, 0.6]
+      - set: [right_ball.tag, "rechts"]
+      - set: [right_ball.pos_x, 2.0]
+      - call: [sides.push, left_ball]
+      - call: [sides.push, right_ball]
+      - decl: [side_space, ptr<Pipe3D>, { new: Pipe3D }]
+      # Kamera auf +Z, Blick auf den Ursprung: +X ist dann im Bild RECHTS.
+      - call: [side_space.set_view, 0.0, 0.0, 12.0]
+      - decl: [hit_right, string, { call: [side_space.pick, sides, 0.45, 0.0, 1.0] }]
+      - set: [fails, { +: [fails, { call: [expect, "rechts im Bild trifft rechts (${hit_right})", { eq: [hit_right, "rechts"] }] }] }]
+      - decl: [hit_left, string, { call: [side_space.pick, sides, -0.45, 0.0, 1.0] }]
+      - set: [fails, { +: [fails, { call: [expect, "links im Bild trifft links (${hit_left})", { eq: [hit_left, "links"] }] }] }]
+      # Und die Projektion muss dasselbe sagen wie der Strahl.
+      - decl: [proj_right, vec3, { call: [side_space.project, 2.0, 0.0, 0.0, 1.0] }]
+      - set: [fails, { +: [fails, { call: [expect, "die Projektion legt rechts nach rechts (${proj_right.x})", { gt: [proj_right.x, 0.1] }] }] }]
+      - decl: [proj_high, vec3, { call: [side_space.project, 0.0, 2.0, 0.0, 1.0] }]
+      - set: [fails, { +: [fails, { call: [expect, "und oben nach oben (${proj_high.y})", { gt: [proj_high.y, 0.1] }] }] }]
+
+      # Und die NAECHSTE gewinnt: zwei Kugeln hintereinander, die vordere zaehlt.
+      - decl: [pair, list<SceneItem>]
+      - decl: [near_ball, SceneItem]
+      - set: [near_ball.kind, 0]
+      - set: [near_ball.radius, 0.6]
+      - set: [near_ball.tag, "vorn"]
+      # Beide auf der Blickachse (x=0): sonst schauen wir an ihnen vorbei,
+      # und der Test pruefte nur, dass ein Fehlschuss nichts trifft.
+      - set: [near_ball.pos_z, 5.0]
+      - decl: [far_ball, SceneItem]
+      - set: [far_ball.kind, 0]
+      - set: [far_ball.radius, 0.6]
+      - set: [far_ball.tag, "hinten"]
+      - set: [far_ball.pos_z, -5.0]
+      - call: [pair.push, far_ball]
+      - call: [pair.push, near_ball]
+      - decl: [pair_space, ptr<Pipe3D>, { new: Pipe3D }]
+      - call: [pair_space.set_view, 0.0, 0.0, 14.0]
+      - decl: [pair_hit, string, { call: [pair_space.pick, pair, 0.0, 0.0, 0.8] }]
+      - set: [fails, { +: [fails, { call: [expect, "die naechste Kugel gewinnt (${pair_hit})", { eq: [pair_hit, "vorn"] }] }] }]
+
+      # ── Das NETZ raeumlich (doc/spec/107 §107.5a) ───────────────────────
+      # Hier kann genau dasselbe still kaputtgehen: ob ueberhaupt Kanten
+      # entstehen, und ob sie das richtige verbinden.  Ein Bild, in dem die
+      # Rohre ins Leere zeigen, sieht im Fenster voellig gesund aus.
+      - decl: [cview, ClusterView]
+      - set: [cview.srv_cpu_permille, 120]
+      - set: [cview.srv_rss_kb, 40960]
+      - decl: [kv_full, KvStoreInfo]
+      - set: [kv_full.name, "jobs"]
+      - set: [kv_full.entries, 4200]
+      - decl: [kv_empty, KvStoreInfo]
+      - set: [kv_empty.name, "runs"]
+      - set: [kv_empty.entries, 0]
+      - call: [cview.live.stores.push, kv_full]
+      - call: [cview.live.stores.push, kv_empty]
+
+      - decl: [crew, AgentList]
+      - decl: [ag_on, AgentInfo]
+      - set: [ag_on.agent_id, "builder-1"]
+      - set: [ag_on.online, 1]
+      - decl: [ag_off, AgentInfo]
+      - set: [ag_off.agent_id, "builder-2"]
+      - set: [ag_off.online, 0]
+      - call: [crew.agents.push, ag_on]
+      - call: [crew.agents.push, ag_off]
+
+      - decl: [net, list<SceneItem>, { call: [scene.of_cluster, cview, crew] }]
+      - decl: [n_ground, i32, 0]
+      - decl: [n_cube, i32, 0]
+      - decl: [n_drum, i32, 0]
+      - decl: [n_tube, i32, 0]
+      - decl: [n_named, i32, 0]
+      - decl: [ctl_col, i32, 0]
+      - decl: [off_col, i32, 0]
+      - decl: [full_h, f32, 0.0]
+      - decl: [empty_h, f32, 0.0]
+      - decl: [stands_on, i32, 0]
+      - decl: [reach_far, i32, 0]
+      - decl: [nix, i32, 0]
+      - while:
+          condition: { lt: [nix, net.len] }
+          body:
+            - decl: [item, SceneItem, { at: [net, nix] }]
+            - set: [nix, { +: [nix, 1] }]
+            - if: { condition: { eq: [item.kind, 4] }, then: [{ set: [n_ground, { +: [n_ground, 1] }] }] }
+            - if: { condition: { eq: [item.kind, 3] }, then: [{ set: [n_cube, { +: [n_cube, 1] }] }] }
+            - if: { condition: { eq: [item.kind, 1] }, then: [{ set: [n_tube, { +: [n_tube, 1] }] }] }
+            - if: { condition: { gt: [item.label.len, 0] }, then: [{ set: [n_named, { +: [n_named, 1] }] }] }
+            - if: { condition: { eq: [item.tag, "controller"] }, then: [{ set: [ctl_col, item.color] }] }
+            - if: { condition: { eq: [item.tag, "builder-2"] }, then: [{ set: [off_col, item.color] }] }
+            - if:
+                condition: { eq: [item.kind, 2] }
+                then:
+                  - set: [n_drum, { +: [n_drum, 1] }]
+                  # Die Trommel STEHT: Unterkante auf dem Boden, nicht darueber.
+                  - decl: [foot, f32, { -: [item.pos_y, { '*': [item.axis_y, 0.5] }] }]
+                  - if: { condition: { '&&': [{ gt: [foot, -2.95] }, { lt: [foot, -2.75] }] }, then: [{ set: [stands_on, { +: [stands_on, 1] }] }] }
+                  - if: { condition: { eq: [item.label, "jobs"] }, then: [{ set: [full_h, item.axis_y] }] }
+                  - if: { condition: { eq: [item.label, "runs"] }, then: [{ set: [empty_h, item.axis_y] }] }
+            # Eine Kante verbindet genau dann, wenn ihre MITTE der Mittelpunkt
+            # der Strecke Controller→Koerper ist (der Controller steht bei z=0,
+            # die Achse ist der volle Vektor).  Geprueft wird diese Beziehung,
+            # NICHT ein Abstand: ein fester Zahlenwert waere nur das Layout von
+            # heute, und genau daran ist der Test beim Zusammenruecken des
+            # Bildes gescheitert, ohne dass etwas kaputt war.
+            - if:
+                condition: { eq: [item.kind, 1] }
+                then:
+                  - decl: [slack, f32, { -: [item.pos_z, { '*': [item.axis_z, 0.5] }] }]
+                  - if: { condition: { lt: [slack, 0.0] }, then: [{ set: [slack, { '*': [slack, -1.0] }] }] }
+                  - decl: [span_z, f32, item.axis_z]
+                  - if: { condition: { lt: [span_z, 0.0] }, then: [{ set: [span_z, { '*': [span_z, -1.0] }] }] }
+                  - if:
+                      condition: { '&&': [{ lt: [slack, 0.01] }, { gt: [span_z, 1.0] }] }
+                      then: [{ set: [reach_far, { +: [reach_far, 1] }] }]
+
+      - set: [fails, { +: [fails, { call: [expect, "ein Boden (${n_ground})", { eq: [n_ground, 1] }] }] }]
+      # Controller + zwei Agenten
+      - set: [fails, { +: [fails, { call: [expect, "drei Quader: Controller und zwei Agenten (${n_cube})", { eq: [n_cube, 3] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "zwei Trommeln (${n_drum})", { eq: [n_drum, 2] }] }] }]
+      # Je Speicher und je Agent GENAU eine Kante — nicht weniger (unsichtbare
+      # Zugehoerigkeit) und nicht mehr (erfundene).
+      - set: [fails, { +: [fails, { call: [expect, "vier Kanten, je eine pro Speicher und Agent (${n_tube})", { eq: [n_tube, 4] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "jede Kante sitzt mittig zwischen Controller und Koerper (${reach_far})", { eq: [reach_far, 4] }] }] }]
+      # Ohne Namen ist ein Quader im Raum anonym (F107-16).
+      - set: [fails, { +: [fails, { call: [expect, "alle fuenf Koerper tragen einen Namen (${n_named})", { eq: [n_named, 5] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "beide Trommeln stehen auf dem Boden (${stands_on})", { eq: [stands_on, 2] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "der volle Speicher ist hoeher (${full_h} > ${empty_h})", { gt: [full_h, empty_h] }] }] }]
+      # Farbe = Zustand (F107-13): ein abwesender Agent ist Blech.
+      - set: [fails, { +: [fails, { call: [expect, "der abwesende Agent ist stumpf", { eq: [off_col, 0x4A5260FF] }] }] }]
+      # Die Last des Controllers steht in SEINER Farbe (doc/spec/109).
+      - set: [fails, { +: [fails, { call: [expect, "ruhiger Controller ist blau", { eq: [ctl_col, 0x7FD1FFFF] }] }] }]
+      - set: [cview.srv_cpu_permille, 900]
+      - decl: [hot, list<SceneItem>, { call: [scene.of_cluster, cview, crew] }]
+      - decl: [hot_col, i32, 0]
+      - decl: [hix, i32, 0]
+      - while:
+          condition: { lt: [hix, hot.len] }
+          body:
+            - decl: [hone, SceneItem, { at: [hot, hix] }]
+            - set: [hix, { +: [hix, 1] }]
+            - if: { condition: { eq: [hone.tag, "controller"] }, then: [{ set: [hot_col, hone.color] }] }
+      - set: [fails, { +: [fails, { call: [expect, "ein Controller unter Last ist rot", { eq: [hot_col, 0xE06A5AFF] }] }] }]
+
+      # Leerer Cluster: der Controller bleibt, die Kanten verschwinden.  Ohne
+      # diesen Fall rechnete die Mittenverteilung mit -1 Koerpern.
+      - decl: [bare, ClusterView]
+      - decl: [nobody, AgentList]
+      - decl: [alone, list<SceneItem>, { call: [scene.of_cluster, bare, nobody] }]
+      - set: [fails, { +: [fails, { call: [expect, "ohne Speicher und Agenten: nur Boden und Controller (${alone.len})", { eq: [alone.len, 2] }] }] }]
+
+      # ── Die Schichten, die ein Lauf hinterlaesst (§107.1c) ──────────────
+      - decl: [lrun, PipelineRun]
+      - call: [lrun.stages.push, { call: [make_stage, "s0", "apt [arch=x86_64]", "arch=x86_64", "done"] }]
+      - call: [lrun.stages.push, { call: [make_stage, "s1", "klonen [arch=x86_64]", "arch=x86_64", "done"] }]
+      - call: [lrun.stages.push, { call: [make_stage, "s2", "bauen [arch=x86_64]", "arch=x86_64", "running"] }]
+      - decl: [lays, list<StageLayer>]
+      - call: [lays.push, { call: [make_layer, "apt",    734003200, ReuseClass.resolved, 1] }]
+      - call: [lays.push, { call: [make_layer, "klonen", 131072000, ReuseClass.resolved, 0] }]
+      - call: [lays.push, { call: [make_layer, "bauen", 1546128470, ReuseClass.pure,     0] }]
+      - decl: [plates, list<SceneItem>]
+      - call: [scene.layers_of, plates, lrun, lays]
+      - set: [fails, { +: [fails, { call: [expect, "drei Schichten, drei Platten (${plates.len})", { eq: [plates.len, 3] }] }] }]
+      - decl: [apt_p, SceneItem, { at: [plates, 0] }]
+      - decl: [klon_p, SceneItem, { at: [plates, 1] }]
+      - decl: [bau_p, SceneItem, { at: [plates, 2] }]
+      # F107-31: liegt der Inhalt schon im Speicher, traegt die Platte Rillen
+      # (eigene Art, damit der Renderer keinen zweiten Schalter braucht).
+      - set: [fails, { +: [fails, { call: [expect, "die gespeicherte Schicht ist gerillt", { eq: [apt_p.kind, 7] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "die neue Schicht ist glatt", { eq: [klon_p.kind, 6] }] }] }]
+      # F107-30: die Leiter — 1,5 GB ist dicker als 125 MB ist dicker als nichts.
+      - set: [fails, { +: [fails, { call: [expect, "1,5 GB liegt dicker als 125 MB", { gt: [bau_p.axis_y, klon_p.axis_y] }] }] }]
+      # F107-30 sagt GROESZENORDNUNG, nicht Bytes: 125 MB und 700 MB liegen auf
+      # derselben Sprosse, und das ist Absicht — im Raum liest niemand Zahlen.
+      - set: [fails, { +: [fails, { call: [expect, "125 MB und 700 MB liegen auf derselben Sprosse", { eq: [apt_p.axis_y, klon_p.axis_y] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "eine leere Schicht ist die duennste Sprosse", { lt: [{ call: [scene.plate_thickness, 0] }, klon_p.axis_y] }] }] }]
+      # Der Stapel waechst nach UNTEN, unter der Kugel der eigenen Stufe.
+      - set: [fails, { +: [fails, { call: [expect, "jede Platte liegt unter ihrer Kugel", { '&&': [{ lt: [apt_p.pos_x, 0.01] }, { gt: [bau_p.pos_x, 5.0] }] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "alle Platten liegen unter dem Gitter", { '&&': [{ lt: [apt_p.pos_y, 0.0] }, { lt: [bau_p.pos_y, 0.0] }] }] }] }]
+      # Und die Beschriftung nennt die Groeszenordnung, nicht die Bytes.
+      - set: [fails, { +: [fails, { call: [expect, "die Bau-Schicht ist mit GB beschriftet (${bau_p.label})", { eq: [bau_p.label, "1 GB"] }] }] }]
+      # F107-32: eine `opaque`-Stufe liegt NEBEN dem Stapel.
+      - decl: [orun, PipelineRun]
+      - call: [orun.stages.push, { call: [make_stage, "o0", "datum [arch=x86_64]", "arch=x86_64", "done"] }]
+      - decl: [olays, list<StageLayer>]
+      - call: [olays.push, { call: [make_layer, "datum", 4096, ReuseClass.opaque, 0] }]
+      - decl: [oplates, list<SceneItem>]
+      - call: [scene.layers_of, oplates, orun, olays]
+      - decl: [opq_p, SceneItem, { at: [oplates, 0] }]
+      - set: [fails, { +: [fails, { call: [expect, "eine opaque-Schicht liegt versetzt", { gt: [opq_p.pos_z, 0.5] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und ist nicht als gespeichert gezeichnet", { eq: [opq_p.kind, 6] }] }] }]
+      # Ohne Schichtangaben entstehen keine Platten — ein Lauf, der noch nichts
+      # hinterlassen hat, soll nicht leere Teller zeigen.
+      - decl: [leer, list<StageLayer>]
+      - decl: [keine, list<SceneItem>]
+      - call: [scene.layers_of, keine, lrun, leer]
+      - set: [fails, { +: [fails, { call: [expect, "ohne Schichten keine Platten", { eq: [keine.len, 0] }] }] }]
+
+      - if:
+          condition: { neq: [fails, 0] }
+          then: [{ call: [log.info, "test_pipe_scene FAIL (${fails})"] }, { return: 1 }]
+      - call: [log.info, "test_pipe_scene PASS"]
+      - return: 0

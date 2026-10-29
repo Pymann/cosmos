@@ -1,0 +1,263 @@
+# Anmeldung ueber LDAP und SAML (doc/spec/111 §111.5, museum doc/ecosystem.md §6).
+#
+# Die Mechanik steckt in aiml (spec/67: `ldap.*`, `saml.*`); hier steht nur die
+# Politik: welche Quelle, welche DN, welche Attribute.  Alles kommt aus der
+# erklaerten Konfiguration (`config.ldap`, `config.saml`), Geheimnisse ueber
+# ihren Namen (F100-10).
+#
+#   LDAP  simple bind, entweder DN-Vorlage (`user_dn: "uid={user},…"`) oder
+#         suchen-dann-binden (`search_base` + `search_filter`, gesucht mit
+#         `bind_dn`/`bind_secret`).  Eingaben gehen IMMER durch
+#         ldap.escape_dn / ldap.escape_filter.
+#   SAML  SP-initiiert: saml_begin merkt sich die Anfrage-Kennung, saml_finish
+#         nimmt eine Antwort nur fuer eine offene Kennung an (einmal, ≤10 min).
+#
+# Beide enden in AuthService.login_external (Konto bei Bedarf anlegen,
+# Sitzung ausstellen) und melden die Gruppen an ApiTokenStore.set_groups —
+# von dort liest das Rollen-Gate (§111.3).
+#
+# Kein Static-Check-Zaehler: nur Gruppen-Methoden und zwei Handler.
+
+- import: "sources/models/sso_reqs.aiml"
+
+- groupmethods:
+    group: CosmosRuntime
+    instances:
+      - instance: auth
+        methods:
+          - def:
+              name: ldap_enabled
+              access: public
+              return: i32
+              body:
+                - decl: [cfg, CascConfig, { call: [<.casc.current] }]
+                - if: { condition: { gt: [cfg.ldap.url.len, 0] }, then: [{ return: 1 }] }
+                - return: 0
+
+          # ldap_groups: Gruppenwerte, dazu je DN-Wert sein erstes RDN ("cn=devs,…"
+          # → auch "devs"), damit `grant: { group: devs }` ohne DN geschrieben
+          # werden kann.
+          - def:
+              name: ldap_groups
+              args: [[raw, list<string>]]
+              return: { type: list<string>, lifetime: producer }
+              body:
+                - decl: [out, list<string>]
+                - decl: [gix, i32, 0]
+                - while:
+                    condition: { lt: [gix, raw.len] }
+                    body:
+                      - decl: [one, string, { call: [raw.get, gix] }]
+                      - call: [out.push, one]
+                      - decl: [eqp, i32, { call: [one.index_of, "="] }]
+                      - decl: [comma, i32, { call: [one.index_of, ","] }]
+                      - if:
+                          condition: { '&&': [{ gt: [eqp, 0] }, { gt: [comma, eqp] }] }
+                          then:
+                            - decl: [short, string, { call: [one.substr, { +: [eqp, 1] }, { -: [{ -: [comma, eqp] }, 1] }] }]
+                            - if: { condition: { eq: [{ call: [out.contains, short] }, 0] }, then: [{ call: [out.push, short] }] }
+                      - set: [gix, { +: [gix, 1] }]
+                - return: out
+
+          - def:
+              name: ldap_login
+              access: public
+              static_off: ["str_cmp"]
+              args: [[login, string], [password, string]]
+              return: { type: AuthResult, lifetime: producer }
+              body:
+                - decl: [out, AuthResult]
+                - decl: [cfg, CascConfig, { call: [<.casc.current] }]
+                - decl: [conn, ldap_handle, { call: [ldap.open, cfg.ldap.url] }]
+                - if: { condition: { eq: [conn, null] }, then: [{ set: [out.message, "LDAP: Adresse unbrauchbar"] }, { return: out }] }
+                - call: [conn.set_timeout, 5000]
+                - if:
+                    condition: { eq: [cfg.ldap.start_tls, 1] }
+                    then:
+                      - if:
+                          condition: { neq: [{ call: [conn.start_tls] }, 1] }
+                          then:
+                            - decl: [tls_err, string, { call: [conn.error] }]
+                            - set: [out.message, "LDAP: StartTLS gescheitert: ${tls_err}"]
+                            - call: [conn.close]
+                            - return: out
+                - decl: [user_dn, string, ""]
+                - if:
+                    condition: { gt: [cfg.ldap.search_base.len, 0] }
+                    then:
+                      - if:
+                          condition: { gt: [cfg.ldap.bind_dn.len, 0] }
+                          then:
+                            - decl: [svc_pw, string, { call: [<.casc.secret_value, cfg.ldap.bind_secret] }]
+                            - if:
+                                condition: { neq: [{ call: [conn.bind, cfg.ldap.bind_dn, svc_pw] }, 1] }
+                                then:
+                                  - decl: [svc_err, string, { call: [conn.error] }]
+                                  - call: [log.error, "[ldap] Dienstkonto ${cfg.ldap.bind_dn}: ${svc_err}"]
+                                  - set: [out.message, "LDAP: Dienstkonto abgewiesen"]
+                                  - call: [conn.close]
+                                  - return: out
+                      - decl: [flt, string, cfg.ldap.search_filter]
+                      - if: { condition: { eq: [flt.len, 0] }, then: [{ set: [flt, "(uid={user})"] }] }
+                      - set: [flt, { call: [flt.replace, "{user}", { call: [ldap.escape_filter, login] }] }]
+                      - decl: [dns, list<string>, { call: [conn.search_dns, cfg.ldap.search_base, flt] }]
+                      - if:
+                          condition: { neq: [dns.len, 1] }
+                          then: [{ set: [out.message, "unknown user"] }, { call: [conn.close] }, { return: out }]
+                      - set: [user_dn, { call: [dns.get, 0] }]
+                    else:
+                      - set: [user_dn, { call: [cfg.ldap.user_dn.replace, "{user}", { call: [ldap.escape_dn, login] }] }]
+                # Ein leeres Passwort weist der Baustein selbst ab (spec/67 §3.2:
+                # unauthenticated bind) — hier steht es trotzdem, weil es die
+                # Begruendung lesbar macht.
+                - if: { condition: { eq: [password.len, 0] }, then: [{ set: [out.message, "wrong password"] }, { call: [conn.close] }, { return: out }] }
+                - decl: [bound, i32, { call: [conn.bind, user_dn, password] }]
+                - if:
+                    condition: { neq: [bound, 1] }
+                    then:
+                      - set: [out.message, "wrong password"]
+                      - if:
+                          condition: { lt: [bound, 0] }
+                          then:
+                            - decl: [bind_err, string, { call: [conn.error] }]
+                            - call: [log.error, "[ldap] ${cfg.ldap.url}: ${bind_err}"]
+                            - set: [out.message, "LDAP nicht erreichbar"]
+                      - call: [conn.close]
+                      - return: out
+                - decl: [mail_attr, string, cfg.ldap.mail_attr]
+                - if: { condition: { eq: [mail_attr.len, 0] }, then: [{ set: [mail_attr, "mail"] }] }
+                - decl: [mails, list<string>, { call: [conn.attr_values, user_dn, mail_attr] }]
+                - decl: [eml, string, ""]
+                - if: { condition: { gt: [mails.len, 0] }, then: [{ set: [eml, { call: [mails.get, 0] }] }] }
+                - if: { condition: { '&&': [{ eq: [eml.len, 0] }, { ge: [{ call: [login.index_of, "@"] }, 0] }] }, then: [{ set: [eml, login] }] }
+                - decl: [grp_attr, string, cfg.ldap.group_attr]
+                - if: { condition: { eq: [grp_attr.len, 0] }, then: [{ set: [grp_attr, "memberOf"] }] }
+                - decl: [raw_groups, list<string>, { call: [conn.attr_values, user_dn, grp_attr] }]
+                - call: [conn.close]
+                - decl: [groups, list<string>, { call: [<.ldap_groups, raw_groups] }]
+                - set: [out, { call: [<.login_external, eml, login] }]
+                - if:
+                    condition: { eq: [out.success, 1] }
+                    then:
+                      - call: [<.api_tokens.set_groups, eml, "ldap", groups]
+                      - call: [log.info, "[ldap] ${login} → ${eml}, ${groups.len} Gruppe(n)"]
+                - return: out
+
+          - def:
+              name: saml_begin
+              access: public
+              args: [[relay_state, string]]
+              return: { type: SamlBegin, lifetime: producer }
+              body:
+                - decl: [out, SamlBegin]
+                - decl: [cfg, CascConfig, { call: [<.casc.current] }]
+                - if:
+                    condition: { eq: [cfg.saml.idp_sso_url.len, 0] }
+                    then: [{ set: [out.message, "SAML ist nicht erklaert (config.saml)"] }, { return: out }]
+                - set: [out.request_id, { call: [saml.new_request_id] }]
+                - set: [out.url, { call: [saml.authn_request_url, cfg.saml.idp_sso_url, cfg.saml.sp_entity_id, cfg.saml.acs_url, out.request_id, relay_state] }]
+                - call: [<.saml_remember, out.request_id]
+                - set: [out.success, 1]
+                - set: [out.message, "ok"]
+                - return: out
+
+          - def:
+              name: saml_finish
+              access: public
+              static_off: ["str_cmp"]
+              args: [[response_b64, string]]
+              return: { type: AuthResult, lifetime: producer }
+              body:
+                - decl: [out, AuthResult]
+                - decl: [cfg, CascConfig, { call: [<.casc.current] }]
+                - if:
+                    condition: { eq: [cfg.saml.idp_sso_url.len, 0] }
+                    then: [{ set: [out.message, "SAML ist nicht erklaert (config.saml)"] }, { return: out }]
+                - if:
+                    condition: { eq: [{ call: [io.is_file, cfg.saml.idp_cert_file] }, false] }
+                    then: [{ set: [out.message, "SAML: IdP-Zertifikat fehlt (${cfg.saml.idp_cert_file})"] }, { return: out }]
+                - decl: [cert, string, { call: [io.read_file, cfg.saml.idp_cert_file] }]
+                # "" als erwartete Kennung: der Baustein meldet InResponseTo, und
+                # HIER wird entschieden — nur eine offene Kennung zaehlt, einmal.
+                # Damit gibt es keine IdP-initiierte Anmeldung und keine Wiederholung.
+                - decl: [res, map<string:string>, { call: [saml.verify_response, response_b64, cert, cfg.saml.sp_entity_id, cfg.saml.acs_url, ""] }]
+                - if:
+                    condition: { neq: [{ call: [res.get, "ok"] }, "1"] }
+                    then:
+                      - decl: [why, string, { call: [res.get, "error"] }]
+                      - call: [log.warn, "[saml] Antwort abgewiesen: ${why}"]
+                      - set: [out.message, "SAML: ${why}"]
+                      - return: out
+                - decl: [rid, string, { call: [res.get, "request_id"] }]
+                - if:
+                    condition: { eq: [{ call: [<.saml_consume, rid] }, 0] }
+                    then:
+                      - call: [log.warn, "[saml] Antwort auf unbekannte oder verbrauchte Anfrage '${rid}' — abgewiesen"]
+                      - set: [out.message, "SAML: Antwort gehoert zu keiner offenen Anmeldung"]
+                      - return: out
+                - if:
+                    condition: { gt: [cfg.saml.idp_entity_id.len, 0] }
+                    then:
+                      - decl: [issuer, string, { call: [res.get, "issuer"] }]
+                      - if:
+                          condition: { neq: [issuer, cfg.saml.idp_entity_id] }
+                          then: [{ set: [out.message, "SAML: fremder Aussteller '${issuer}'"] }, { return: out }]
+                - decl: [eml, string, { call: [res.get, "name_id"] }]
+                - if:
+                    condition: { gt: [cfg.saml.email_attr.len, 0] }
+                    then:
+                      - decl: [mail_key, string, "attr.${cfg.saml.email_attr}"]
+                      - if:
+                          condition: { gt: [{ call: [res.contains, mail_key] }, 0] }
+                          then:
+                            - decl: [mail_all, string, { call: [res.get, mail_key] }]
+                            - decl: [mail_parts, list<string>, { call: [mail_all.split, "\n"] }]
+                            - set: [eml, { call: [mail_parts.get, 0] }]
+                - decl: [groups, list<string>]
+                - if:
+                    condition: { gt: [cfg.saml.group_attr.len, 0] }
+                    then:
+                      - decl: [grp_key, string, "attr.${cfg.saml.group_attr}"]
+                      - if:
+                          condition: { gt: [{ call: [res.contains, grp_key] }, 0] }
+                          then:
+                            - decl: [grp_all, string, { call: [res.get, grp_key] }]
+                            - set: [groups, { call: [grp_all.split, "\n"] }]
+                - decl: [at_pos, i32, { call: [eml.index_of, "@"] }]
+                - decl: [nick, string, eml]
+                - if: { condition: { gt: [at_pos, 0] }, then: [{ set: [nick, { call: [eml.substr, 0, at_pos] }] }] }
+                - set: [out, { call: [<.login_external, eml, nick] }]
+                - if:
+                    condition: { eq: [out.success, 1] }
+                    then:
+                      - call: [<.api_tokens.set_groups, eml, "saml", groups]
+                      - call: [log.info, "[saml] ${eml} angemeldet, ${groups.len} Gruppe(n)"]
+                - return: out
+
+      - instance: saml_begin
+        methods:
+          - def:
+              name: run
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, SamlBeginReq]
+                - decl: [out, SamlBegin]
+                - if:
+                    condition: { neq: [{ call: [session.decode_rpc, rpc, req] }, 0] }
+                    then: [{ set: [out.message, "unlesbare Anfrage"] }, { call: [session.reply_rpc, rpc, "set_result", 0, out] }, { return: [] }]
+                - set: [out, { call: [<.auth.saml_begin, req.relay_state] }]
+                - call: [session.reply_rpc, rpc, "set_result", 0, out]
+
+      - instance: saml_finish
+        methods:
+          - def:
+              name: run
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, SamlFinishReq]
+                - decl: [out, AuthResult]
+                - if:
+                    condition: { neq: [{ call: [session.decode_rpc, rpc, req] }, 0] }
+                    then: [{ set: [out.message, "unlesbare Anfrage"] }, { call: [session.reply_rpc, rpc, "set_result", 0, out] }, { return: [] }]
+                - set: [out, { call: [<.auth.saml_finish, req.saml_response] }]
+                - call: [session.reply_rpc, rpc, "set_result", 0, out]

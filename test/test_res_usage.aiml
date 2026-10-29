@@ -1,0 +1,71 @@
+# Abnahme der Last-Messung (doc/spec/109).
+#
+# Geprueft wird, was man ueber eine Messung ueberhaupt behaupten kann: dass sie eine
+# plausible Zahl liefert, dass der ERSTE Aufruf 0 Promille gibt (CPU ist eine
+# Ableitung und braucht zwei Punkte) und dass Last sich in der Zahl zeigt.
+# Expected exit code: 0
+
+- import: "sources/shared/res_usage.aiml"
+
+- def:
+    name: expect
+    args: [[label, string], [cond, i32]]
+    return: i32
+    body:
+      - if: { condition: { eq: [cond, 1] }, then: [{ return: 0 }] }
+      - print: ["  FAIL ${label}"]
+      - return: 1
+
+# burn: etwas Rechenzeit verbrauchen, damit die zweite Messung etwas zu sehen hat.
+- def:
+    name: burn
+    args: [[rounds, i32]]
+    return: i64
+    body:
+      - decl: [acc, i64, 0]
+      - decl: [bix, i32, 0]
+      - while:
+          condition: { lt: [bix, rounds] }
+          body:
+            # Ganzzahl-Arbeit: `math.sqrt` liefert f64 und laesst sich nicht auf i64 addieren.
+            - set: [acc, { +: [acc, { "%": [{ "*": [bix, 7919] }, 1000003] }] }]
+            - set: [bix, { +: [bix, 1] }]
+      - return: acc
+
+- def:
+    name: main
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      # Dass /proc ueberhaupt lesbar ist, war nicht selbstverstaendlich: `io.read_file`
+      # dimensionierte seinen Puffer ueber die gemeldete Groesse, und die ist dort 0 —
+      # es kam IMMER "" zurueck, ohne Fehler (aiml spec/42, behoben 17.10.2026).
+      - decl: [probe_p, path, "/proc/self/status"]
+      - decl: [probe_raw, string, { call: [io.read_file, probe_p] }]
+      - set: [fails, { +: [fails, { call: [expect, "/proc ist lesbar", { gt: [probe_raw.len, 0] }] }] }]
+      - decl: [smp, ptr<ResSampler>, { new: ResSampler }]
+
+      # Erste Messung: Bezugspunkt.  CPU MUSS 0 sein — alles andere waere der
+      # Durchschnitt seit Prozessstart und damit eine andere Groesse.
+      - decl: [first, ResUsage, { call: [smp.sample] }]
+      - set: [fails, { +: [fails, { call: [expect, "erste Messung CPU=0", { eq: [first.cpu_permille, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "RSS plausibel (>0)", { gt: [first.rss_kb, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "RSS plausibel (<16 GB)", { lt: [first.rss_kb, 16000000] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Zeitstempel gesetzt", { gt: [first.sampled_ms, 0] }] }] }]
+
+      # Jetzt Last erzeugen und erneut messen.
+      # Laenger rechnen als ein paar Millisekunden: ein Uhr-Tick ist 10 ms, und ueber
+      # ein 20-ms-Fenster ergibt ein einziger Tick Unterschied schon 500 Promille.
+      # Im Betrieb wird alle 3-5 s gemessen, da faellt das nicht ins Gewicht.
+      - decl: [sink, i64, { call: [burn, 60000000] }]
+      - decl: [second, ResUsage, { call: [smp.sample] }]
+      - set: [fails, { +: [fails, { call: [expect, "zweite Messung sieht Last", { gt: [second.cpu_permille, 0] }] }] }]
+      # Ein Faden kann hoechstens einen Kern fuellen; mehr als 1000 Promille waere
+      # ein Rechenfehler, nicht eine ausgelastete Maschine.
+      - set: [fails, { +: [fails, { call: [expect, "CPU <= 1100 Promille (ein Faden)", { le: [second.cpu_permille, 1100] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Zeit schreitet fort", { ge: [second.sampled_ms, first.sampled_ms] }] }] }]
+
+      - print: ["  gemessen: cpu=${second.cpu_permille}/1000 rss=${second.rss_kb} kB (sink=${sink})"]
+      - if: { condition: { gt: [fails, 0] }, then: [{ print: ["test_res_usage: ${fails} failed"] }, { return: 1 }] }
+      - print: ["test_res_usage PASS"]
+      - return: 0

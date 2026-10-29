@@ -1,0 +1,36 @@
+{
+    "$schema": "exodus.project.config-1.0",
+    "name": "test_oci",
+    "version": "0.1.0",
+    "output_type": "executable",
+    "sources": [
+        "sources/runtime/test_oci.aiml"
+    ],
+    "compiler": {
+        "name": "/media/nikolai/95a208ef-ffa2-478b-abdd-ff394baa6a76/projects/python/test/aiml/out/aiml/aiml",
+        "lang_standard": "17",
+        "flags": []
+    },
+    "linker": {
+        "name": "g++",
+        "libraries": [
+            "rt_shim",
+            "aiml",
+            "pthread",
+            "dl"
+        ],
+        "library_paths": [
+            "/media/nikolai/95a208ef-ffa2-478b-abdd-ff394baa6a76/projects/python/test/cosmos/runtime/shim",
+            "/media/nikolai/95a208ef-ffa2-478b-abdd-ff394baa6a76/projects/python/test/aiml/out/libaiml"
+        ],
+        "flags": [
+            "-Wl,-rpath,/media/nikolai/95a208ef-ffa2-478b-abdd-ff394baa6a76/projects/python/test/cosmos/runtime/shim"
+        ]
+    },
+    "artifact_in_cwd": true,
+    "optimization": "0",
+    "debug": true,
+    "env": {
+        "AIML_MEM_V3": "1"
+    }
+}

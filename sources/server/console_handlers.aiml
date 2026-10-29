@@ -1,0 +1,107 @@
+# Mirror RPC-Handler der Skript-Konsole (doc/spec/108).
+#
+#   console_exec (ConsoleExecReq → ConsoleExecResult)
+#
+# Der Ablauf, und WARUM er so ist:
+#
+# 1. Identitaet, dann FREIGABE.  Die Konsole ist zunaechst nur fuer Admin-Konten
+#    (F108-15), weil die Isolation aus §AP2.A noch nicht traegt.  Das Tor steht VOR
+#    allem anderen — vor dem Schreiben der Datei, vor dem Start des Prozesses.
+# 2. Praeambel + Nutzerquelle in eine Datei.  Die Praeambel traegt den `extern`-Block
+#    des Angebots und KEIN `level:` — das waere Selbstbeglaubigung (spec/65 F65-6) und
+#    wuerde den ganzen Lauf ablehnen.
+# 3. EIN EIGENER PROZESS je Skript (F108-5).  Nicht aus Vorsicht: der Uebersetzer haelt
+#    einen JIT-Kontext zur Zeit (spec/65 F65-25), der Server ist AOT und hat gar keinen
+#    Uebersetzer, und ein abstuerzender Thread naehme den ganzen Server mit (§AP2.B).
+# 4. Antwort NUR an den Anfragenden (F108-11), Spur mit pid und Quelltext-Hash und
+#    ohne Token (F108-10/F108-12).
+#
+# Static-Check (spec/49 §14): 1 class — OK.
+
+- import: "sources/models/console_reqs.aiml"
+
+- groupmethods:
+    group: CosmosRuntime
+    instances:
+      - instance: console_exec
+        methods:
+          - def:
+              name: run
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, ConsoleExecReq]
+                - decl: [rcv, i32, { call: [session.decode_rpc, rpc, req] }]
+                - decl: [out, ConsoleExecResult]
+                - set: [out.my_level, 255]
+                - set: [out.exit_code, -1]
+                - if:
+                    condition: { neq: [rcv, 0] }
+                    then:
+                      - set: [out.message, "malformed console_exec payload"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, out]
+                      - return: []
+
+                - decl: [eml, string, { call: [<.auth.email_for_token, req.token] }]
+                - if:
+                    condition: { eq: [eml.len, 0] }
+                    then:
+                      - set: [out.message, "invalid token"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, out]
+                      - return: []
+
+                # F108-15: das Admin-Tor, vor allem anderen.
+                - decl: [own, i32, { call: [<.auth.clearance_for_email, eml] }]
+                - set: [out.my_level, own]
+                - if:
+                    condition: { neq: [own, 1] }
+                    then:
+                      - set: [out.message, "Die Konsole ist derzeit nur fuer Admin-Konten (Freigabe 1); diese Sitzung hat ${own}."]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, out]
+                      - return: []
+
+                # ── Abfrage des Standes (doc/spec/108 F108-18) ────────────────
+                # Derselbe RPC, zwei Zeitpunkte: `poll_id > 0` fragt nach einem Lauf,
+                # der schon angenommen wurde.
+                - if:
+                    condition: { gt: [req.poll_id, 0] }
+                    then:
+                      - decl: [pres, ConsoleExecResult, { call: [<.console.take_result, req.poll_id] }]
+                      - set: [pres.my_level, own]
+                      - if:
+                          condition: { eq: [pres.finished, 0] }
+                          then:
+                            - set: [pres.success, 1]
+                            - set: [pres.message, "laeuft"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, pres]
+                      - return: []
+
+                - if:
+                    condition: { eq: [req.source.len, 0] }
+                    then:
+                      - set: [out.message, "leeres Skript"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, out]
+                      - return: []
+
+                # Dem Skript geht die opake `player_id` zu, NICHT die E-Mail.  Die pid
+                # ersetzt die E-Mail als Identitaet in allem, was den Prozess verlaesst
+                # (sources/models/user.aiml) — und ein Konsolen-Skript ist genau das.
+                # Dieselbe Kennung steht in der Spur (F108-10), also ist sie zuordenbar,
+                # ohne die Adresse des Kontos weiterzureichen.
+                - decl: [actor_pid, string, { call: [<.auth.pid_for_token, req.token] }]
+
+                # F108-18: ANNEHMEN und sofort antworten — der Lauf selbst gehoert in
+                # einen eigenen Faden.  Vorher wartete der Handler hier auf `proc.wait`
+                # und hielt damit die ganze Steuerebene an.
+                - decl: [started, i32, { call: [<.console.begin, actor_pid, req.source, own] }]
+                - if:
+                    condition: { eq: [started, 0] }
+                    then:
+                      - set: [out.message, "Es laeuft bereits ein Skript — bitte warten."]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, out]
+                      - return: []
+                - decl: [worker, thread_handle, { spawn: [console_worker_main, <.console] }]
+                - set: [out.success, 1]
+                - set: [out.finished, 0]
+                - set: [out.run_id, started]
+                - set: [out.message, "angenommen"]
+                - call: [session.reply_rpc, rpc, "set_result", 0, out]

@@ -1,0 +1,254 @@
+# Probe fuer die raeumliche Pipeline (doc/spec/107 §107.1b).
+#
+# Eigene Binaerdatei statt sofort im Client: eine Aufnahme kostet hier Sekunden
+# statt eines vollen Client-Baus, und ein Shader-Fehler zeigt sich an einer
+# Stelle, nicht in der ganzen Oberflaeche (Lehre: erst Probe, dann Einbau).
+#
+# Aufruf: ./pipe3d_shot [HALTEDAUER_MS]
+# Expected exit code: 0
+
+- import: "sources/client/gfx/pipe3d.aiml"
+
+- def:
+    name: demo_stage
+    args: [[stage_id, string], [name, string], [bindings, string], [status, string]]
+    return: { type: PipelineStage, lifetime: producer }
+    body:
+      - decl: [stg, PipelineStage]
+      - set: [stg.stage_id, stage_id]
+      - set: [stg.name, name]
+      - set: [stg.bindings, bindings]
+      - set: [stg.status, status]
+      - return: stg
+
+# cluster_bodies: dasselbe Verfahren fuer das NETZ (doc/spec/107 §107.5a).
+# Die Agenten kommen von aussen — dieselbe Fixture wie die Pipeline-Aufnahme.
+- def:
+    name: cluster_bodies
+    static_off: ["str_cmp"]
+    args: [[space, ref<PipeScene>], [crew, ref<AgentList>]]
+    return: { type: list<SceneItem>, lifetime: producer }
+    body:
+      - decl: [cview, ClusterView]
+      - set: [cview.srv_cpu_permille, 70]
+      - set: [cview.srv_rss_kb, 186368]
+      - decl: [kv_users, KvStoreInfo]
+      - set: [kv_users.name, "users"]
+      - set: [kv_users.entries, 37]
+      - call: [cview.live.stores.push, kv_users]
+      - decl: [kv_jobs, KvStoreInfo]
+      - set: [kv_jobs.name, "jobs"]
+      - set: [kv_jobs.entries, 1200]
+      - call: [cview.live.stores.push, kv_jobs]
+      - decl: [kv_cas, KvStoreInfo]
+      - set: [kv_cas.name, "cas_trees"]
+      - set: [kv_cas.entries, 0]
+      - call: [cview.live.stores.push, kv_cas]
+      - return: { call: [space.of_cluster, cview, crew] }
+
+# Eine Schicht, wie die Laufzeit sie melden wird (doc/spec/107 §107.1c).
+- def:
+    name: demo_layer
+    args: [[stage, string], [bytes, i64], [reuse, i32], [stored, i32]]
+    return: { type: StageLayer, lifetime: producer }
+    body:
+      - decl: [lay, StageLayer]
+      - set: [lay.stage, stage]
+      - set: [lay.bindings, "arch=x86_64"]
+      - set: [lay.bytes, bytes]
+      - set: [lay.reuse, reuse]
+      - set: [lay.stored, stored]
+      - return: lay
+
+# Der Lauf aus der Nacht zum 22.10.2026 (doc/spec/110 §110.33) — neun Stufen,
+# eine Lane, mit den GEMESSENEN Groeszen.  Eine Fixture, aber keine erfundene:
+# erst sehen, wie es aussieht, dann die overlay-Mechanik bauen (§107.1c).
+- def:
+    name: layer_scene
+    static_off: ["str_cmp"]
+    args: [[space, ref<PipeScene>], [out, list<SceneItem>]]
+    body:
+      - decl: [run, PipelineRun]
+      - set: [run.run_id, "run-1792618220567"]
+      - call: [run.stages.push, { call: [demo_stage, "l0", "basis [arch=x86_64]", "arch=x86_64", "done"] }]
+      - call: [run.stages.push, { call: [demo_stage, "l1", "apt [arch=x86_64]", "arch=x86_64", "done"] }]
+      - call: [run.stages.push, { call: [demo_stage, "l2", "venv [arch=x86_64]", "arch=x86_64", "done"] }]
+      - call: [run.stages.push, { call: [demo_stage, "l3", "exodus [arch=x86_64]", "arch=x86_64", "done"] }]
+      - call: [run.stages.push, { call: [demo_stage, "l4", "klonen [arch=x86_64]", "arch=x86_64", "done"] }]
+      - call: [run.stages.push, { call: [demo_stage, "l5", "deps [arch=x86_64]", "arch=x86_64", "done"] }]
+      - call: [run.stages.push, { call: [demo_stage, "l6", "bauen [arch=x86_64]", "arch=x86_64", "done"] }]
+      - call: [run.stages.push, { call: [demo_stage, "l7", "nachweis [arch=x86_64]", "arch=x86_64", "done"] }]
+      # Der Augenblick, den das Bild zeigt: alles gebaut, das Abbild wird
+      # gerade geschrieben.  Eine LAUFENDE Stufe hat noch keine fertige
+      # Schicht — darum hat `ablegen` keine Platte.
+      - decl: [ablegen, PipelineStage, { call: [demo_stage, "l8", "ablegen [arch=x86_64]", "arch=x86_64", "running"] }]
+      - set: [ablegen.agent, "rt-919521-2"]
+      - call: [run.stages.push, ablegen]
+      - decl: [lays, list<StageLayer>]
+      # basis_zeigen schreibt nichts — und `date`/`df` sind nicht aufloesbar.
+      - call: [lays.push, { call: [demo_layer, "basis",    0,          ReuseClass.opaque,   0] }]
+      # apt: 332 Pakete, aufloesbar ueber die Paketversionen, und beim zweiten
+      # Lauf liegt der Inhalt schon im Speicher.
+      - call: [lays.push, { call: [demo_layer, "apt",      734003200,  ReuseClass.resolved, 1] }]
+      - call: [lays.push, { call: [demo_layer, "venv",     52428800,   ReuseClass.resolved, 1] }]
+      - call: [lays.push, { call: [demo_layer, "exodus",   20971520,   ReuseClass.resolved, 0] }]
+      - call: [lays.push, { call: [demo_layer, "klonen",   131072000,  ReuseClass.resolved, 0] }]
+      # Die Verknuepfungen sind reine Rechnung auf gehashten Eingaben.
+      - call: [lays.push, { call: [demo_layer, "deps",     4096,       ReuseClass.pure,     1] }]
+      - call: [lays.push, { call: [demo_layer, "bauen",    1546128470, ReuseClass.pure,     0] }]
+      - call: [lays.push, { call: [demo_layer, "nachweis", 2048,       ReuseClass.pure,     0] }]
+      - call: [space.layers_of, out, run, lays]
+      - decl: [body, list<SceneItem>, { call: [space.of_run, run, "l8"] }]
+      - decl: [bix, i32, 0]
+      - while:
+          condition: { lt: [bix, body.len] }
+          body:
+            - call: [out.push, { at: [body, bix] }]
+            - set: [bix, { +: [bix, 1] }]
+      - call: [space.add_ground, out]
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [envm, map<string:string>, { call: [sys.env] }]
+      - decl: [hold, i32, 1200]
+      - if:
+          condition: { gt: [{ call: [envm.contains, "P3D_HOLD"] }, 0] }
+          then:
+            - decl: [hold_txt, string, { call: [envm.get, "P3D_HOLD"] }]
+            - set: [hold, { call: [hold_txt.parse_i32] }]
+      - decl: [win, window_handle, { call: [engine.create_window, 1280, 720, "pipe3d"] }]
+      - if: { condition: { eq: [win, null] }, then: [{ call: [log.error, "kein Fenster"] }, { return: 1 }] }
+      - call: [gl.init]
+      - call: [gl.viewport, 0, 0, 1280, 720]
+      - call: [engine.target_fps, 60]
+
+      # Eine Pipeline mit zwei Lanes und drei Stufen — genug, um Gitter,
+      # Rohre, Auswahl und Fluss zusammen zu sehen.
+      - decl: [run, PipelineRun]
+      - set: [run.run_id, "probe-1"]
+      - call: [run.stages.push, { call: [demo_stage, "s-0-0", "checkout [arch=x86_64]", "arch=x86_64", "done"] }]
+      - decl: [busy_stage, PipelineStage, { call: [demo_stage, "s-0-1", "build [arch=x86_64]", "arch=x86_64", "running"] }]
+      - set: [busy_stage.agent, "agent-1"]
+      - call: [run.stages.push, busy_stage]
+      # Ein HALTEPUNKT am Rand vor der dritten Stufe (doc/spec/101 §101.7):
+      # die Flagge steht am Rohr, nicht an der Kugel.
+      - call: [run.stages.push, { call: [demo_stage, "s-0-2", "test [arch=x86_64]", "arch=x86_64", "paused"] }]
+      - call: [run.stages.push, { call: [demo_stage, "s-1-0", "checkout [arch=arm64]", "arch=arm64", "done"] }]
+      - call: [run.stages.push, { call: [demo_stage, "s-1-1", "build [arch=arm64]", "arch=arm64", "failed"] }]
+      - call: [run.stages.push, { call: [demo_stage, "s-1-2", "test [arch=arm64]", "arch=arm64", "pending"] }]
+
+      - decl: [scene, ptr<PipeScene>, { new: PipeScene }]
+      - decl: [items, list<SceneItem>, { call: [scene.of_run, run, "s-0-1"] }]
+      # Agenten und Speicher dazu: sie gehoeren ins Bild (Vorgabe 15.10.2026).
+      - decl: [agents, ptr<AgentList>, { new: AgentList }]
+      - decl: [one_agent, AgentInfo]
+      - set: [one_agent.agent_id, "agent-1"]
+      - set: [one_agent.online, 1]
+      - call: [agents.agents.push, one_agent]
+      - decl: [two_agent, AgentInfo]
+      - set: [two_agent.agent_id, "agent-2"]
+      - set: [two_agent.online, 0]
+      - call: [agents.agents.push, two_agent]
+      - call: [scene.add_agents, items, agents, run]
+      - decl: [stores, list<KvStoreInfo>]
+      - decl: [store_jobs, KvStoreInfo]
+      - set: [store_jobs.name, "jobs"]
+      - set: [store_jobs.entries, 1200]
+      - call: [stores.push, store_jobs]
+      - decl: [store_runs, KvStoreInfo]
+      - set: [store_runs.name, "runs"]
+      - set: [store_runs.entries, 42]
+      - call: [stores.push, store_runs]
+      - decl: [store_cas, KvStoreInfo]
+      - set: [store_cas.name, "cas_trees"]
+      - set: [store_cas.entries, 0]
+      - call: [stores.push, store_cas]
+      - call: [scene.add_stores, items, stores]
+      - call: [scene.add_ground, items]
+      # P3D_SCENE=cluster: dasselbe Fenster, andere Rechnung (doc/spec/107 §107.5a).
+      - if:
+          condition: { gt: [{ call: [envm.contains, "P3D_SCENE"] }, 0] }
+          then:
+            - decl: [which_txt, string, { call: [envm.get, "P3D_SCENE"] }]
+            # P3D_SCENE=flagge: NUR eine Flagge.  Fuer den Nachweis, dass das
+            # Tuch weht — in der vollen Szene bewegt sich auch der Fluss, und
+            # dann beweist eine Pixeldifferenz gar nichts (die Lehre aus
+            # doc/spec/107 §107.1b).
+            - if:
+                condition: { eq: [which_txt, "flagge"] }
+                then:
+                  - call: [items.clear]
+                  - call: [scene.add_flag, items, 0.0, 0.0, "probe"]
+                  - call: [scene.add_ground, items]
+                  - call: [log.info, "[probe] nur die Flagge: ${items.len} Koerper"]
+            - if:
+                condition: { eq: [which_txt, "layers"] }
+                then:
+                  - call: [items.clear]
+                  - call: [layer_scene, scene, items]
+                  - call: [log.info, "[probe] Schichten statt Umgebung: ${items.len} Koerper"]
+            - if:
+                condition: { eq: [which_txt, "cluster"] }
+                then:
+                  - call: [items.clear]
+                  - decl: [netb, list<SceneItem>, { call: [cluster_bodies, scene, agents] }]
+                  - decl: [nbx, i32, 0]
+                  - while:
+                      condition: { lt: [nbx, netb.len] }
+                      body:
+                        - call: [items.push, { at: [netb, nbx] }]
+                        - set: [nbx, { +: [nbx, 1] }]
+                  - call: [log.info, "[probe] Netz statt Pipeline: ${items.len} Koerper"]
+      - decl: [flow_n, i32, 0]
+      - decl: [tube_n, i32, 0]
+      - decl: [cix, i32, 0]
+      - while:
+          condition: { lt: [cix, items.len] }
+          body:
+            - decl: [chk, SceneItem, { at: [items, cix] }]
+            - set: [cix, { +: [cix, 1] }]
+            - if: { condition: { eq: [chk.kind, 1] }, then: [{ set: [tube_n, { +: [tube_n, 1] }] }] }
+            - if: { condition: { eq: [chk.kind, 5] }, then: [{ set: [flow_n, { +: [flow_n, 1] }] }, { set: [tube_n, { +: [tube_n, 1] }] }] }
+      - call: [log.info, "[probe] ${items.len} Koerper, ${tube_n} Rohre, davon flieszend: ${flow_n}"]
+
+      - decl: [view, ptr<Pipe3D>, { new: Pipe3D }]
+      - if: { condition: { neq: [{ call: [view.init] }, 1] }, then: [{ return: 1 }] }
+      # P3D_PHASE setzt die Uhr des Flusses: zwei Aufnahmen mit verschiedener
+      # Phase unterscheiden sich DANN UND NUR DANN, wenn `uTime` wirklich im
+      # Shader ankommt (doc/spec/107 F107-14).
+      - if:
+          condition: { gt: [{ call: [envm.contains, "P3D_PHASE"] }, 0] }
+          then:
+            - decl: [phase_txt, string, { call: [envm.get, "P3D_PHASE"] }]
+            - decl: [phase_ms, i32, { call: [phase_txt.parse_i32] }]
+            - decl: [phase_s, f32, { '/': [{ cast: [phase_ms, f32] }, 1000.0] }]
+            - call: [view.advance, phase_s]
+            - call: [log.info, "[probe] Phase ${phase_ms} ms → ${phase_s} s"]
+      - call: [view.fit, items]
+
+      - decl: [stop_at, i64, { +: [{ call: [time.mono_ms] }, hold] }]
+      - while:
+          condition: { lt: [{ call: [time.mono_ms] }, stop_at] }
+          body:
+            - call: [view.advance, 0.0]
+            - call: [gl.clear_all, 0.03, 0.04, 0.07, 1.0]
+            - call: [view.draw, items, 0, 0, 1280, 720]
+            - call: [engine.swap, win]
+      # Die Wahrheit kommt aus dem Bildspeicher, nicht vom Bildschirmgreifer:
+      # eine Pruefsumme ueber die gezeichneten Pixel.
+      - decl: [shot_px, buffer<u8>, { call: [gl.read_rgba8, 0, 0, 1280, 720] }]
+      - decl: [sum_px, i64, 0]
+      - decl: [pix, i32, 0]
+      - while:
+          condition: { lt: [pix, shot_px.len] }
+          body:
+            - decl: [byte_val, i32, { cast: [{ call: [shot_px.get, pix] }, i32] }]
+            - set: [sum_px, { +: [sum_px, byte_val] }]
+            - set: [pix, { +: [pix, 997] }]
+      - call: [log.info, "[probe] Pixelsumme: ${sum_px}"]
+      - call: [engine.destroy_window, win]
+      - print: ["pipe3d_shot done"]
+      - return: 0

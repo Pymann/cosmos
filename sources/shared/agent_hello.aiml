@@ -1,0 +1,16 @@
+# Cosmos agent handshake ("hello" request, agent-initiated).
+
+# agent announces itself and the job it still owns after a restart
+- model:
+    name: AgentHello
+    fields:
+      - [agent_id,       string]
+      - [current_job_id, string]
+
+# job to run (job_id "" = nothing) and the controller's log length
+- model:
+    name: AgentWelcome
+    fields:
+      - [job_id,  string]
+      - [command, string]
+      - [log_len, i32]

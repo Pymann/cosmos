@@ -1,0 +1,173 @@
+# CasStore — inhaltsadressierte Blob-Ablage (doc/spec/92 §92.2/§92.3).
+#
+# Inhalte liegen als Dateien unter <root>/objects/<hh>/<62 hex>, adressiert über
+# sha256 ihres Inhalts.  Grossdaten gehören nicht in den RAM und nicht in
+# KV-Werte (Lehre aus spec/90 §AP1.5a); ausserdem braucht die Materialisierung
+# später Hardlinks, also ohnehin Dateien.
+#
+# Zwei Eigenschaften, die den Store tragen:
+#   * IDEMPOTENT — dieselbe Datei zweimal aufnehmen erzeugt ein Objekt.  Zwei
+#     verschiedene Namen mit gleichem Inhalt ebenso (das ist der Dedup).
+#   * ATOMAR — ein Objekt erscheint nur vollständig unter seinem Hash.  Entweder
+#     per Hardlink (unteilbar) oder über <root>/tmp + io.rename.
+#
+# Speicherbedarf ist unabhängig von der Dateigrösse: gehasht wird per
+# hash.sha256_file (1-MiB-Blöcke), kopiert ebenfalls blockweise.
+
+- class:
+    name: CasStore
+    members:
+      - [root,      string, "cas"]
+      - [copy_size, i32,    1048576]   # Blockgrösse beim Kopieren (1 MiB)
+    methods:
+      - def:
+          name: init
+          access: public
+          args: [[root_dir, string]]
+          body:
+            - if: { condition: { gt: [root_dir.len, 0] }, then: [{ set: [<.root, root_dir] }] }
+            - call: [io.mkdir_all, "${<.root}/objects"]
+            - call: [io.mkdir_all, "${<.root}/tmp"]
+            - call: [log.info, "[cas] root=${<.root}"]
+
+      # blob_path: Objektpfad zu einer Inhaltsadresse ("" wenn die ID nicht
+      # wie ein sha256-Hex aussieht — sonst liesse sich über eine erfundene ID
+      # aus dem Store heraus zeigen).
+      - def:
+          name: blob_path
+          access: public
+          args: [[blob_id, string]]
+          return: string
+          body:
+            - if: { condition: { neq: [blob_id.len, 64] }, then: [{ return: "" }] }
+            - decl: [head, string, { call: [blob_id.substr, 0, 2] }]
+            - decl: [rest, string, { call: [blob_id.substr, 2] }]
+            - return: "${<.root}/objects/${head}/${rest}"
+
+      - def:
+          name: has
+          access: public
+          args: [[blob_id, string]]
+          return: i32
+          body:
+            - decl: [target, string, { call: [<.blob_path, blob_id] }]
+            - if: { condition: { eq: [target.len, 0] }, then: [{ return: 0 }] }
+            - if: { condition: { eq: [{ call: [io.is_file, target] }, true] }, then: [{ return: 1 }] }
+            - return: 0
+
+      - def:
+          name: size_of
+          access: public
+          args: [[blob_id, string]]
+          return: i64
+          body:
+            - decl: [target, string, { call: [<.blob_path, blob_id] }]
+            - if: { condition: { eq: [target.len, 0] }, then: [{ return: -1 }] }
+            - if: { condition: { eq: [{ call: [io.is_file, target] }, false] }, then: [{ return: -1 }] }
+            - return: { call: [io.file_size, target] }
+
+      # copy_blocks: blockweise kopieren, Speicher unabhängig von der Grösse.
+      - def:
+          name: copy_blocks
+          access: public
+          args: [[src, string], [dst, string]]
+          return: i32
+          body:
+            - decl: [inp, file_handle, { call: [io.open_binary, src] }]
+            - if: { condition: { eq: [inp, null] }, then: [{ return: -1 }] }
+            - decl: [out, file_handle, { call: [io.open, dst, "wb"] }]
+            - if: { condition: { eq: [out, null] }, then: [{ call: [io.close, inp] }, { return: -1 }] }
+            - decl: [total, i64, { call: [io.file_size, src] }]
+            - decl: [done, i64, 0]
+            - while:
+                condition: { lt: [done, total] }
+                body:
+                  - decl: [chunk, buffer<u8>, { call: [io.read_bytes, inp, <.copy_size] }]
+                  - if: { condition: { le: [chunk.len, 0] }, then: [{ set: [done, total] }] }
+                  - if:
+                      condition: { gt: [chunk.len, 0] }
+                      then:
+                        - decl: [put, i32, { call: [chunk.write_to, out] }]
+                        - if: { condition: { lt: [put, 0] }, then: [{ call: [io.close, inp] }, { call: [io.close, out] }, { return: -1 }] }
+                        - set: [done, { +: [done, chunk.len] }]
+            - call: [io.close, inp]
+            - call: [io.close, out]
+            - return: 0
+
+      # put_file: vorhandene Datei aufnehmen.  Die Quelle bleibt unverändert.
+      # Rückgabe = Inhaltsadresse, "" bei nicht lesbarer Quelle.
+      - def:
+          name: put_file
+          access: public
+          args: [[src, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [blob_id, string, { call: [hash.sha256_file, src] }]
+            - if: { condition: { eq: [blob_id.len, 0] }, then: [{ return: "" }] }
+            # Schon vorhanden → fertig.  Gleicher Hash heisst gleicher Inhalt,
+            # also NICHT überschreiben (das ist Dedup und Idempotenz in einem).
+            - if: { condition: { eq: [{ call: [<.has, blob_id] }, 1] }, then: [{ return: blob_id }] }
+            - decl: [target, string, { call: [<.blob_path, blob_id] }]
+            - decl: [head, string, { call: [blob_id.substr, 0, 2] }]
+            - call: [io.mkdir_all, "${<.root}/objects/${head}"]
+            # KEIN Hardlink (Befund 1, doc/spec/92 §92.5): er teilte die Inode mit
+            # der Quelle, und ein spaeteres Ueberschreiben der Quelle aenderte den
+            # Inhalt UNTER DEM SCHON VERGEBENEN HASH.  Damit waere die Adresse
+            # keine Zusage mehr, und Snapshots wie Cache-Treffer wertlos.
+            # Immer kopieren, ueber tmp + rename, damit nie ein halbes Objekt
+            # unter seinem Hash sichtbar wird.  (Billiger und ebenfalls korrekt
+            # waere ein Reflink/FICLONE — eigene Inode, geteilte Bloecke; setzt
+            # btrfs/XFS voraus und fehlt in aiml noch, siehe §92.5.)
+            - decl: [nonce, string, { call: [math.random_hex, 8] }]
+            - decl: [tmp, string, "${<.root}/tmp/in-${nonce}"]
+            - if: { condition: { neq: [{ call: [<.copy_blocks, src, tmp] }, 0] }, then: [{ call: [io.remove, tmp] }, { return: "" }] }
+            - if: { condition: { neq: [{ call: [io.rename, tmp, target] }, 0] }, then: [{ call: [io.remove, tmp] }, { return: "" }] }
+            - return: blob_id
+
+      # put_bytes: Inhalt aus dem Speicher aufnehmen (kleine Objekte, z.B.
+      # Tree-Serialisierungen).  Gleiche Adresse wie put_file bei gleichem Inhalt.
+      - def:
+          name: put_bytes
+          access: public
+          args: [[data, buffer]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [blob_id, string, { call: [hash.sha256, data] }]
+            - if: { condition: { eq: [{ call: [<.has, blob_id] }, 1] }, then: [{ return: blob_id }] }
+            - decl: [target, string, { call: [<.blob_path, blob_id] }]
+            - decl: [head, string, { call: [blob_id.substr, 0, 2] }]
+            - call: [io.mkdir_all, "${<.root}/objects/${head}"]
+            - decl: [nonce, string, { call: [math.random_hex, 8] }]
+            - decl: [tmp, string, "${<.root}/tmp/by-${nonce}"]
+            - decl: [out, file_handle, { call: [io.open, tmp, "wb"] }]
+            - if: { condition: { eq: [out, null] }, then: [{ return: "" }] }
+            - decl: [put, i32, { call: [data.write_to, out] }]
+            - call: [io.close, out]
+            - if: { condition: { lt: [put, 0] }, then: [{ call: [io.remove, tmp] }, { return: "" }] }
+            - if: { condition: { neq: [{ call: [io.rename, tmp, target] }, 0] }, then: [{ call: [io.remove, tmp] }, { return: "" }] }
+            - return: blob_id
+
+      # read_window: nur das angefragte Byte-Fenster lesen (wie spec/90 §AP1.5a),
+      # damit die Oberfläche ein Artefakt ansehen kann, ohne es zu laden.
+      - def:
+          name: read_window
+          access: public
+          args: [[blob_id, string], [offset, i64], [len, i32]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [target, string, { call: [<.blob_path, blob_id] }]
+            - if: { condition: { eq: [target.len, 0] }, then: [{ return: "" }] }
+            - if: { condition: { eq: [{ call: [io.is_file, target] }, false] }, then: [{ return: "" }] }
+            - decl: [total, i64, { call: [io.file_size, target] }]
+            - if: { condition: { lt: [offset, 0] }, then: [{ return: "" }] }
+            - if: { condition: { ge: [offset, total] }, then: [{ return: "" }] }
+            - decl: [want, i64, 65536]
+            - if: { condition: { gt: [len, 0] }, then: [{ set: [want, len] }] }
+            - decl: [avail, i64, { -: [total, offset] }]
+            - if: { condition: { lt: [avail, want] }, then: [{ set: [want, avail] }] }
+            - decl: [src, file_handle, { call: [io.open, target, "r"] }]
+            - if: { condition: { eq: [src, null] }, then: [{ return: "" }] }
+            - call: [io.seek, src, offset]
+            - decl: [text, string, { call: [io.read, src, want] }]
+            - call: [io.close, src]
+            - return: text

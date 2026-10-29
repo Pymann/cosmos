@@ -1,0 +1,197 @@
+# AP1-Logiktest (doc/spec/90): RunStore + AgentRegistry ohne Netz.
+#
+# Deckt die §AP1.5a-Zusagen ab: getrennte Ströme mit eigenen Byte-Offsets,
+# byte-exakte Fenster, Lesen WÄHREND der Lauf läuft, Abschluss/Exit-Code,
+# und eine grosse Ausgabe (200 KB) bei der NICHTS akkumuliert wird — gelesen
+# wird nur das angefragte Fenster.
+# Dazu die Agenten-Registry: Registrierung, gezieltes Routing (peer_of),
+# Heartbeat, Disconnect und die Push-Signatur.
+#
+# Expected exit code: 0
+
+- import: "sources/server/run_store.aiml"
+- import: "sources/server/agent_registry.aiml"
+- import: "sources/server/agent_token_store.aiml"
+
+- def:
+    name: expect
+    args: [[label, string], [cond, i32]]
+    return: i32
+    body:
+      - if: { condition: { eq: [cond, 1] }, then: [{ return: 0 }] }
+      - print: ["FAIL ${label}"]
+      - return: 1
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      - call: [io.remove_all, "run_logs_test"]
+
+      # i32-Literale werden an Call-Grenzen NICHT auf i64 geweitet → typisierte Locals.
+      - decl: [off_zero, i64, 0]
+      - decl: [off_three, i64, 3]
+      - decl: [off_six, i64, 6]
+      - decl: [off_big, i64, 100000]
+      - decl: [tick_a, i64, 1000]
+      - decl: [tick_b, i64, 2000]
+      - decl: [tick_c, i64, 3000]
+      - decl: [tick_d, i64, 4000]
+
+      - decl: [runs, ptr<RunStore>, { new: RunStore }]
+      - call: [runs.init, "run_logs_test"]
+      - call: [runs.begin, "run-1", "agent-1", "echo hello", "/tmp"]
+
+      # frisch begonnen: läuft, beide Ströme leer
+      - decl: [nfo0, RunInfo, { call: [runs.info, "run-1"] }]
+      - set: [fails, { +: [fails, { call: [expect, "begin → running", { eq: [nfo0.state, RunState.running] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "begin → 0 out bytes", { eq: [nfo0.out_bytes, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "begin → cwd kept", { eq: [nfo0.cwd, "/tmp"] }] }] }]
+
+      # getrennte Ströme, eigene Offsets
+      - decl: [tot_out, i64, { call: [runs.append, "run-1", OutStream.out, "hello\n"] }]
+      - set: [fails, { +: [fails, { call: [expect, "append out → 6", { eq: [tot_out, 6] }] }] }]
+      - decl: [tot_err, i64, { call: [runs.append, "run-1", OutStream.err, "oops\n"] }]
+      - set: [fails, { +: [fails, { call: [expect, "append err → 5 (eigener Strom)", { eq: [tot_err, 5] }] }] }]
+
+      # Fenster lesen WÄHREND der Lauf noch läuft (write_to flusht je Chunk)
+      - decl: [win_a, RunWindow, { call: [runs.window, "run-1", OutStream.out, off_zero, 100] }]
+      - set: [fails, { +: [fails, { call: [expect, "window live → data", { eq: [win_a.data, "hello\n"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "window live → next_offset", { eq: [win_a.next_offset, 6] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "window live → total", { eq: [win_a.total, 6] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "window live → not done", { eq: [win_a.done, 0] }] }] }]
+
+      # byte-exakter Ausschnitt mitten im Strom
+      - decl: [win_b, RunWindow, { call: [runs.window, "run-1", OutStream.out, off_three, 2] }]
+      - set: [fails, { +: [fails, { call: [expect, "window slice → 'lo'", { eq: [win_b.data, "lo"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "window slice → next 5", { eq: [win_b.next_offset, 5] }] }] }]
+
+      # am Ende des Stroms: leeres Fenster, Offset bleibt
+      - decl: [win_c, RunWindow, { call: [runs.window, "run-1", OutStream.out, off_six, 100] }]
+      - set: [fails, { +: [fails, { call: [expect, "window at EOF → empty", { eq: [win_c.data.len, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "window at EOF → next unchanged", { eq: [win_c.next_offset, 6] }] }] }]
+
+      # stderr getrennt lesbar
+      - decl: [win_e, RunWindow, { call: [runs.window, "run-1", OutStream.err, off_zero, 100] }]
+      - set: [fails, { +: [fails, { call: [expect, "window err → data", { eq: [win_e.data, "oops\n"] }] }] }]
+
+      # grosse Ausgabe: 1000 × 200 B = 200 KB angehängt; der Store sammelt nichts.
+      - decl: [filler, string, ""]
+      - decl: [fdx, i32, 0]
+      - while:
+          condition: { lt: [fdx, 20] }
+          body:
+            - set: [filler, "${filler}0123456789"]
+            - set: [fdx, { +: [fdx, 1] }]
+      - set: [fails, { +: [fails, { call: [expect, "filler = 200 B", { eq: [filler.len, 200] }] }] }]
+      - decl: [bdx, i32, 0]
+      - decl: [big_total, i64, 0]
+      - while:
+          condition: { lt: [bdx, 1000] }
+          body:
+            - set: [big_total, { call: [runs.append, "run-1", OutStream.out, filler] }]
+            - set: [bdx, { +: [bdx, 1] }]
+      - set: [fails, { +: [fails, { call: [expect, "200 KB angehängt", { eq: [big_total, 200006] }] }] }]
+      - decl: [nfo1, RunInfo, { call: [runs.info, "run-1"] }]
+      - set: [fails, { +: [fails, { call: [expect, "info.out_bytes = Dateigrösse", { eq: [nfo1.out_bytes, 200006] }] }] }]
+
+      # Fenster mitten in der grossen Datei: genau 100 Bytes, nicht die ganze Datei
+      - decl: [win_big, RunWindow, { call: [runs.window, "run-1", OutStream.out, off_big, 100] }]
+      - set: [fails, { +: [fails, { call: [expect, "grosses Fenster → genau 100 B", { eq: [win_big.data.len, 100] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "grosses Fenster → next 100100", { eq: [win_big.next_offset, 100100] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "grosses Fenster → total", { eq: [win_big.total, 200006] }] }] }]
+
+      # Abschluss: Exit-Code festgehalten, Fenster meldet done
+      - call: [runs.finish, "run-1", 7]
+      - decl: [nfo2, RunInfo, { call: [runs.info, "run-1"] }]
+      - set: [fails, { +: [fails, { call: [expect, "finish → finished", { eq: [nfo2.state, RunState.finished] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "finish → exit 7", { eq: [nfo2.exit_code, 7] }] }] }]
+      - decl: [win_d, RunWindow, { call: [runs.window, "run-1", OutStream.out, off_zero, 10] }]
+      - set: [fails, { +: [fails, { call: [expect, "window nach finish → done", { eq: [win_d.done, 1] }] }] }]
+
+      # unbekannter Lauf: leeres Fenster statt Crash
+      - decl: [win_x, RunWindow, { call: [runs.window, "run-nope", OutStream.out, off_zero, 10] }]
+      - set: [fails, { +: [fails, { call: [expect, "unbekannter Lauf → leer", { eq: [win_x.data.len, 0] }] }] }]
+
+      # ── Agenten-Registry ──────────────────────────────────────────────────
+      - decl: [reg, ptr<AgentRegistry>, { new: AgentRegistry }]
+      - decl: [hello, AgentRegister]
+      - set: [hello.agent_id, "agent-1"]
+      - set: [hello.agent_token, "secret"]
+      - set: [hello.host, "builder-7"]
+      - decl: [is_new, i32, { call: [reg.upsert, hello, 42, tick_a] }]
+      - set: [fails, { +: [fails, { call: [expect, "upsert → neu", { eq: [is_new, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "registry count 1", { eq: [{ call: [reg.count] }, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "peer_of → 42 (gezieltes Routing)", { eq: [{ call: [reg.peer_of, "agent-1"] }, 42] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "agent_of_peer → agent-1", { eq: [{ call: [reg.agent_of_peer, 42] }, "agent-1"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "peer_of unbekannt → 0", { eq: [{ call: [reg.peer_of, "agent-9"] }, 0] }] }] }]
+
+      - call: [reg.set_current_run, "agent-1", "run-1"]
+      - set: [fails, { +: [fails, { call: [expect, "current_run_of", { eq: [{ call: [reg.current_run_of, "agent-1"] }, "run-1"] }] }] }]
+      - decl: [sig_busy, string, { call: [reg.signature] }]
+
+      - set: [fails, { +: [fails, { call: [expect, "heartbeat bekannt", { eq: [{ call: [reg.heartbeat, "agent-1", tick_b] }, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "heartbeat unbekannt → 0", { eq: [{ call: [reg.heartbeat, "agent-9", tick_b] }, 0] }] }] }]
+
+      # Re-Registrierung nach Agent-Neustart: kein Duplikat, neue peer_id
+      - decl: [again, i32, { call: [reg.upsert, hello, 77, tick_c] }]
+      - set: [fails, { +: [fails, { call: [expect, "re-register → kein Duplikat", { eq: [again, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "re-register → count bleibt 1", { eq: [{ call: [reg.count] }, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "re-register → neue peer_id", { eq: [{ call: [reg.peer_of, "agent-1"] }, 77] }] }] }]
+
+      - decl: [lst, AgentList, { call: [reg.snapshot] }]
+      - set: [fails, { +: [fails, { call: [expect, "snapshot 1 Agent", { eq: [lst.agents.len, 1] }] }] }]
+      - decl: [row, AgentInfo, { at: [lst.agents, 0] }]
+      - set: [fails, { +: [fails, { call: [expect, "snapshot → connected", { eq: [row.status, AgentStatus.connected] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "snapshot → host", { eq: [row.host, "builder-7"] }] }] }]
+
+      # Disconnect: als getrennt markiert, kein Routing mehr, Signatur ändert sich
+      - set: [fails, { +: [fails, { call: [expect, "drop_peer trifft 1", { eq: [{ call: [reg.drop_peer, 77, tick_d] }, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "nach Disconnect → kein Routing", { eq: [{ call: [reg.peer_of, "agent-1"] }, 0] }] }] }]
+      - decl: [lst2, AgentList, { call: [reg.snapshot] }]
+      - decl: [row2, AgentInfo, { at: [lst2.agents, 0] }]
+      - set: [fails, { +: [fails, { call: [expect, "nach Disconnect → disconnected", { eq: [row2.status, AgentStatus.disconnected] }] }] }]
+      - decl: [sig_gone, string, { call: [reg.signature] }]
+      - set: [fails, { +: [fails, { call: [expect, "Signatur ändert sich (Push-Trigger)", { neq: [sig_busy, sig_gone] }] }] }]
+
+      # ── Enrollment-Tokens (§AP1.9) ─────────────────────────────────────────
+      - decl: [db_dir, path, ""]
+      - decl: [toks, ptr<AgentTokenStore>, { new: AgentTokenStore }]
+      - call: [toks.init, db_dir]
+      - decl: [made, AgentTokenNew, { call: [toks.create, "builder-1", "pid-alice"] }]
+      - set: [fails, { +: [fails, { call: [expect, "Token erzeugt", { eq: [made.accepted, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Token-Format <id>.<secret>", { gt: [{ call: [made.secret.index_of, "."] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Geheimnis hat 256 bit + id", { gt: [made.secret.len, 70] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "verify akzeptiert", { eq: [{ call: [toks.verify, made.secret] }, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "falsches Geheimnis abgelehnt", { eq: [{ call: [toks.verify, "${made.token_id}.deadbeef"] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Müll ohne Punkt abgelehnt", { eq: [{ call: [toks.verify, "garbage"] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "unbekannte id abgelehnt", { eq: [{ call: [toks.verify, "0000000000000000.x"] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "leeres Token abgelehnt", { eq: [{ call: [toks.verify, ""] }, 0] }] }] }]
+
+      # Kriterium 14: im KV liegt NUR der sha256-Hash, nie das Geheimnis.
+      - decl: [raw_kv, Kv<string:AgentToken>, { call: [db.open_kv, "agent_tokens", {persist: true}] }]
+      - decl: [stored, AgentToken, { call: [raw_kv.get_copy, made.token_id] }]
+      - set: [fails, { +: [fails, { call: [expect, "Hash != Klartext", { neq: [stored.secret_hash, made.secret] }] }] }]
+      - decl: [dot_at, i32, { call: [made.secret.index_of, "."] }]
+      - decl: [plain_sec, string, { call: [made.secret.substr, { +: [dot_at, 1] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Hash = sha256(secret)", { eq: [stored.secret_hash, { call: [hash.sha256, plain_sec] }] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Klartext nirgends im Record", { lt: [{ call: [stored.secret_hash.index_of, plain_sec] }, 0] }] }] }]
+
+      # Nutzung wird fortgeschrieben, Geheimnis nicht ausgeliefert
+      - decl: [tlist, AgentTokenList, { call: [toks.snapshot] }]
+      - set: [fails, { +: [fails, { call: [expect, "snapshot enthält Token", { ge: [tlist.tokens.len, 1] }] }] }]
+      - decl: [trow, AgentTokenInfo, { at: [tlist.tokens, 0] }]
+      - set: [fails, { +: [fails, { call: [expect, "use_count fortgeschrieben", { ge: [trow.use_count, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "nicht widerrufen", { eq: [trow.revoked, 0] }] }] }]
+
+      # Widerruf wirkt
+      - set: [fails, { +: [fails, { call: [expect, "revoke ok", { eq: [{ call: [toks.revoke, made.token_id] }, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "nach Widerruf abgelehnt", { eq: [{ call: [toks.verify, made.secret] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "revoke unbekannt → 0", { eq: [{ call: [toks.revoke, "nope"] }, 0] }] }] }]
+
+      - call: [io.remove_all, "run_logs_test"]
+      - if: { condition: { gt: [fails, 0] }, then: [{ print: ["test_agent_exec: ${fails} failed"] }, { return: 1 }] }
+      - print: ["test_agent_exec PASS"]
+      - return: 0

@@ -1,0 +1,149 @@
+# doc/spec/103 §103.4b (F103-14): die Umgebung des Schritts wird GEBAUT.
+#
+# Das Token des Agenten steht in SEINER Umgebung.  Ohne `env:` erbt sys.exe
+# `environ`, ohne --clearenv gibt bwrap sie weiter — ein Schritt mit
+# `env | grep COSMOS` haette sich als der Agent ausgeben koennen.
+#
+# Der Pruefstand setzt COSMOS_AGENT_TOKEN und ein zweites Scheingeheimnis in
+# die eigene Umgebung; beide duerfen in keiner der beiden Formen auftauchen.
+#
+# Dazu die SCHICHTEN je Stufe (doc/spec/110 §110.33, F110-93/96): wo sie
+# liegen, welche eine Stufe unter sich sieht, und dass ein Wiederlauf die
+# Schichten ab seiner eigenen Stufe wegwirft.  Letzteres ist der Unterschied
+# zwischen „ab hier nochmal" und „Abbild aus zwei Laeufen".
+# Expected exit code: 0
+
+- import: "sources/agent/agent_step.aiml"
+
+- def:
+    name: expect
+    args: [[what, string], [cond, i32]]
+    return: i32
+    body:
+      - if:
+          condition: { eq: [cond, 1] }
+          then: [{ print: ["  ok   ${what}"] }, { return: 0 }]
+      - print: ["  FAIL ${what}"]
+      - return: 1
+
+- def:
+    name: joined
+    args: [[parts, list<string>]]
+    return: { type: string, lifetime: producer }
+    body:
+      - decl: [out, string, ""]
+      - decl: [jix, i32, 0]
+      - while:
+          condition: { lt: [jix, parts.len] }
+          body:
+            - set: [out, "${out} ${{ at: [parts, jix] }}"]
+            - set: [jix, { +: [jix, 1] }]
+      - return: out
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      - decl: [work, ptr<StepWorker>, { new: StepWorker }]
+      - call: [work.init, "agent-env", "linux", "/opt/cosmos/bwrap", "steps", 0]
+
+      # ── Die gebaute Umgebung ────────────────────────────────────────────
+      - decl: [flat, list<string>, { call: [work.step_vars, "steps/r/s", "arch=x86_64,mode=debug", 0] }]
+      - decl: [txt, string, { call: [joined, flat] }]
+      - set: [fails, { +: [fails, { call: [expect, "PATH ist gesetzt", { ge: [{ call: [txt.index_of, "/usr/bin:/bin"] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "HOME ist das Schrittverzeichnis", { ge: [{ call: [txt.index_of, "steps/r/s"] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "TMPDIR ist gesetzt", { ge: [{ call: [txt.index_of, "/tmp"] }, 0] }] }] }]
+      # §103.3 Punkt 2: die Lane-Bindungen sind Umgebung.  `run: "echo $arch"`
+      # lief bis 2026-10-15 mit leerem $arch — die Spec-Zeile war unbelegt.
+      - set: [fails, { +: [fails, { call: [expect, "die Lane-Achse arch steht drin", { ge: [{ call: [txt.index_of, "arch x86_64"] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "die Lane-Achse mode steht drin", { ge: [{ call: [txt.index_of, "mode debug"] }, 0] }] }] }]
+      # Das Entscheidende: KEIN Geheimnis.
+      - set: [fails, { +: [fails, { call: [expect, "kein COSMOS_AGENT_TOKEN", { lt: [{ call: [txt.index_of, "COSMOS_AGENT_TOKEN"] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "kein Token-WERT", { lt: [{ call: [txt.index_of, "streng-geheim-4711"] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "auch kein fremdes Geheimnis", { lt: [{ call: [txt.index_of, "noch-geheimer-0815"] }, 0] }] }] }]
+
+      # Aussen darf LD_LIBRARY_PATH mit (bwrap laedt seine Bibliotheken),
+      # innen nicht.
+      - decl: [outer, list<string>, { call: [work.step_vars, "steps/r/s", "", 1] }]
+      - decl: [otxt, string, { call: [joined, outer] }]
+      - set: [fails, { +: [fails, { call: [expect, "auch aussen kein Token", { lt: [{ call: [otxt.index_of, "streng-geheim-4711"] }, 0] }] }] }]
+
+      # ── Der Sandkasten-Aufruf ───────────────────────────────────────────
+      - decl: [argv, list<string>, { call: [work.sandbox_argv, "steps/r/s", "echo hallo", "arch=arm64"] }]
+      - decl: [atxt, string, { call: [joined, argv] }]
+      - set: [fails, { +: [fails, { call: [expect, "bwrap bekommt --clearenv", { ge: [{ call: [atxt.index_of, "--clearenv"] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und setzt die Variablen selbst", { ge: [{ call: [atxt.index_of, "--setenv PATH"] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "inklusive der Lane-Achse", { ge: [{ call: [atxt.index_of, "--setenv arch arm64"] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "kein Token im Aufruf", { lt: [{ call: [atxt.index_of, "streng-geheim-4711"] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "/opt/cosmos bleibt ungebunden (F103-7)", { lt: [{ call: [atxt.index_of, "/opt/cosmos/agent.token"] }, 0] }] }] }]
+
+      # ── Die Groesse eines Baums (DirScan, doc/spec/107 §107.1c) ─────────
+      # Die Platte im Bild sagt die Groessenordnung — gemessen wird sie hier.
+      # Gezaehlt wird die LOGISCHE Groesse: derselbe Baum muss auf zwei
+      # Rechnern dieselbe Zahl geben, und belegte Bloecke tun das nicht.
+      - decl: [scan, ptr<DirScan>, { new: DirScan }]
+      - call: [scan.init, 64]
+      - call: [io.mkdir_all, "steps/scan/tief/tiefer"]
+      - call: [io.write_file, "steps/scan/eins.txt", "12345"]
+      - call: [io.write_file, "steps/scan/tief/zwei.txt", "123"]
+      - call: [io.write_file, "steps/scan/tief/tiefer/drei.txt", "1"]
+      - decl: [got, DirStat, { call: [scan.of_dir, "steps/scan", 0] }]
+      - set: [fails, { +: [fails, { call: [expect, "drei Dateien in drei Ebenen", { eq: [got.files, 3] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "neun Bytes zusammen", { eq: [got.bytes, 9] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "die Tiefe hat gereicht", { eq: [got.cut, 0] }] }] }]
+      # Ein Verzeichnis, das es nicht gibt, ist nicht ein Fehler, sondern leer:
+      # eine Stufe ohne Schicht hat eben keine.
+      - decl: [nix, DirStat, { call: [scan.of_dir, "steps/gibtesnicht", 0] }]
+      - set: [fails, { +: [fails, { call: [expect, "kein Verzeichnis, keine Schicht", { eq: [nix.files, 0] }] }] }]
+      # Und die Grenze sagt es, statt zu luegen.
+      - decl: [flach, ptr<DirScan>, { new: DirScan }]
+      - call: [flach.init, 1]
+      - decl: [teil, DirStat, { call: [flach.of_dir, "steps/scan", 0] }]
+      - set: [fails, { +: [fails, { call: [expect, "eine abgeschnittene Messung sagt das", { neq: [teil.cut, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und ist eine UNTERgrenze", { lt: [teil.bytes, 9] }] }] }]
+      - call: [io.remove_all, "steps/scan"]
+      - call: [free, flach]
+      - call: [free, scan]
+
+      # ── Die Schichten je Stufe ──────────────────────────────────────────
+      # Die Stufen-Nummer steckt in der Kennung "<lauf>-<lane>-<nr>"; ohne sie
+      # gibt es keine Schicht und der Schritt laeuft wie vorher.
+      - set: [fails, { +: [fails, { call: [expect, "die Stufen-Nummer kommt aus der Kennung", { eq: [{ call: [work.stage_index, "run-7-lane-2"] }, 2] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "eine Kennung ohne Nummer hat keine Schicht", { lt: [{ call: [work.stage_index, "nurname"] }, 0] }] }] }]
+      - decl: [lroot, string, { call: [work.layer_root, "run-7"] }]
+      - set: [fails, { +: [fails, { call: [expect, "die Schichten liegen im Arbeitsbereich des LAUFS (F110-94)", { eq: [lroot, "steps/run-7/layers"] }] }] }]
+
+      # Drei Stufen haben gelegt; Stufe 2 sieht 1 und 0 — juengste zuerst,
+      # danach "/", so liest overlayfs.
+      - call: [io.mkdir_all, "${lroot}/0/upper"]
+      - call: [io.mkdir_all, "${lroot}/1/upper"]
+      - call: [io.mkdir_all, "${lroot}/2/upper"]
+      - decl: [chain, string, { call: [work.lower_chain, "run-7", 2, ""] }]
+      - set: [fails, { +: [fails, { call: [expect, "die juengste Schicht steht links", { eq: [chain, "${lroot}/1/upper:${lroot}/0/upper:/"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "die erste Stufe sieht nur die Wurzel", { eq: [{ call: [work.lower_chain, "run-7", 0, ""] }, "/"] }] }] }]
+
+      # Und der Wiederlauf: Stufe 1 laeuft erneut → 1 und 2 sind weg, 0 bleibt.
+      # Der UNTERBAU (aiml spec/62 §18.4): die Schichten eines anderen Laufs
+      # liegen RECHTS von den eigenen — also mit geringerem Vorrang.
+      - call: [io.mkdir_all, "steps/run-alt/layers/0/upper"]
+      - call: [io.mkdir_all, "steps/run-alt/layers/1/upper"]
+      - decl: [mit_basis, string, { call: [work.lower_chain, "run-7", 1, "run:run-alt"] }]
+      - set: [fails, { +: [fails, { call: [expect, "die eigene Schicht steht vor dem Unterbau", { eq: [mit_basis, "steps/run-7/layers/0/upper:steps/run-alt/layers/1/upper:steps/run-alt/layers/0/upper:/"] }] }] }]
+      - decl: [ohne_basis, string, { call: [work.lower_chain, "run-7", 1, "run:gibtesnicht"] }]
+      - set: [fails, { +: [fails, { call: [expect, "ein unbekannter Unterbau fuegt nichts hinzu", { eq: [ohne_basis, "steps/run-7/layers/0/upper:/"] }] }] }]
+      - call: [io.remove_all, "steps/run-alt"]
+
+      - decl: [tossed, i32, { call: [work.drop_from, "run-7", 1] }]
+      - set: [fails, { +: [fails, { call: [expect, "zwei Schichten ab Stufe 1 verworfen", { eq: [tossed, 2] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Stufe 0 bleibt liegen", { eq: [{ call: [io.is_dir, "${lroot}/0/upper"] }, true] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Stufe 1 ist weg", { eq: [{ call: [io.is_dir, "${lroot}/1"] }, false] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und die spaetere Stufe 2 auch", { eq: [{ call: [io.is_dir, "${lroot}/2"] }, false] }] }] }]
+      - call: [io.remove_all, "steps/run-7"]
+
+      - if:
+          condition: { neq: [fails, 0] }
+          then: [{ print: ["test_step_env FAIL (${fails})"] }, { return: 1 }]
+      - print: ["test_step_env PASS"]
+      - return: 0

@@ -1,0 +1,99 @@
+# rt_bundle — das Bundle lesen und prüfen (doc/spec/110 §110.1).
+#
+# Eingabe ist die OCI-Runtime-Spec: ein Verzeichnis mit `config.json` und
+# `rootfs/`.  Der Vertrag ist geschrieben und versioniert — darum liest
+# cosmos-rt ihn, statt ein eigenes Format zu erfinden.
+
+- import: "sources/runtime/rt_model_config.aiml"
+
+- class:
+    name: RtBundle
+    members:
+      - [conf, RtConfig]
+      - [dir,  string]
+    methods:
+      # load: Verzeichnis → Konfiguration.  Liest NUR, prüft nicht.
+      - def:
+          name: load
+          access: public
+          static_off: ["str_cmp"]
+          args: [[where, string]]
+          return: RtVerdict
+          body:
+            - decl: [out, RtVerdict]
+            - set: [out.holds, 0]
+            - set: [<.dir, where]
+            - decl: [conf_at, string, "${where}/config.json"]
+            - if:
+                condition: { eq: [{ call: [io.is_file, conf_at] }, false] }
+                then:
+                  - set: [out.field, "config.json"]
+                  - set: [out.detail, "nicht gefunden unter ${conf_at}"]
+                  - return: out
+            - decl: [raw, string, { call: [io.read_file, conf_at] }]
+            - if:
+                condition: { eq: [raw.len, 0] }
+                then:
+                  - set: [out.field, "config.json"]
+                  - set: [out.detail, "leer oder nicht lesbar"]
+                  - return: out
+            - set: [<.conf, { call: [sys.deserialize, raw, "RtConfig"] }]
+            - set: [out.holds, 1]
+            - return: out
+
+      # check: die Zusagen der OCI-Spec, die cosmos-rt wirklich braucht.
+      # Geprueft wird, was den Start verhindern WUERDE — nicht alles, was die
+      # Spec kennt: eine Prüfung, die mehr verlangt als die Ausführung, lehnt
+      # gültige Bundles ab.
+      - def:
+          name: check
+          access: public
+          static_off: ["str_cmp"]
+          return: RtVerdict
+          body:
+            - decl: [out, RtVerdict]
+            - set: [out.holds, 0]
+            - if:
+                condition: { eq: [<.conf.ociVersion.len, 0] }
+                then: [{ set: [out.field, "ociVersion"] }, { set: [out.detail, "fehlt"] }, { return: out }]
+            - if:
+                condition: { eq: [<.conf.root.path.len, 0] }
+                then: [{ set: [out.field, "root.path"] }, { set: [out.detail, "fehlt"] }, { return: out }]
+            - if:
+                condition: { eq: [<.conf.process.args.len, 0] }
+                then: [{ set: [out.field, "process.args"] }, { set: [out.detail, "leer — es gäbe nichts zu starten"] }, { return: out }]
+            # Der rootfs-Pfad ist relativ zum Bundle (OCI-Spec), nie absolut
+            # gemeint — sonst zeigte ein Bundle aus fremder Hand auf das Wurzel-
+            # verzeichnis des Hosts.
+            - decl: [rootfs_at, string, { call: [<.rootfs_path] }]
+            - if:
+                condition: { eq: [{ call: [io.is_dir, rootfs_at] }, false] }
+                then: [{ set: [out.field, "root.path"] }, { set: [out.detail, "kein Verzeichnis: ${rootfs_at}"] }, { return: out }]
+            - set: [out.holds, 1]
+            - return: out
+
+      - def:
+          name: rootfs_path
+          access: public
+          static_off: ["str_cmp"]
+          return: { type: string, lifetime: producer }
+          body:
+            - if: { condition: { eq: [{ call: [<.conf.root.path.starts_with, "/"] }, 1] }, then: [{ return: <.conf.root.path }] }
+            - return: "${<.dir}/${<.conf.root.path}"
+
+      - def:
+          name: wants_namespace
+          access: public
+          static_off: ["str_cmp"]
+          args: [[kind, string]]
+          return: i32
+          body:
+            - decl: [nix, i32, 0]
+            - while:
+                condition: { lt: [nix, <.conf.linux.namespaces.len] }
+                body:
+                  - decl: [one, RtNamespace, { at: [<.conf.linux.namespaces, nix] }]
+                  - if: { condition: { eq: [one.type, kind] }, then: [{ return: 1 }] }
+                  - set: [nix, { +: [nix, 1] }]
+            - return: 0
+

@@ -1,0 +1,32 @@
+# AP1.9 (doc/spec/90): Enrollment-Tokens für Agenten.
+#
+# AgentToken ist der SERVER-Record: er trägt nur den sha256-Hash des Geheimnisses,
+# nie das Geheimnis selbst.  AgentTokenInfo ist die UI-Sicht und trägt bewusst
+# auch den Hash NICHT — zum Browser geht kein Hash.
+
+- model:
+    name: AgentToken
+    fields:
+      - [token_id,     string]
+      - [label,        string]
+      - [created_by,   string]   # opake player_id
+      - [created_ms,   i64]
+      - [last_used_ms, i64]
+      - [use_count,    i32]
+      - [revoked,      i32]
+      - [secret_hash,  string]   # hash.sha256(secret) — nur das
+
+- model:
+    name: AgentTokenInfo
+    fields:
+      - [token_id,     string]
+      - [label,        string]
+      - [created_ms,   i64]
+      - [last_used_ms, i64]
+      - [use_count,    i32]
+      - [revoked,      i32]
+
+- model:
+    name: AgentTokenList
+    fields:
+      - [tokens, list<AgentTokenInfo>]

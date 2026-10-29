@@ -1,0 +1,177 @@
+# Abnahme der RPC-Handler, die sonst nur im Browser laufen.
+#
+# Nach der Umstellung auf Gruppen-Instanzen (spec/58) greifen alle Handler über
+# `sees`-Kanten auf die Dienste zu.  Für die Agenten-Handler beweist
+# e2e_agent_exec, dass das trägt; für Auth-Profil, Logout, validate_token und
+# die Cluster-Leser gab es keinen automatischen Nachweis — der steht hier.
+#
+# Erwartet einen laufenden cosmosd (run_rpc_surface.sh startet ihn).
+# Exit 0 = alle Prüfungen bestanden.
+
+- import: "test/rpc_surface.aiml"
+
+# Kleine Vergleichshilfen: `check` nimmt i32, und ein String-Vergleich
+# bzw. eine Laengenpruefung muss daher vorher zu 0/1 werden.
+- def:
+    name: str_eq_i32
+    static_off: ["str_cmp"]
+    args: [[lhs, string], [rhs, string]]
+    return: i32
+    body:
+      - if: { condition: { eq: [lhs, rhs] }, then: [{ return: 1 }] }
+      - return: 0
+
+- def:
+    name: len_gt_i32
+    args: [[val, string]]
+    return: i32
+    body:
+      - if: { condition: { gt: [val.len, 0] }, then: [{ return: 1 }] }
+      - return: 0
+
+- def:
+    name: gt_i32
+    args: [[val, i32], [bound, i32]]
+    return: i32
+    body:
+      - if: { condition: { gt: [val, bound] }, then: [{ return: 1 }] }
+      - return: 0
+
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [url, string, "ws://127.0.0.1:8799"]
+      - decl: [envm, map<string:string>, { call: [sys.env] }]
+      - if: { condition: { gt: [{ call: [envm.contains, "COSMOS_E2E_URL"] }, 0] }, then: [{ set: [url, { call: [envm.get, "COSMOS_E2E_URL"] }] }] }
+      - decl: [cli, ptr<RpcSurface>, { new: RpcSurface }]
+      - if:
+          condition: { neq: [{ call: [cli.connect, url] }, 1] }
+          then: [{ return: 1 }]
+
+      # Frische Kennung je Lauf, damit wiederholte Läufe nicht am schon
+      # vergebenen Konto scheitern.
+      - decl: [now_ms, i64, { call: [time.now] }]
+      - decl: [stamp, string, "${now_ms}"]
+      - decl: [mail, string, "surface_${stamp}@example.test"]
+
+      - print: ["[surface] Konto + Anmeldung"]
+      # doc/spec/109 R4: ein zweiter, gezielter Lauf, NACHDEM der Agent da ist.
+      # Zur Zeit des Hauptlaufs laeuft noch keiner — run_e2e.sh startet ihn spaeter —
+      # und eine Pruefung, die zu frueh schaut, misst nur die eigene Ungeduld.
+      - if:
+          condition: { gt: [{ call: [envm.contains, "COSMOS_E2E_AGENTLOAD"] }, 0] }
+          then:
+            - decl: [al_mail, string, "agentload@example.test"]
+            - decl: [al_tok, i32, { call: [cli.register_and_login, al_mail, "pw-agentload"] }]
+            - call: [cli.agent_reports_load, 12]
+            - call: [cli.close]
+            - decl: [al_bad, i32, { call: [cli.fail_count] }]
+            - if:
+                condition: { neq: [al_bad, 0] }
+                then: [{ print: ["e2e_rpc_surface FAIL (Agentenlast) — ${al_bad}"] }, { return: 1 }]
+            - print: ["e2e_rpc_surface PASS (Agentenlast)"]
+            - return: 0
+
+      - decl: [tok_len, i32, { call: [cli.register_and_login, mail, "pw-surface-1"] }]
+      - if:
+          condition: { eq: [tok_len, 0] }
+          then: [{ print: ["[surface] ABBRUCH: keine Anmeldung, der Rest hängt daran"] }, { return: 1 }]
+
+      - print: ["[surface] validate_token"]
+      - call: [cli.validate, { call: [cli.tok] }, 1]
+      - call: [cli.validate, "offensichtlich-kein-token", 0]
+
+      - print: ["[surface] Cluster-Leser"]
+      - call: [cli.cluster_read, "get_cluster", { call: [cli.tok] }, 1]
+      - call: [cli.cluster_read, "get_cluster", "offensichtlich-kein-token", 0]
+      - call: [cli.cluster_read, "subscribe_cluster", { call: [cli.tok] }, 1]
+
+      - print: ["[surface] Profil"]
+      - call: [cli.set_nick, "SurfaceNick"]
+      - call: [cli.change_pass, "falsches-altes-pw", "pw-surface-2", 0]
+      - call: [cli.change_pass, "pw-surface-1", "pw-surface-2", 1]
+      - decl: [mail2, string, "surface_${stamp}_b@example.test"]
+      - call: [cli.change_mail, mail2, "pw-surface-2"]
+
+      # ── Einrichtung aus der App (doc/spec/94 §94.5a) ────────────────────
+      # Der Testclient spannt selbst einen sshd auf (aiml-spec/32_6 §7, nur
+      # 127.0.0.1); cosmosd bekommt harmlose Knoten-Vorgaben ueber die
+      # Umgebung (run_e2e.sh setzt sie).
+      - print: ["[surface] Agent-Einrichtung ueber SSH"]
+      - decl: [ssh_port, i32, 22907]
+      - decl: [node, ssh_test_server, { call: [ssh.test_listen, ssh_port, "deploy", "pw-node"] }]
+      - if:
+          condition: { eq: [node, null] }
+          then: [{ print: ["  FAIL Test-sshd startet nicht (Port ${ssh_port})"] }, { return: 1 }]
+      - decl: [node_thread, thread_handle, { call: [node.serve_async] }]
+      - decl: [node_fp, string, { call: [node.fingerprint] }]
+
+      - decl: [prov_req, ProvisionReq]
+      - set: [prov_req.host, "127.0.0.1"]
+      - set: [prov_req.port, ssh_port]
+      - set: [prov_req.login_user, "deploy"]
+      - set: [prov_req.login_password, "pw-node"]
+      - set: [prov_req.sudo_password, "pw-sudo"]
+      - set: [prov_req.label, "e2e-knoten"]
+
+      # Phase 1: ohne Fingerprint → nur Anzeige, kein Schritt
+      - set: [prov_req.expected_fp, ""]
+      - decl: [ph1, ProvisionResp, { call: [cli.provision, prov_req] }]
+      - call: [cli.check, "Phase 1 meldet unbestaetigten Host-Key", { call: [str_eq_i32, ph1.failed_step, "host_key_unconfirmed"] }, 1]
+      - call: [cli.check, "Phase 1 liefert den Fingerprint des Knotens", { call: [str_eq_i32, ph1.fingerprint, node_fp] }, 1]
+      - call: [cli.check, "Phase 1 fuehrt KEINEN Schritt aus", ph1.steps_done, 0]
+
+      # Phase 2: mit bestaetigtem Fingerprint → echte Einrichtung
+      - set: [prov_req.expected_fp, node_fp]
+      - decl: [ph2, ProvisionResp, { call: [cli.provision, prov_req] }]
+      - print: ["  [prov] success=${ph2.success} step='${ph2.failed_step}' steps=${ph2.steps_done} token=${ph2.token_id}"]
+      - print: ["  [prov] Meldung: ${ph2.message}"]
+      - call: [cli.check, "Phase 2 erzeugt ein Enrollment-Token", { call: [len_gt_i32, ph2.token_id] }, 1]
+      # Auf einem Host ohne AppArmor-Profil MUSS die Kette am Nachweis haengen
+      # (Befund 5a) — und zwar NACH dem Ausbringen von Binary und Profil.
+      - call: [cli.check, "Phase 2 haengt am Isolationsnachweis (erwartet ohne sudo)", { call: [str_eq_i32, ph2.failed_step, "verify_isolation"] }, 1]
+      - call: [cli.check, "Phase 2 hat die Schritte davor ausgefuehrt", { call: [gt_i32, ph2.steps_done, 10] }, 1]
+
+      # ── Rückbau über die App (§94.5b) ──────────────────────────────────
+      - set: [prov_req.token_id, ph2.token_id]
+      - decl: [ph3, ProvisionResp, { call: [cli.deprovision, prov_req] }]
+      - print: ["  [prov] Rueckbau: success=${ph3.success} step='${ph3.failed_step}' steps=${ph3.steps_done}"]
+      - call: [cli.check, "Rueckbau laeuft vollstaendig durch", ph3.success, 1]
+      # Das Token MUSS danach tot sein — eine geloeschte Datei auf dem Knoten
+      # macht es nicht ungueltig, nur der Widerruf am Server.
+      - decl: [after_revoke, i32, { call: [cli.agent_token_still_valid, ph2.token_id] }]
+      - call: [cli.check, "Enrollment-Token ist widerrufen", after_revoke, 0]
+
+      - call: [node.stop]
+      - call: [node_thread.join]
+
+      # ── Pipeline einreichen (doc/spec/96 §96.13) ────────────────────────
+      # Der Quelltext geht zum Server, der prueft und faltet aus.  Der Lauf
+      # wird dabei NICHT ausgefuehrt (F96-28) — er entsteht als Datensatz.
+      - print: ["[surface] Pipeline einreichen"]
+      - decl: [pipe_src, string, "- pipeline:\n    name: surface_demo\n    params:\n      - [arch, string, [x86_64, arm64]]\n      - [mode, string, [debug, release]]\n    exclude:\n      - { arch: arm64, mode: release }\n    steps:\n      - stage:\n          name: compile\n          steps:\n            - step:\n                name: build\n                cache: pure\n                args: [arch, mode]\n                return: i32\n                body:\n                  - return: 0\n"]
+      - call: [cli.submit_pipeline, { call: [cli.tok] }, pipe_src, 3]
+      # Ohne gueltiges Token entsteht nichts (F96-33).
+      - call: [cli.submit_pipeline, "offensichtlich-kein-token", pipe_src, 0]
+      # Kaputte Quelle wird abgelehnt, es entsteht kein Lauf (F96-30).
+      - call: [cli.submit_pipeline, { call: [cli.tok] }, "- pipeline:\n    name: kaputt\n    params:\n      - [arch, string, []]\n    steps: []\n", 0]
+
+      # doc/spec/108: Freigabe und Konsole ueber den echten RPC-Weg.
+      - print: ["[surface] Freigabe + Konsole (doc/spec/108)"]
+      - call: [cli.clearance_is, 255]
+      - call: [cli.list_users_denied]
+      - call: [cli.console_denied]
+
+      - print: ["[surface] logout (danach muss das Token tot sein)"]
+      - call: [cli.logout_and_verify]
+
+      - call: [cli.close]
+      - decl: [bad, i32, { call: [cli.fail_count] }]
+      - if:
+          condition: { neq: [bad, 0] }
+          then: [{ print: ["e2e_rpc_surface FAIL — ${bad} Prüfung(en) fehlgeschlagen"] }, { return: 1 }]
+      - print: ["e2e_rpc_surface PASS"]
+      - return: 0

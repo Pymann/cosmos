@@ -1,0 +1,8 @@
+2026-10-22 14:06:17 [INFO      ] [probe] nur die Flagge: 2 Koerper  (/media/nikolai/95a208ef-ffa2-478b-abdd-ff394baa6a76/projects/python/test/cosmos/test/pipe3d_shot.aiml:?)
+2026-10-22 14:06:17 [INFO      ] [probe] 2 Koerper, 0 Rohre, davon flieszend: 0  (/media/nikolai/95a208ef-ffa2-478b-abdd-ff394baa6a76/projects/python/test/cosmos/test/pipe3d_shot.aiml:?)
+2026-10-22 14:06:17 [INFO      ] [shapes] cosmos_rack: 3 Teil(e)  (client/gfx/mesh_shapes.aiml:?)
+2026-10-22 14:06:17 [INFO      ] [shapes] cosmos_drum: 2 Teil(e)  (client/gfx/mesh_shapes.aiml:?)
+2026-10-22 14:06:17 [INFO      ] [shapes] cosmos_flag: 2 Teil(e)  (client/gfx/mesh_shapes.aiml:?)
+2026-10-22 14:06:17 [INFO      ] [probe] Phase 0 ms → 0 s  (/media/nikolai/95a208ef-ffa2-478b-abdd-ff394baa6a76/projects/python/test/cosmos/test/pipe3d_shot.aiml:?)
+2026-10-22 14:06:20 [INFO      ] [probe] Pixelsumme: 250437  (/media/nikolai/95a208ef-ffa2-478b-abdd-ff394baa6a76/projects/python/test/cosmos/test/pipe3d_shot.aiml:?)
+pipe3d_shot done

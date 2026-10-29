@@ -1,0 +1,18 @@
+# Probe fuer Schichten je Stufe (doc/spec/110 F110-93): jede Stufe legt eine
+# Datei an und sieht, was die vorige hinterlassen hat.
+- pipeline:
+    name: schicht_probe
+    image: ubuntu-base
+    steps:
+      - stage:
+          name: eins
+          timeout: 120000
+          run: "set -e; echo 'eins war hier' > /etc/stufe-eins; echo 'angelegt: /etc/stufe-eins'; ls /etc/stufe-* 2>&1"
+      - stage:
+          name: zwei
+          timeout: 120000
+          run: "set -e; echo '== sehe ich die Spur von eins? =='; cat /etc/stufe-eins; echo 'zwei war hier' > /etc/stufe-zwei; ls /etc/stufe-*"
+      - stage:
+          name: drei
+          timeout: 120000
+          run: "set -e; echo '== beide Spuren? =='; ls /etc/stufe-*; echo '== und was NICHT im Abbild war =='; ls /etc/os-release"

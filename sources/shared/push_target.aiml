@@ -1,0 +1,31 @@
+# Wohin ein Lauf sein Ergebnis legt (aiml spec/62 §18, F62-122).
+#
+#   push:
+#     - { from: bauen, to: "oci:deploy/oci/aiml-builder", tag: "nightly" }
+#
+# `from` nennt eine STUFE, nicht einen Schritt: ein Abbild ist ein
+# Dateisystem, und das Dateisystem gehoert der Stufe (aiml F62-71).
+# `to` traegt ein Schema: `oci:<pfad>` schreibt ein OCI-Layout auf Platte
+# (doc/spec/110 §110.25), ohne Schema ist es eine Registry-Adresse.
+#
+# Push ist ein AUSSENEFFEKT und nie zwischenspeicherbar (aiml F62-69) — was
+# gepusht wird, sehr wohl.  Darum steht hier das Ergebnis mit: die `digest`
+# ist das, was in den Schluessel eines spaeteren `image:` geht (F62-130),
+# nicht der Pfad.
+- model:
+    name: PushTarget
+    fields:
+      - [from_stage, string]
+      # Heisst in der Pipeline `to:` — zwei Zeichen, als aiml-Name unzulaessig
+      # (spec/15).  Der Alias haelt beides: die fremde Schreibweise draussen,
+      # einen lesbaren Namen drinnen.
+      - [target,     string, "", { alias: "to" }]
+      - [tag,        string]
+      # "" = noch nicht geschrieben, sonst "sha256:…" des Manifests.
+      - [digest,     string]
+      # pending | running | done | failed — und WARUM, wenn failed.
+      - [status,     string]
+      - [message,    string]
+      # WER das Dateisystem hergestellt hat — ohne den Agenten findet niemand
+      # die Wurzel, die geschnitten werden soll.
+      - [agent,      string]

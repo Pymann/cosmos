@@ -1,0 +1,24 @@
+# Cosmos cluster node model.
+
+- model:
+    name: Node
+    fields:
+      - [node_id,        string]
+      - [name,           string]
+      - [role,           string]
+      - [status,         string]
+      - [labels,         list<string>]
+      - [agent_tags,     list<string>]
+      - [total_cpu,      i32]
+      - [used_cpu,       i32]
+      - [total_memory,   i32]
+      - [used_memory,    i32]
+      - [endpoint,       string]
+      # doc/spec/104 F104-2: ein Agent ist ein Knoten MIT Anwesenheit.  Vorher
+      # lagen diese Felder in einem zweiten Modell (AgentInfo) hinter einem
+      # zweiten Abonnement — darum konnte kein Bildschirm ausser dem
+      # Agenten-Bildschirm zeigen, ob jemand da ist.
+      # agent_id == "" heisst: Knoten ohne Agent (eine Aussage, kein Fehlen).
+      - [agent_id,       string]
+      - [last_seen_ms,   i64]
+      - [current_run,    string]

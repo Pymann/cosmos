@@ -1,0 +1,42 @@
+# RunRouter — welcher Nutzer hat einen Lauf beauftragt?
+#
+# Ersetzt das nackte Global `g_run_owner` (map<string:i32>).  Die Regel aus
+# doc/spec/90 §AP1.2 Punkt 5 — Ausgabe geht NUR an den Anfrager, nie als
+# Broadcast — hängt an dieser Zuordnung; als Klasse ist sie an einer Stelle
+# nachlesbar statt in drei Handlern verstreut.
+#
+# Klein und beschränkt: ein Eintrag je laufendem Kommando.
+
+- class:
+    name: RunRouter
+    members:
+      - [owners, map<string:i32>]
+    methods:
+      - def:
+          name: assign
+          access: public
+          args: [[run_ref, string], [peer_id, i32]]
+          body:
+            - if: { condition: { eq: [run_ref.len, 0] }, then: [{ return: [] }] }
+            - call: [<.owners.put, run_ref, peer_id]
+
+      # owner_of: peer_id des Anfragers, 0 = unbekannt (dann NICHT senden).
+      - def:
+          name: owner_of
+          access: public
+          args: [[run_ref, string]]
+          return: i32
+          body:
+            - if: { condition: { eq: [run_ref.len, 0] }, then: [{ return: 0 }] }
+            - if: { condition: { eq: [{ call: [<.owners.contains, run_ref] }, 0] }, then: [{ return: 0 }] }
+            - return: { call: [<.owners.get, run_ref] }
+
+      # release: Zuordnung aufgeben (Lauf beendet).  map.remove wirft bei
+      # fehlendem Schlüssel, daher der contains-Wächter.
+      - def:
+          name: release
+          access: public
+          args: [[run_ref, string]]
+          body:
+            - if: { condition: { eq: [run_ref.len, 0] }, then: [{ return: [] }] }
+            - if: { condition: { gt: [{ call: [<.owners.contains, run_ref] }, 0] }, then: [{ call: [<.owners.remove, run_ref] }] }

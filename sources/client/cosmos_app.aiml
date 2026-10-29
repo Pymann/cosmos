@@ -1,0 +1,494 @@
+# CosmosApp — browser/native client: login → menu → cluster, one process (cf. 9rooms MainMenuApp,
+# trimmed to the control-plane: no board/lobby/editor/forum/trade/match polling).
+- import: "sources/client/login_screen.aiml"
+- import: "sources/client/main_menu_screen.aiml"
+- import: "sources/client/cluster_screen.aiml"
+- import: "sources/client/agents_screen.aiml"
+- import: "sources/client/pipeline_screen.aiml"
+- import: "sources/client/shell_screen.aiml"
+- import: "sources/shared/presence.aiml"
+- import: "sources/shared/dashboard.aiml"
+- import: "sources/client/job_runs_screen.aiml"
+- import: "sources/client/job_params_screen.aiml"
+- import: "sources/client/net/session_state.aiml"
+- import: "sources/client/net/push_router.aiml"
+- import: "sources/client/client_state.aiml"   # EINE Drain-Schleife für alle Pushes
+
+- class:
+    name: CosmosApp
+    members:
+      # doc/spec/105 Schritt 1: der Cluster-Schnappschuss gehoert HIER hin,
+      # nicht in ein Global ohne Eigentuemer.
+      # Die Zustands-Gruppe (doc/spec/105): ein Eigentuemer fuer allen
+      # Client-Zustand, statt Globals ohne Eigentuemer.
+      - [state,  ptr<CosmosClient>]
+      - [pres,   Presence]   # doc/spec/104 F104-8
+      - [dash,   Dashboard]  # rechnet die Fusszeilen-Aussage (doc/spec/106)
+      - [win,        window_handle]
+      - [cluster,    ptr<ClusterScreen>]
+      - [shell,      ptr<ShellScreen>]
+      # F107-10: die Lauf-Ansicht ist die JOB-Seite (drei Spalten), kein
+      # eigener Reiter.  RunsScreen ist damit entfallen.
+      - [jobview,    ptr<JobRunsScreen>]
+      # doc/spec/106 §106.6a: der Reiter „Parameter" ist Bereich 9.
+      - [prmview,    ptr<JobParamsScreen>]
+      - [logged_in,  i32]
+      - [area,       i32]
+      - [subscribed, i32]
+    methods:
+      - def:
+          name: init
+          body:
+            - call: [log.set_level, "info"]
+            # doc/spec/105: die Zustands-Gruppe ZUERST — sie besitzt Session,
+            # Schnappschuesse und die Bildschirme, und `sees` verdrahtet deren
+            # Kollaborateure.  Ohne sie ist jeder `<.state.X`-Zugriff ein
+            # Griff ins Leere.
+            - set: [<.state, { new: CosmosClient }]
+            - call: [log.info, "cosmos client booting (login → menu → cluster)"]
+            - decl: [langs_json, string, { call: [io.read_asset, "languages"] }]
+            - decl: [vocab_json, string, { call: [io.read_asset, "vocab"] }]
+            - decl: [rc_vocab, i32, { call: [vocab.load, langs_json, vocab_json] }]
+            - call: [vocab.set_language, 0]
+            - set: [<.win, { call: [engine.create_window, 1280, 720, "Cosmos"] }]
+            - if: { condition: { eq: [<.win, null] }, then: [{ call: [log.error, "create_window failed"] }, { call: [sys.exit, 1] }] }
+            - call: [gl.init]
+            - call: [gl.viewport, 0, 0, 1280, 720]
+            - call: [gl.enable_blend]
+            - call: [ui.init]
+            - call: [engine.prefab_scene_init, 1280, 720]
+            - call: [input.init, <.win]
+            - call: [engine.target_fps, 60]
+            - call: [engine.maximize, <.win]
+            - decl: [font, ui_font, { call: [gl.font, "ui", 14.0] }]
+            - if: { condition: { peq: [font, null] }, then: [{ set: [font, { call: [ui.load_font_default, 14.0] }] }] }
+            - if: { condition: { neq: [font, null] }, then: [{ call: [ui.set_default_font, font] }, { call: [engine.prefab_set_font, font] }] }
+            # Monospace fuer Codefelder (spec/98 F98-15): eigener Font, weil ein
+            # globaler nicht beides sein kann.
+            - decl: [mono, ui_font, { call: [gl.font, "mono", 13.0] }]
+            - if: { condition: { neq: [mono, null] }, then: [{ call: [engine.prefab_add_font, "mono", mono] }] }
+            - call: [<.state.login.init]
+            - call: [<.state.menu.init]
+            - set: [<.cluster, { new: ClusterScreen }]
+            - call: [<.cluster.init]
+            - call: [<.state.agents.init]
+            - call: [<.state.pipes.init]
+            - set: [<.shell, { new: ShellScreen }]
+            - call: [<.shell.init]
+            - set: [<.jobview, { new: JobRunsScreen }]
+            - call: [<.jobview.init]
+            - set: [<.prmview, { new: JobParamsScreen }]
+            - call: [<.prmview.init]
+            - set: [<.prmview.pipelines, <.state.pipelines]
+            - set: [<.prmview.live, <.state.live]
+            # Bereichs-Scenes in den Inhaltsbereich unter die Kopfzeile (F98-16).
+            # doc/spec/107 F107-8: KEINE nachtraegliche Verschiebung mehr.  Diese
+            # +48 lagen ueber Szenen, die ihren eigenen Kopf schon bei y24 hatten
+            # — zusammen schoben sie Knoepfe (u.a. „Starten") unter die
+            # Navigationsleiste.  Inhaltsszenen sitzen auf 0,0 und zeichnen
+            # absolut in die Inhaltsflaeche.
+            # best-effort connect, then auto-login via stored token
+            - decl: [ok_con, i32, { call: [<.state.session.connect, 4000] }]
+            - if: { condition: { eq: [ok_con, 0] }, then: [{ call: [<.state.login.scene.set_text, "status_lbl", "server unreachable"] }] }
+            - decl: [auto_ok, i32, 0]
+            - decl: [stored_tok, string, { call: [<.state.session.load_stored_token] }]
+            - if:
+                condition: { neq: [stored_tok.len, 0] }
+                then:
+                  - decl: [vres, AuthResult, { call: [<.state.session.validate_token, stored_tok] }]
+                  - if: { condition: { eq: [vres.success, 1] }, then: [{ set: [auto_ok, 1] }] }
+                  - if: { condition: { neq: [vres.success, 1] }, then: [{ call: [<.state.session.logout] }] }
+            - call: [<.cluster.set_visible, 0, <.state.live, <.state.agents_state.list]
+            - call: [<.state.agents.set_visible, 0, <.state.agents_state, <.state.tokens_state]
+            - call: [<.state.pipes.set_visible, 0]
+            - call: [<.jobview.set_visible, 0]
+            - call: [<.shell.set_visible, 0]
+            - set: [<.area, 4]
+            - if:
+                condition: { eq: [auto_ok, 1] }
+                then:
+                  - call: [<.state.login.set_visible, 0]
+                  - call: [<.shell.set_visible, 1]
+                  - call: [<.state.menu.set_visible, 1]
+                  - set: [<.logged_in, 1]
+                else:
+                  - call: [<.state.login.set_visible, 1]
+                  - call: [<.state.menu.set_visible, 0]
+      # show_area: genau einen Bereich sichtbar machen (F98-16).
+      - def:
+          name: show_area
+          args: [[which, i32]]
+          body:
+            - set: [<.area, which]
+            - call: [<.shell.mark_area, which]
+            - call: [<.state.pipes.set_visible, 0]
+            - call: [<.jobview.set_visible, 0]
+            - call: [<.cluster.set_visible, 0, <.state.live, <.state.agents_state.list]
+            - call: [<.state.agents.set_visible, 0, <.state.agents_state, <.state.tokens_state]
+            - call: [<.state.menu.set_visible, 0]
+            # 0 = Lauf-Ansicht (drei Spalten), 5 = Quelltext.  Beide gehoeren
+            # zu einem Job und sind darum unter „Jobs" markiert (F107-10).
+            - call: [<.prmview.set_visible, 0]
+            - if: { condition: { eq: [which, 0] }, then: [{ call: [<.jobview.set_visible, 1] }] }
+            # 9 = Parameter (doc/spec/106 §106.6a).  Wie 0 und 5 gehoert er zu
+            # EINEM Job und ist darum unter „Jobs" markiert (F107-10).
+            - if: { condition: { eq: [which, 9] }, then: [{ call: [<.prmview.set_visible, 1] }] }
+            - if: { condition: { eq: [which, 5] }, then: [{ call: [<.state.pipes.set_visible, 1] }] }
+            - if: { condition: { eq: [which, 2] }, then: [{ call: [<.cluster.set_visible, 1, <.state.live, <.state.agents_state.list] }] }
+            - if: { condition: { eq: [which, 3] }, then: [{ call: [<.state.agents.set_visible, 1, <.state.agents_state, <.state.tokens_state] }] }
+            - if: { condition: { eq: [which, 4] }, then: [{ call: [<.state.menu.set_visible, 1] }] }
+            # 7 = Konten, 8 = Konto (doc/spec/107 §107.6): Bereiche wie Agenten und
+            # Jobs.  Jeder Bereich braucht seinen Zweig — ohne ihn macht `show_area`
+            # alles unsichtbar und zeigt nichts (F107-29).
+            - call: [<.state.users_screen.set_visible, 0]
+            - call: [<.state.account.set_visible, 0]
+            - if:
+                condition: { eq: [which, 7] }
+                then:
+                  - call: [<.state.users_screen.set_visible, 1]
+                  # Die Liste beim BETRETEN holen, nicht je Rahmen: ein RPC pro Bild
+                  # waere eine Abfrage ohne Anlass.
+                  - decl: [u_got, i32, { call: [<.state.users_state.refresh] }]
+                  - call: [<.state.users_screen.set_note, <.state.users_state.note]
+            - if: { condition: { eq: [which, 8] }, then: [{ call: [<.state.account.set_visible, 1] }] }
+            # Die Ordnerleiste filtert die JOBLISTE — ueberall sonst taete sie nichts
+            # und saehe trotzdem bedienbar aus (User 2026-10-18).
+            - call: [<.shell.show_folder_bar, { eq: [which, 4] }]
+            # 6 = Skript-Konsole (doc/spec/108)
+            - call: [<.state.console.set_visible, 0]
+            - if: { condition: { eq: [which, 6] }, then: [{ call: [<.state.console.set_visible, 1] }] }
+            - call: [<.shell.set_message, ""]
+
+      - def:
+          name: frame
+          body:
+            - call: [<.state.session.pump]
+            - call: [<.state.push_router.drain]
+            # Verbindung weg?  Wiederaufnehmen, statt bis zum Neuladen tot
+            # dazustehen (Robustheits-Analyse 2026-10-15).  Danach MUESSEN die
+            # Abonnements neu bestellt werden — der Server kennt den alten Peer
+            # nicht mehr, und ohne sie kaeme nie wieder ein Schnappschuss.
+            - if:
+                condition: { '&&': [{ eq: [<.logged_in, 1] }, { eq: [<.state.session.connected, 0] }] }
+                then:
+                  - if:
+                      condition: { eq: [{ call: [<.state.session.reconnect] }, 1] }
+                      then:
+                        - set: [<.subscribed, 0]
+                        - call: [<.shell.set_message, ""]
+                      else: [{ call: [<.shell.set_message, "Verbindung weg — Wiederaufnahme laeuft…"] }]
+            - if:
+                condition: { '&&': [{ eq: [<.logged_in, 1] }, { eq: [<.subscribed, 0] }] }
+                then:
+                  - decl: [sub_ok, i32, { call: [<.state.live.subscribe] }]
+                  - decl: [sub_ag, i32, { call: [<.state.agents_state.subscribe] }]
+                  - set: [<.subscribed, 1]
+            # Maus-/Fokus-Pipeline: ohne update_hover+update_drag bekommt kein text_input Fokus.
+            - decl: [mouse_x, f32, { call: [input.mouse_pos_x] }]
+            - decl: [mouse_y, f32, { call: [input.mouse_pos_y] }]
+            - call: [engine.update_hover, mouse_x, mouse_y]
+            - decl: [mbtn, i32, { call: [input.mouse_button, 0] }]
+            - decl: [mrel, i32, { call: [input.mouse_released, 0] }]
+            - call: [engine.update_drag, mouse_x, mouse_y, mbtn, mrel]
+
+            - if:
+                condition: { eq: [<.logged_in, 0] }
+                then:
+                  - call: [<.state.login.render]
+                  - if:
+                      condition: { eq: [<.state.login.done, 1] }
+                      then:
+                        - call: [<.state.login.set_visible, 0]
+                        - call: [<.shell.set_visible, 1]
+                        - call: [<.show_area, 4]
+                        - set: [<.logged_in, 1]
+                        # doc/spec/108 F108-15: die eigene Freigabe holen und den
+                        # Konsolen-Reiter nur fuer Admin-Konten zeigen.  Verbergen ist
+                        # Komfort — der Server prueft ohnehin (doc/spec/91 §AP2.C).
+                        - decl: [clr_lvl, i32, { call: [<.state.console_state.fetch_level] }]
+                        - call: [<.state.console.set_level, clr_lvl]
+                        - call: [<.shell.show_console_tab, { eq: [clr_lvl, 1] }]
+                        - call: [<.shell.show_users_tab, { eq: [clr_lvl, 1] }]
+                else:
+                  # Huelle zuerst: Bereichswechsel und Logout gelten immer.
+                  - call: [<.shell.poll_folders]
+                  - if:
+                      condition: { eq: [{ call: [<.shell.take_folder] }, 1] }
+                      then: [{ call: [<.state.menu.set_folder, { call: [<.shell.selected_folder] }] }]
+                  - decl: [sel, i32, { call: [<.shell.poll_area] }]
+                  - if: { condition: { ge: [sel, 0] }, then: [{ call: [<.show_area, sel] }] }
+                  # doc/spec/107 F107-3 + §107.6: der Account-Knopf wechselt in den
+                  # Bereich „Konto" (8).  Vorher schaltete er auf die JOBLISTE, dann
+                  # oeffnete er ein Overlay — jetzt tut er, was draufsteht.
+                  - if: { condition: { eq: [{ call: [<.shell.account_pressed] }, 1] }, then: [{ call: [<.show_area, 8] }] }
+                  - if:
+                      condition: { eq: [{ call: [<.shell.logout_pressed] }, 1] }
+                      then:
+                        - call: [<.state.session.logout]
+                        - set: [<.subscribed, 0]
+                        - call: [<.show_area, 4]
+                        - call: [<.shell.set_visible, 0]
+                        - call: [<.state.menu.set_visible, 0]
+                        - call: [<.state.login.reset]
+                        - call: [<.state.login.set_visible, 1]
+                        - set: [<.logged_in, 0]
+                  - if: { condition: { eq: [<.area, 0] }, then: [{ call: [<.jobview.render, <.state.live, <.state.pipelines, <.state.agents_state.list] }] }
+                  - if: { condition: { eq: [<.area, 5] }, then: [{ call: [<.state.pipes.render] }] }
+                  - if:
+                      condition: { '&&': [{ eq: [<.area, 9] }, { gt: [{ call: [<.state.live.has] }, 0] }] }
+                      then: [{ call: [<.prmview.render, <.state.live.view] }]
+                  # Aus der Quelle zurueck zu DEM Job, den man vor sich hatte
+                  # (nicht zur Liste): die Lauf-Ansicht haelt ihre Auswahl.
+                  - if:
+                      condition: { eq: [<.area, 5] }
+                      then:
+                        - if: { condition: { eq: [{ call: [<.state.pipes.take_job] }, 1] }, then: [{ call: [<.show_area, 0] }] }
+                        - if:
+                            condition: { eq: [{ call: [<.state.pipes.take_prm] }, 1] }
+                            then:
+                              - call: [<.prmview.open_job, { call: [<.state.pipes.selected_id] }, <.jobview.job_name]
+                              - call: [<.show_area, 9]
+                  - if: { condition: { eq: [<.area, 2] }, then: [{ call: [<.cluster.render, <.state.live, <.state.agents_state.list] }] }
+                  - if: { condition: { eq: [<.area, 3] }, then: [{ call: [<.state.agents.render, <.state.agents_state, <.state.tokens_state] }] }
+                  - if: { condition: { eq: [<.area, 4] }, then: [{ call: [<.state.menu.render] }] }
+                  # doc/spec/107 §107.6: Konten (7) und Konto (8) sind Bereiche.
+                  # `poll_area` wird EINMAL je Rahmen gefragt (oben) — ein zweiter
+                  # Aufruf sah denselben Klick noch und verdeckte den Fehler (F107-29).
+                  - if: { condition: { eq: [<.area, 8] }, then: [{ call: [<.state.account.render] }] }
+                  - if:
+                      condition: { eq: [<.area, 7] }
+                      then:
+                        - call: [<.state.users_screen.render, <.state.users_state.view]
+                        - if:
+                            condition: { eq: [{ call: [<.state.users_screen.take_apply] }, 1] }
+                            then:
+                              - decl: [u_mail, string, { call: [<.state.users_screen.target_email] }]
+                              - decl: [u_lvl, i32, { call: [<.state.users_screen.target_level] }]
+                              - decl: [u_set, i32, { call: [<.state.users_state.set_level, u_mail, u_lvl] }]
+                              - call: [<.state.users_screen.set_note, <.state.users_state.note]
+                  # doc/spec/108: die Skript-Konsole.  Der Bildschirm ruft nie selbst —
+                  # er merkt den Wunsch, der Wirt schickt den RPC (doc/spec/105).
+                  - if:
+                      condition: { eq: [<.area, 6] }
+                      then:
+                        - call: [<.state.console.render]
+                        # doc/spec/108 F108-18: annehmen, dann nachfragen.  Der Server
+                        # fuehrt das Skript in einem eigenen Faden aus und bleibt
+                        # waehrenddessen bedienbar; der Client fragt je Rahmen nach.
+                        - if:
+                            condition: { eq: [{ call: [<.state.console.take_run] }, 1] }
+                            then:
+                              - decl: [csrc, string, { call: [<.state.console.source_text] }]
+                              - decl: [cres, ConsoleExecResult, { call: [<.state.console_state.start, csrc] }]
+                              - call: [<.state.console.set_level, cres.my_level]
+                              - if:
+                                  condition: { gt: [cres.run_id, 0] }
+                                  then: [{ call: [<.state.console.set_pending, cres.run_id] }]
+                                  else: [{ call: [<.state.console.apply_result, cres] }]
+                        - decl: [pend_no, i32, { call: [<.state.console.pending_run] }]
+                        - if:
+                            condition: { gt: [pend_no, 0] }
+                            then:
+                              - decl: [pres, ConsoleExecResult, { call: [<.state.console_state.poll, pend_no] }]
+                              - if:
+                                  condition: { eq: [pres.finished, 1] }
+                                  then:
+                                    - call: [<.state.console.set_pending, 0]
+                                    - call: [<.state.console.apply_result, pres]
+                  # F107-7: der Klick in der Jobliste.  Der Bildschirm merkt sich
+                  # den Wunsch, der Wirt fuehrt ihn aus — ein Bildschirm, der selbst
+                  # Aufrufe abschickt, haette zwei Eigentuemer fuer eine Sitzung.
+                  - if:
+                      condition: { eq: [<.area, 4] }
+                      then:
+                        # Neuer Job: direkt in den Quelltext (5) — es gibt noch
+                        # keinen Lauf, den man ansehen koennte.
+                        - if:
+                            condition: { eq: [{ call: [<.state.menu.take_new] }, 1] }
+                            then:
+                              - call: [<.state.pipes.new_job]
+                              - call: [<.show_area, 5]
+                        # Ein Klick auf einen Job oeffnet seine LAUF-Ansicht
+                        # (F107-10), nicht den Editor: ansehen ist der haeufige
+                        # Vorgang, bearbeiten der seltene.
+                        - decl: [op_job, i32, { call: [<.state.menu.take_open] }]
+                        - if:
+                            condition: { '&&': [{ ge: [op_job, 0] }, { gt: [{ call: [<.state.live.has] }, 0] }] }
+                            then:
+                              - if:
+                                  condition: { lt: [op_job, <.state.live.view.job_defs.len] }
+                                  then:
+                                    - decl: [ojob, JobDef, { at: [<.state.live.view.job_defs, op_job] }]
+                                    - call: [<.jobview.open_job, ojob.job_id, ojob.name]
+                                    - call: [<.state.pipes.select_job, op_job]
+                                    - call: [<.show_area, 0]
+                        - decl: [st_job, i32, { call: [<.state.menu.take_start] }]
+                        - if:
+                            condition: { '&&': [{ ge: [st_job, 0] }, { gt: [{ call: [<.state.live.has] }, 0] }] }
+                            then:
+                              - if:
+                                  condition: { lt: [st_job, <.state.live.view.job_defs.len] }
+                                  then:
+                                    - decl: [sjob, JobDef, { at: [<.state.live.view.job_defs, st_job] }]
+                                    - decl: [sack, JobAck, { call: [<.state.pipelines.start_job, sjob.job_id] }]
+                                    - call: [<.shell.set_message, sack.message]
+                                    # Aus der Jobliste gestartet: in die
+                                    # Lauf-Ansicht DIESES Laufs wechseln.
+                                    - if:
+                                        condition: { '&&': [{ eq: [sack.accepted, 1] }, { gt: [sack.run_id.len, 0] }] }
+                                        then:
+                                          - call: [<.jobview.focus_run, sack.run_id]
+                                          - call: [<.show_area, 0]
+                  # Die Wuensche der Lauf-Ansicht: Quelltext, Zurueck, Starten.
+                  # Auch hier merkt der Bildschirm nur, der Wirt fuehrt aus.
+                  - if:
+                      condition: { eq: [<.area, 0] }
+                      then:
+                        - if: { condition: { eq: [{ call: [<.jobview.take_src] }, 1] }, then: [{ call: [<.show_area, 5] }] }
+                        # Der Reiter „Parameter": derselbe Job, andere Sicht.
+                        - if:
+                            condition: { eq: [{ call: [<.jobview.take_prm] }, 1] }
+                            then:
+                              - call: [<.prmview.open_job, { call: [<.jobview.selected_job] }, <.jobview.job_name]
+                              - call: [<.show_area, 9]
+                        - if: { condition: { eq: [{ call: [<.jobview.take_back] }, 1] }, then: [{ call: [<.show_area, 4] }] }
+                        - if:
+                            condition: { eq: [{ call: [<.jobview.take_start] }, 1] }
+                            then:
+                              - decl: [vjob, string, { call: [<.jobview.selected_job] }]
+                              - decl: [vack, JobAck, { call: [<.state.pipelines.start_job, vjob] }]
+                              - call: [<.shell.set_message, vack.message]
+                              # „Starten" in der Lauf-Ansicht: auf die NEUE
+                              # Nummer springen.  Vorher blieb die Auswahl auf
+                              # dem alten Lauf stehen, und das Neue passierte
+                              # unsichtbar daneben.
+                              - if:
+                                  condition: { '&&': [{ eq: [vack.accepted, 1] }, { gt: [vack.run_id.len, 0] }] }
+                                  then: [{ call: [<.jobview.focus_run, vack.run_id] }]
+                  # Die Wuensche des Parameter-Reiters (doc/spec/106 §106.6a):
+                  # dieselbe Form wie bei der Lauf-Ansicht — der Bildschirm
+                  # merkt, der Wirt fuehrt aus.
+                  - if:
+                      condition: { eq: [<.area, 9] }
+                      then:
+                        - if: { condition: { eq: [{ call: [<.prmview.take_runs] }, 1] }, then: [{ call: [<.show_area, 0] }] }
+                        - if: { condition: { eq: [{ call: [<.prmview.take_src] }, 1] }, then: [{ call: [<.show_area, 5] }] }
+                        - if: { condition: { eq: [{ call: [<.prmview.take_back] }, 1] }, then: [{ call: [<.show_area, 4] }] }
+                        - if:
+                            condition: { eq: [{ call: [<.prmview.take_start] }, 1] }
+                            then:
+                              - decl: [pjob, string, { call: [<.prmview.selected_job] }]
+                              - decl: [pack, JobAck, { call: [<.state.pipelines.start_job, pjob] }]
+                              - call: [<.shell.set_message, pack.message]
+                              - if:
+                                  condition: { '&&': [{ eq: [pack.accepted, 1] }, { gt: [pack.run_id.len, 0] }] }
+                                  then:
+                                    - call: [<.jobview.focus_run, pack.run_id]
+                                    - call: [<.show_area, 0]
+
+                  # Anwesenheit aus demselben Schnappschuss wie alle Ansichten
+                  # (F104-1) — keine zweite Quelle, kein zweiter Augenblick.
+                  # Die Agentenzahl kommt aus der AGENTENLISTE: der Cluster-
+                  # Schnappschuss wird nur bei Aenderung gepusht und altert im
+                  # Leerlauf — daraus zu zaehlen ergab „0/1 verbunden", waehrend
+                  # die Liste denselben Agenten als „vor 18 s" fuehrte.
+                  - decl: [agent_total, i32, 0]
+                  - decl: [agent_live, i32, 0]
+                  - if:
+                      condition: { pneq: [<.state.agents_state.list, null] }
+                      then:
+                        - decl: [aix, i32, 0]
+                        - while:
+                            condition: { lt: [aix, <.state.agents_state.list.agents.len] }
+                            body:
+                              - decl: [arow, AgentInfo, { at: [<.state.agents_state.list.agents, aix] }]
+                              - set: [agent_total, { +: [agent_total, 1] }]
+                              # `online` entscheidet der SERVER — er sieht die
+                              # Herzschlaege; die Client-Kopie altert nur.
+                              - if: { condition: { eq: [arow.online, 1] }, then: [{ set: [agent_live, { +: [agent_live, 1] }] }] }
+                              - set: [aix, { +: [aix, 1] }]
+                  # doc/spec/107 F107-4: die rechte Spalte der Huelle fuellen —
+                  # aus DEMSELBEN Schnappschuss wie alles andere (F104-1).
+                  - if:
+                      condition: { gt: [{ call: [<.state.live.has] }, 0] }
+                      then:
+                        - call: [<.shell.set_live, <.state.live.view, <.state.agents_state.list, { call: [<.state.live.revision] }, { call: [<.state.live.server_now] }]
+                  # Die Fusszeile sagte bis 2026-10-15 fest „verbunden" und fest
+                  # „kein Lauf aktiv" — beides war gar nicht angeschlossen.  Eine
+                  # Anzeige, die immer dasselbe behauptet, ist schlimmer als keine:
+                  # man verlaesst sich darauf.
+                  - decl: [run_txt, string, "kein Lauf aktiv"]
+                  - decl: [stand_ms, i64, 0]
+                  - if:
+                      condition: { gt: [{ call: [<.state.live.has] }, 0] }
+                      then:
+                        - set: [run_txt, { call: [<.dash.footer_runs, <.state.live.view] }]
+                        - set: [stand_ms, <.state.live.view.live.taken_ms]
+                  - call: [<.shell.set_status, <.state.session.connected, agent_total, agent_live, run_txt]
+                  - decl: [stand_now, i64, { call: [time.now] }]
+                  - if: { condition: { gt: [{ call: [<.state.live.has] }, 0] }, then: [{ set: [stand_now, { call: [<.state.live.server_now] }] }] }
+                  - call: [<.shell.set_stand, stand_ms, stand_now]
+                  # doc/spec/109 R5: die Last des Controllers kommt im GLEICHEN
+                  # Schnappschuss wie alles andere (F104-1) — kein eigener Kanal.
+                  # Sie steht jetzt in SEINEM Reiter, nicht in der Fusszeile zwischen
+                  # den Agenten-Zahlen (User 2026-10-18).
+                  - if:
+                      condition: { gt: [{ call: [<.state.live.has] }, 0] }
+                      then:
+                        - call: [<.state.console.set_resources,
+                                 <.state.live.view.srv_cpu_permille,
+                                 <.state.live.view.srv_rss_kb,
+                                 agent_live, agent_total]
+                        - call: [<.state.console.set_runs_active, { call: [<.dash.running_count, <.state.live.view] }]
+            - call: [gl.clear_all, 0.04, 0.04, 0.08, 1.0]
+            - call: [engine.draw_scene]
+            # doc/spec/107 §107.1b: die raeumliche Pipeline NACH der Oberflaeche,
+            # in ihren Ausschnitt.  Der Prefab-Pass kennt keine Tiefe — die
+            # Reihenfolge ist deshalb die einfachste Trennung.
+            - if:
+                condition: { eq: [<.area, 0] }
+                then:
+                  - decl: [fb_size, ivec2, { call: [engine.framebuffer_size, <.win] }]
+                  - call: [<.jobview.draw3d, 0.016, fb_size.x, fb_size.y]
+            # Der Cluster-Reiter zeigt sein Netz im GLEICHEN Verfahren
+            # (doc/spec/107 §107.5a) — ein zweiter Weg waere einer zu viel.
+            - if:
+                condition: { eq: [<.area, 2] }
+                then:
+                  - decl: [cl_size, ivec2, { call: [engine.framebuffer_size, <.win] }]
+                  - call: [<.cluster.draw3d, 0.016, cl_size.x, cl_size.y]
+      - def:
+          name: run
+          return: i32
+          body:
+            - call: [engine.run, <.win, cosmos_update, cosmos_render]
+            - call: [engine.destroy_window, <.win]
+            - return: 0
+
+# Der EINE Anker der Schleife (aiml spec/21 §6.2 F21-S1): `engine.run` nimmt
+# freie Funktionen, ein Rueckruf traegt keinen Zustand.  `singleton: true`
+# erklaert das — und handelt sich die Pruefung F21-S2 ein: dieser Zeiger darf
+# nicht an einen `ptr<T>`-Parameter gehen.
+- decl: [g_cosmos_app, ptr<CosmosApp>, null, { singleton: true }]
+
+- def:
+    name: cosmos_update
+    args: [[dtf, f32]]
+    body:
+      - if: { condition: { peq: [g_cosmos_app, null] }, then: [{ return: [] }] }
+      - if: { condition: { neq: [{ call: [engine.is_iconified, g_cosmos_app.win] }, 0] }, then: [{ return: [] }] }
+      - call: [g_cosmos_app.frame]
+
+- def:
+    name: cosmos_render
+    body: [{ return: [] }]
+
+- def:
+    name: cosmos_run
+    args: [[app, ptr<CosmosApp>]]
+    return: i32
+    body:
+      - set:  [g_cosmos_app, app]
+      - call: [g_cosmos_app.init]
+      - call: [g_cosmos_app.run]
+      - return: 0

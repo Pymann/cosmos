@@ -1,0 +1,102 @@
+# AccountScreen (doc/spec/107 F107-3 + §107.6) — der Bereich „Konto".
+#
+# Anlass (User 2026-10-18): „wenn ich auf account klicke, lande ich nicht bei account".
+# Der Knopf war seit dem Umbau auf den Kopf der Huelle (F107-3) nicht mehr angeschlossen:
+# der alte Ausloeser stand noch in der MainMenuScreen, aber unter
+# `condition: { eq: [0, 1] }` — also tot —, und der Wirt schaltete beim Klick auf die
+# JOBLISTE um.  Der Knopf tat also etwas, nur nicht das, was draufsteht.
+#
+# Ein abgeschalteter Zweig ist dabei schlimmer als ein geloeschter: er sieht aus, als
+# gaebe es die Funktion noch, und niemand sucht den fehlenden Anschluss.
+#
+# Jetzt gehoert der Bildschirm DEM WIRT, wie der Knopf — und ist ein BEREICH wie Agenten
+# und Jobs (§107.6, User 2026-10-18: „mache so wie bei den anderen menues").  Der Knopf
+# oben rechts wechselt den Bereich; zurueck geht es ueber den Kopf, nicht ueber ein X.
+
+- import: "sources/client/prefabs.aiml"
+- import: "sources/client/net/session_state.aiml"
+- import: "sources/models/auth_result.aiml"
+
+- class:
+    name: AccountScreen
+    members:
+      # Kollaborateur; von der Gruppe ueber `sees: [session]` verdrahtet (spec/58 §5.1).
+      - [session,     ref<SessionState>]
+      - [scene,       prefab_instance]
+      - [initialized, i32]
+      - [is_visible,     i32]
+    methods:
+      - def:
+          name: init
+          body:
+            - if: { condition: { eq: [<.initialized, 1] }, then: [{ return }] }
+            - set: [<.scene, { call: [engine.instantiate, "AccountScene"] }]
+            - call: [<.scene.set_pos, 0.0, 0.0]
+            # Wie jeder Bereich auf Ebene 0 — der Kopf der Huelle liegt auf 100.
+            - call: [<.scene.set_z, 0]
+            - call: [<.scene.set_visible, 0]
+            - set: [<.initialized, 1]
+            - set: [<.is_visible, 0]
+
+      # set_visible: wie bei jedem Bereich — der Wirt schaltet, nicht der Bildschirm.
+      # Beim Betreten werden die Felder geleert: ein stehengebliebenes Passwort im
+      # Eingabefeld ist kein Zustand, den jemand wiedersehen will.
+      - def:
+          name: set_visible
+          access: public
+          args: [[vis, i32]]
+          body:
+            - if: { condition: { eq: [<.initialized, 0] }, then: [{ call: [<.init] }] }
+            - if: { condition: { eq: [vis, 0] }, then: [{ call: [<.scene.set_visible, 0] }, { set: [<.is_visible, 0] }, { return }] }
+            - decl: [cur_em, string, <.session.email]
+            - call: [<.scene.set_text, "cur_email_lbl", "Angemeldet als: ${cur_em}"]
+            - call: [<.scene.set_text, "us_email_input", ""]
+            - call: [<.scene.set_text, "us_email_pw", ""]
+            - call: [<.scene.set_text, "us_old_pw", ""]
+            - call: [<.scene.set_text, "us_new_pw", ""]
+            - call: [<.scene.set_text, "us_new_pw2", ""]
+            - call: [<.scene.set_text, "us_status", ""]
+            - call: [<.scene.set_visible, 1]
+            - set: [<.is_visible, 1]
+
+      # render: nur im eigenen Bereich.  E-Mail aendern, Passwort aendern — die
+      # Aufrufe gehen an den SessionState, wie vorher in der MainMenuScreen.
+      - def:
+          name: render
+          access: public
+          body:
+            - if: { condition: { eq: [<.initialized, 0] }, then: [{ call: [<.init] }] }
+            - if: { condition: { eq: [<.is_visible, 0] }, then: [{ return }] }
+            - if:
+                condition: { eq: [{ call: [<.scene.child_clicked, "us_email_btn"] }, 1] }
+                then:
+                  - decl: [new_em, string, { call: [<.scene.text_value, "us_email_input"] }]
+                  - decl: [em_pw, string, { call: [<.scene.text_value, "us_email_pw"] }]
+                  - decl: [em_res, AuthResult, { call: [<.session.change_email, new_em, em_pw] }]
+                  - call: [<.scene.set_text, "us_status", em_res.message]
+                  - if:
+                      condition: { eq: [em_res.success, 1] }
+                      then:
+                        - decl: [cem1, string, <.session.email]
+                        - call: [<.scene.set_text, "cur_email_lbl", "Angemeldet als: ${cem1}"]
+                        - call: [<.scene.set_text, "us_email_input", ""]
+                        - call: [<.scene.set_text, "us_email_pw", ""]
+            - if:
+                condition: { eq: [{ call: [<.scene.child_clicked, "us_pw_btn"] }, 1] }
+                then:
+                  - decl: [old_pw, string, { call: [<.scene.text_value, "us_old_pw"] }]
+                  - decl: [new_pw, string, { call: [<.scene.text_value, "us_new_pw"] }]
+                  - decl: [new_pw2, string, { call: [<.scene.text_value, "us_new_pw2"] }]
+                  - if:
+                      condition: { neq: [new_pw, new_pw2] }
+                      then:
+                        - call: [<.scene.set_text, "us_status", "Die neuen Passwoerter stimmen nicht ueberein."]
+                        - { return }
+                  - decl: [pw_res, AuthResult, { call: [<.session.change_password, old_pw, new_pw] }]
+                  - call: [<.scene.set_text, "us_status", pw_res.message]
+                  - if:
+                      condition: { eq: [pw_res.success, 1] }
+                      then:
+                        - call: [<.scene.set_text, "us_old_pw", ""]
+                        - call: [<.scene.set_text, "us_new_pw", ""]
+                        - call: [<.scene.set_text, "us_new_pw2", ""]

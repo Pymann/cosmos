@@ -1,0 +1,17 @@
+# Probe fuer `requires:` MIT Schichten (doc/spec/110 F110-109): die Pruefung
+# muss in der Wurzel der Stufe stattfinden, nicht im Blick des Agenten — und
+# wenn sie scheitert, muss der Grund im Protokoll der Stufe stehen.
+- pipeline:
+    name: req_probe
+    image: ubuntu-base
+    steps:
+      - stage:
+          name: hat_sh
+          timeout: 60000
+          requires: [sh]
+          run: "echo 'Vorbedingung erfuellt'"
+      - stage:
+          name: fehlt_was
+          timeout: 60000
+          requires: [gibtesnichtxyz]
+          run: "echo 'darf nie laufen'"

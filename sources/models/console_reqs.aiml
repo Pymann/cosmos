@@ -1,0 +1,38 @@
+# RPC-Models der Skript-Konsole (doc/spec/108).
+#
+# Static-Check (spec/49 §14): 2 models — OK.
+
+- model:
+    name: ConsoleExecReq
+    fields:
+      - [token,  string]
+      - [source, string]
+      # 0 = starten, >0 = nach dem Stand DIESES Laufs fragen.  Ein Feld statt eines
+      # zweiten Modells: die Frage ist dieselbe, nur in zwei Zeitpunkten.
+      - [poll_id, i32]
+
+# Ausgabe und Befunde sind GETRENNT (doc/spec/108 §1): was das Skript sagt, ist nicht
+# dasselbe wie das, was der Uebersetzer ueber das Skript sagt.  Eine Ablehnung wie
+# `clearance-denied` in den Ausgabekasten zu mischen, machte beides unlesbar.
+- model:
+    name: ConsoleExecResult
+    fields:
+      - [success,     i32]
+      - [message,     string]
+      - [exit_code,   i32]
+      - [output,      string]
+      - [diagnostics, string]
+      - [duration_ms, i64]
+      # Die Freigabe der Sitzung steht IMMER drin, damit die Oberflaeche eine Ablehnung
+      # erklaeren kann (Level sind nicht geheim, spec/65 F65-16).
+      - [my_level,    i32]
+      # doc/spec/108 §6a: die erste beanstandete Zeile, gezaehlt im Quelltext DES
+      # NUTZERS (die Praeambel ist schon abgezogen).  0 = keine Fundstelle.
+      # Damit kann die Oberflaeche die Zeile markieren, statt den Leser suchen zu
+      # lassen — `set_color_runs` kann faerben, es fehlte nur die Stelle.
+      - [error_line,  i32]
+      # doc/spec/108 F108-18: der Lauf ist ASYNCHRON.  `run_id` benennt ihn, `finished`
+      # sagt, ob das Ergebnis schon gilt.  Ohne diese Trennung blockierte ein Skript die
+      # ganze Steuerebene fuer seine Laufzeit (§AP2.B).
+      - [run_id,      i32]
+      - [finished,    i32]

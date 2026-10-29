@@ -1,0 +1,41 @@
+# Enrollment-Helfer für die AP1-Abnahme (doc/spec/90 §AP1.9) — macht genau das,
+# was ein Nutzer im Web-UI tut: anmelden und ein Agent-Token erzeugen.
+#
+#   ./e2e_enroll                       → erzeugt ein Token, gibt es auf stdout aus
+#   COSMOS_REVOKE_ID=<id> ./e2e_enroll → widerruft dieses Token, gibt "revoked" aus
+#
+# Das Token geht über stdout, damit das Skript es in eine Variable nehmen kann
+# (nicht über log.* — sonst stünde es in den Logdateien).
+#
+# Expected exit code: 0
+
+- import: "test/e2e_runner.aiml"
+
+- def:
+    name: main
+    return: i32
+    body:
+      - decl: [url, string, "ws://127.0.0.1:8765"]
+      - decl: [envm, map<string:string>, { call: [sys.env] }]
+      - if: { condition: { gt: [{ call: [envm.contains, "COSMOS_E2E_URL"] }, 0] }, then: [{ set: [url, { call: [envm.get, "COSMOS_E2E_URL"] }] }] }
+      - decl: [revoke_id, string, ""]
+      - if: { condition: { gt: [{ call: [envm.contains, "COSMOS_REVOKE_ID"] }, 0] }, then: [{ set: [revoke_id, { call: [envm.get, "COSMOS_REVOKE_ID"] }] }] }
+
+      - decl: [runner, ptr<E2eRunner>, { new: E2eRunner }]
+      - if: { condition: { neq: [{ call: [runner.connect, url] }, 1] }, then: [{ return: 1 }] }
+      - if: { condition: { neq: [{ call: [runner.login, "e2e@example.com", "hunter2pw"] }, 1] }, then: [{ return: 1 }] }
+
+      - if:
+          condition: { gt: [revoke_id.len, 0] }
+          then:
+            - decl: [done, i32, { call: [runner.revoke_token, revoke_id] }]
+            - call: [runner.close]
+            - if: { condition: { neq: [done, 1] }, then: [{ print: ["revoke failed"] }, { return: 1 }] }
+            - call: [io.write, io.stdout, "revoked\n"]
+            - return: 0
+
+      - decl: [made, AgentTokenNew, { call: [runner.create_token, "e2e"] }]
+      - call: [runner.close]
+      - if: { condition: { neq: [made.accepted, 1] }, then: [{ print: ["enroll failed: ${made.reason}"] }, { return: 1 }] }
+      - call: [io.write, io.stdout, "${made.secret}\n"]
+      - return: 0

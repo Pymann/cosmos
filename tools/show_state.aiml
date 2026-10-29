@@ -1,0 +1,18 @@
+# Lese-Werkzeug: was fuehrt der Server WIRKLICH?  Keine Vermutung aus dem
+# WAL (der ist Geschichte), sondern der aktuelle Stand der Speicher.
+# Expected exit code: 0
+
+- import: "sources/server/demo_purge.aiml"
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [view, ptr<DemoPurge>, { new: DemoPurge }]
+      - call: [view.open_all]
+      - call: [view.dump]
+      # Nach der Syntax-Umstellung (doc/spec/106 §106.3a): welche gespeicherte
+      # Quelle traegt noch die alte Form?
+      - call: [view.sources]
+      - return: 0

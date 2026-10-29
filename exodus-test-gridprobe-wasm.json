@@ -1,0 +1,69 @@
+{
+  "jobs": 16,
+  "$schema": "exodus.project.config-1.0",
+  "name": "gridprobe_wasm",
+  "version": "0.0.1",
+  "git_packages": [
+    {
+      "name": "emsdk",
+      "repo": "https://github.com/emscripten-core/emsdk.git",
+      "ref": "main",
+      "setup_commands": [
+        [
+          "./emsdk",
+          "install",
+          "3.1.74"
+        ],
+        [
+          "./emsdk",
+          "activate",
+          "3.1.74"
+        ]
+      ],
+      "digest": "d0797f10c9382986e1aefa7b72de8926bed5b04f"
+    }
+  ],
+  "output_type": "wasm",
+  "sources": [
+    "test/test_grid_wasm_probe.aiml"
+  ],
+  "asset_directories": [],
+  "compiler": {
+    "name": "/media/nikolai/95a208ef-ffa2-478b-abdd-ff394baa6a76/projects/python/test/aiml/out/aiml/aiml"
+  },
+  "linker": {
+    "name": "__exodus_cache/git/emsdk/current/upstream/emscripten/emcc",
+    "flags": [
+      "-sASYNCIFY=1",
+      "-sASYNCIFY_STACK_SIZE=131072",
+      "-sSTACK_SIZE=8388608",
+      "-sEXPORTED_RUNTIME_METHODS=['UTF8ToString','ccall','cwrap','Asyncify']",
+      "-sALLOW_MEMORY_GROWTH=1",
+      "-sMAX_WEBGL_VERSION=2",
+      "-sMIN_WEBGL_VERSION=2",
+      "-sFULL_ES3=1",
+      "-sASSERTIONS=2",
+      "-sSTACK_OVERFLOW_CHECK=2",
+      "-sEXIT_RUNTIME=1",
+      "-sENVIRONMENT=node",
+      "-sNODERAWFS=1",
+      "-g2",
+      "-lwebsocket.js"
+    ],
+    "library_paths": [
+      "/media/nikolai/95a208ef-ffa2-478b-abdd-ff394baa6a76/projects/python/test/aiml/out/aiml_wasm/aiml_wasm"
+    ],
+    "libraries": [
+      "aiml_wasm"
+    ]
+  },
+  "env": {
+    "EM_CONFIG": "__exodus_cache/git/emsdk/current/.emscripten",
+    "AIML_STRICT_TOPLEVEL": "1",
+    "AIML_LIFETIME_DROPS": "1",
+    "AIML_MEM_V3": "1"
+  },
+  "optimization": "0",
+  "debug": false,
+  "warnings": []
+}

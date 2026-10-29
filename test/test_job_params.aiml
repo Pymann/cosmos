@@ -1,0 +1,164 @@
+# Abnahme doc/spec/106 §106.6: Parameter aus der Oberflaeche landen als
+# Symbole im Namensraum `prm` im Compiler-Kontext des Laufs.
+#
+# Geprueft wird die Kette ohne Oberflaeche und ohne Netz:
+#   1. `prm_bundle` erzeugt aus den Zeilen eine uebersetzbare Quelle.
+#   2. Eine Pipeline, die `${prm.name}` liest, uebersetzt NUR mit ihnen.
+#   3. Die Werte stehen danach im BEFEHL der Stufe (F106-19) — also im
+#      Datensatz, den die Zuteilung an den Agenten gibt.
+#   4. `datei` traegt den PFAD, nicht den Inhalt (F106-17).
+#   5. `param_problem` weist zurueck, was beim Start zu spaet auffiele
+#      (F106-5/F106-18).
+# Expected exit code: 0
+
+- import: "sources/server/pipeline_submit.aiml"
+
+- def:
+    name: expect
+    args: [[what, string], [cond, i32]]
+    return: i32
+    body:
+      - if:
+          condition: { eq: [cond, 1] }
+          then: [{ print: ["  ok   ${what}"] }, { return: 0 }]
+      - print: ["  FAIL ${what}"]
+      - return: 1
+
+- def:
+    name: expect_str
+    static_off: ["str_cmp"]
+    args: [[what, string], [got, string], [want, string]]
+    return: i32
+    body:
+      - if:
+          condition: { eq: [got, want] }
+          then: [{ print: ["  ok   ${what}"] }, { return: 0 }]
+      - print: ["  FAIL ${what}:"]
+      - print: ["       bekommen: ${got}"]
+      - print: ["       erwartet: ${want}"]
+      - return: 1
+
+- def:
+    name: add_row
+    static_off: ["str_cmp"]
+    args: [[bag, ref<JobParams>], [name, string], [kind, string], [value, string]]
+    return: i32
+    body:
+      - decl: [row, ParamRow]
+      - set: [row.name, name]
+      - set: [row.kind, kind]
+      - set: [row.value, value]
+      - call: [bag.rows.push, row]
+      - return: 0
+
+# Eine Pipeline, die ihre Parameter LIEST — in `run:`, in `image:` und in
+# einer Zeitgrenze geht es nicht (die ist eine Zahl im Quelltext), also hier
+# der Befehl und das Abbild.
+- def:
+    name: source_with_params
+    return: { type: string, lifetime: producer }
+    body:
+      - decl: [out, string, "- pipeline:\n    name: mit_prm\n    image: \"ubuntu-base\"\n"]
+      - set: [out, "${out}    steps:\n      - stage:\n          name: bauen\n"]
+      - set: [out, "${out}          run: \"git checkout ${ { call: [prm_open] } }prm.branch} && make -j${ { call: [prm_open] } }prm.tiefe} TESTS=${ { call: [prm_open] } }prm.mit_tests} < ${ { call: [prm_open] } }prm.keystore}\"\n"]
+      - return: out
+
+# `${` laesst sich in einem aiml-Literal nicht hinschreiben, ohne dass DIESE
+# Datei es einsetzt — also wird es zusammengesetzt.
+- def:
+    name: prm_open
+    return: { type: string, lifetime: producer }
+    body:
+      - decl: [dollar, string, "$"]
+      - return: "${dollar}{"
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      - decl: [submit, ptr<PipelineSubmit>, { new: PipelineSubmit }]
+
+      - decl: [bag, JobParams]
+      - set: [bag.owner_id, "job-eins"]
+      - call: [add_row, bag, "branch", "text", "main"]
+      - call: [add_row, bag, "tiefe", "zahl", "7"]
+      - call: [add_row, bag, "mit_tests", "bool", "1"]
+      - call: [add_row, bag, "keystore", "datei", "cas:abc123"]
+      - call: [add_row, bag, "anmerkung", "langtext", "zwei\nZeilen"]
+
+      # ── 1. die erzeugte Quelle ───────────────────────────────────────────
+      - decl: [prm_src, string, { call: [submit.prm_bundle, bag, "lauf-1"] }]
+      - set: [fails, { +: [fails, { call: [expect, "das Bundle traegt den Namensraum", { ge: [{ call: [prm_src.index_of, "- namespace: prm"] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "eine Funktion je Parameter", { ge: [{ call: [prm_src.index_of, "name: branch"] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "die Zahl ist ein i64", { ge: [{ call: [prm_src.index_of, "return: i64"] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "der Schalter ist ein bool", { ge: [{ call: [prm_src.index_of, "return: bool"] }, 0] }] }] }]
+      # F106-17: die Datei traegt den PFAD, nicht den CAS-Verweis.
+      - set: [fails, { +: [fails, { call: [expect, "die Datei wird ein Pfad im Lauf", { ge: [{ call: [prm_src.index_of, "/work/lauf-1/params/keystore"] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und NICHT der CAS-Verweis", { lt: [{ call: [prm_src.index_of, "cas:abc123"] }, 0] }] }] }]
+      # Der Zeilenumbruch im Langtext ist maskiert — sonst endete das Literal.
+      # Gesucht wird die MASKIERTE Form (Rueckstrich + n), nicht der Umbruch.
+      - set: [fails, { +: [fails, { call: [expect, "der Umbruch im Langtext ist maskiert", { ge: [{ call: [prm_src.index_of, "zwei\\nZeilen"] }, 0] }] }] }]
+
+      # ── 2. ohne Parameter geht die Quelle NICHT durch ────────────────────
+      - decl: [src, string, { call: [source_with_params] }]
+      - decl: [ohne, SubmitCheck, { call: [submit.check, src, ""] }]
+      - set: [fails, { +: [fails, { call: [expect, "ohne Parameter wird abgelehnt", { eq: [ohne.accepted, 0] }] }] }]
+
+      # ── 3. mit ihnen schon, und die Werte stehen im Befehl ───────────────
+      - decl: [mit, SubmitCheck, { call: [submit.check, src, prm_src] }]
+      - set: [fails, { +: [fails, { call: [expect, "mit Parametern wird angenommen", { eq: [mit.accepted, 1] }] }] }]
+      - if:
+          condition: { eq: [mit.accepted, 0] }
+          then: [{ print: ["       Grund: ${mit.message}"] }]
+      - decl: [run, PipelineRun, { call: [submit.expand, src, "lauf-1", prm_src] }]
+      - set: [fails, { +: [fails, { call: [expect, "eine Stufe entsteht", { eq: [run.stages.len, 1] }] }] }]
+      - if:
+          condition: { eq: [run.stages.len, 1] }
+          then:
+            - decl: [one, PipelineStage, { at: [run.stages, 0] }]
+            - decl: [want, string, "git checkout main && make -j7 TESTS=true < /work/lauf-1/params/keystore"]
+            - set: [fails, { +: [fails, { call: [expect_str, "die Werte stehen im Befehl", one.command, want] }] }]
+
+      # ── 4. was beim Speichern abgewiesen wird ────────────────────────────
+      - decl: [leer, JobParams]
+      - call: [add_row, leer, "", "text", "x"]
+      - decl: [why_leer, string, { call: [submit.param_problem, leer] }]
+      - set: [fails, { +: [fails, { call: [expect, "ein Parameter ohne Namen", { gt: [why_leer.len, 0] }] }] }]
+
+      - decl: [kurz, JobParams]
+      - call: [add_row, kurz, "ab", "text", "x"]
+      - decl: [why_kurz, string, { call: [submit.param_problem, kurz] }]
+      - set: [fails, { +: [fails, { call: [expect, "ein zu kurzer Name", { gt: [why_kurz.len, 0] }] }] }]
+
+      - decl: [ziffer, JobParams]
+      - call: [add_row, ziffer, "9rooms", "text", "x"]
+      - decl: [why_ziffer, string, { call: [submit.param_problem, ziffer] }]
+      - set: [fails, { +: [fails, { call: [expect, "ein Name mit Ziffer am Anfang", { gt: [why_ziffer.len, 0] }] }] }]
+
+      - decl: [doppelt, JobParams]
+      - call: [add_row, doppelt, "branch", "text", "main"]
+      - call: [add_row, doppelt, "branch", "text", "next"]
+      - decl: [why_dopp, string, { call: [submit.param_problem, doppelt] }]
+      - set: [fails, { +: [fails, { call: [expect, "zweimal derselbe Name", { gt: [why_dopp.len, 0] }] }] }]
+
+      - decl: [fremd, JobParams]
+      - call: [add_row, fremd, "branch", "wurst", "main"]
+      - decl: [why_fremd, string, { call: [submit.param_problem, fremd] }]
+      - set: [fails, { +: [fails, { call: [expect, "ein unbekannter Typ", { gt: [why_fremd.len, 0] }] }] }]
+
+      - decl: [keine_zahl, JobParams]
+      - call: [add_row, keine_zahl, "tiefe", "zahl", "acht"]
+      - decl: [why_zahl, string, { call: [submit.param_problem, keine_zahl] }]
+      - set: [fails, { +: [fails, { call: [expect, "eine Zahl, die keine ist", { gt: [why_zahl.len, 0] }] }] }]
+
+      - decl: [why_gut, string, { call: [submit.param_problem, bag] }]
+      - set: [fails, { +: [fails, { call: [expect, "eine brauchbare Liste geht durch", { eq: [why_gut.len, 0] }] }] }]
+      - if: { condition: { gt: [why_gut.len, 0] }, then: [{ print: ["       Grund: ${why_gut}"] }] }
+
+      - if:
+          condition: { neq: [fails, 0] }
+          then: [{ print: ["test_job_params FAIL (${fails})"] }, { return: 1 }]
+      - print: ["test_job_params PASS"]
+      - return: 0

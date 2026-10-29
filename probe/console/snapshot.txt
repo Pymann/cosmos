@@ -1,0 +1,2 @@
+nodes=3 ready=3
+workloads=2 running=2

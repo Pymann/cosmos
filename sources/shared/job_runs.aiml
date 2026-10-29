@@ -1,0 +1,144 @@
+# Die Läufe EINES Jobs, geordnet — gerechnet, nicht gezeichnet.
+#
+# Wie Dashboard und MatrixView: die Aussage („welche Läufe, in welcher
+# Reihenfolge, wie beschriftet") ist pruefbar ohne Fenster.  Der Bildschirm
+# (client/job_runs_screen.aiml) zeichnet nur noch, was hier herauskommt.
+#
+# Gelesen wird aus EINEM Schnappschuss (doc/spec/104 F104-1).
+
+- import: "sources/shared/cluster_view.aiml"
+
+- class:
+    name: JobRuns
+    methods:
+      # of_job: die Lauf-Kennungen dieses Jobs, NEUESTE ZUERST.
+      #
+      # Sortiert wird nach Build-Nummer, nicht nach Reihenfolge im
+      # Schnappschuss: der kommt aus einem KV und hat keine verlaessliche
+      # Ordnung — „die letzten drei Laeufe" waeren sonst drei beliebige.
+      - def:
+          name: of_job
+          access: public
+          static_off: ["str_cmp"]
+          args: [[view, ref<ClusterView>], [job_id, string]]
+          return: { type: list<string>, lifetime: producer }
+          body:
+            - decl: [out, list<string>]
+            - if: { condition: { eq: [job_id.len, 0] }, then: [{ return: out }] }
+            - decl: [more, i32, 1]
+            - while:
+                condition: { gt: [more, 0] }
+                body:
+                  - set: [more, 0]
+                  - decl: [top_num, i32, -1]
+                  - decl: [top_id, string, ""]
+                  - decl: [rix, i32, 0]
+                  - while:
+                      condition: { lt: [rix, view.pipelines.len] }
+                      body:
+                        - decl: [prun, PipelineRun, { at: [view.pipelines, rix] }]
+                        - set: [rix, { +: [rix, 1] }]
+                        - if:
+                            condition: { '&&': [{ eq: [prun.job_id, job_id] }, { '&&': [{ gt: [prun.build_number, top_num] }, { eq: [{ call: [out.contains, prun.run_id] }, 0] }] }] }
+                            then:
+                              - set: [top_num, prun.build_number]
+                              - set: [top_id, prun.run_id]
+                  - if: { condition: { gt: [top_id.len, 0] }, then: [{ call: [out.push, top_id] }, { set: [more, 1] }] }
+            - return: out
+
+      # when_of: "DD.MM. HH:MM" aus einem Zeitstempel der SERVER-Uhr.
+      # UTC, und die Ansicht sagt das auch (doc/spec/104 F99-10) — eine
+      # stillschweigend lokale Anzeige waere eine Behauptung ueber die Uhr des
+      # Browsers.
+      - def:
+          name: when_of
+          access: public
+          static_off: ["str_cmp"]
+          args: [[started_ms, i64]]
+          return: { type: string, lifetime: producer }
+          body:
+            - if: { condition: { le: [started_ms, 0] }, then: [{ return: "—" }] }
+            - decl: [stamp, string, { call: [time.format_utc, started_ms] }]
+            - if: { condition: { lt: [stamp.len, 16] }, then: [{ return: "—" }] }
+            - decl: [day_txt, string, { call: [stamp.substr, 8, 2] }]
+            - decl: [mon_txt, string, { call: [stamp.substr, 5, 2] }]
+            - decl: [clock, string, { call: [stamp.substr, 11, 5] }]
+            - return: "${day_txt}.${mon_txt}. ${clock}"
+
+      # short_name: "checkout [arch=x86_64]" → "checkout".  Im Knoten des
+      # Graphen ist nur Platz fuer einen Namen; die Lane steht an ihrer Zeile.
+      - def:
+          name: short_name
+          access: public
+          static_off: ["str_cmp"]
+          args: [[full, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [cut, i32, { call: [full.index_of, " ["] }]
+            - decl: [out, string, full]
+            - if: { condition: { gt: [cut, 0] }, then: [{ set: [out, { call: [full.substr, 0, cut] }] }] }
+            - if: { condition: { gt: [out.len, 8] }, then: [{ set: [out, { call: [out.substr, 0, 8] }] }] }
+            - return: out
+
+      # current_stage: welcher Schritt gehoert JETZT in die Mitte, solange
+      # niemand selbst gewaehlt hat?
+      #
+      # Die Reihenfolge ist die Aussage: ein GESCHEITERTER zuerst (dort will
+      # man hin), dann der LAUFENDE (dort passiert etwas), dann der zuletzt
+      # fertige (dort steht das Ergebnis).  `first_interesting` nimmt am Ende
+      # den ERSTEN — fuer eine einmalige Wahl richtig, fuer ein Mitlaufen
+      # falsch: die Ausgabe blieb bei Stufe eins stehen, waehrend Stufe drei
+      # arbeitete, und man musste von Hand umschalten (gemeldet 22.10.2026).
+      - def:
+          name: current_stage
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run, ref<PipelineRun>]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [cix, i32, 0]
+            - while:
+                condition: { lt: [cix, run.stages.len] }
+                body:
+                  - decl: [cstg, PipelineStage, { at: [run.stages, cix] }]
+                  - set: [cix, { +: [cix, 1] }]
+                  - if: { condition: { eq: [cstg.status, "failed"] }, then: [{ return: cstg.stage_id }] }
+            - set: [cix, 0]
+            - while:
+                condition: { lt: [cix, run.stages.len] }
+                body:
+                  - decl: [rstg, PipelineStage, { at: [run.stages, cix] }]
+                  - set: [cix, { +: [cix, 1] }]
+                  - if: { condition: { eq: [rstg.status, "running"] }, then: [{ return: rstg.stage_id }] }
+            # Nichts laeuft mehr: der ZULETZT fertige traegt das Ergebnis.
+            - decl: [last_done, string, ""]
+            - set: [cix, 0]
+            - while:
+                condition: { lt: [cix, run.stages.len] }
+                body:
+                  - decl: [dstg, PipelineStage, { at: [run.stages, cix] }]
+                  - set: [cix, { +: [cix, 1] }]
+                  - if: { condition: { eq: [dstg.status, "done"] }, then: [{ set: [last_done, dstg.stage_id] }] }
+            - if: { condition: { gt: [last_done.len, 0] }, then: [{ return: last_done }] }
+            - if: { condition: { gt: [run.stages.len, 0] }, then: [{ decl: [one2, PipelineStage, { at: [run.stages, 0] }] }, { return: one2.stage_id }] }
+            - return: ""
+
+      # first_interesting: welcher Schritt gehoert in die Mitte, wenn niemand
+      # geklickt hat?  Der erste GESCHEITERTE oder laufende — das ist fast
+      # immer der gesuchte (doc/spec/107 F107-11).  Sonst der erste.
+      - def:
+          name: first_interesting
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run, ref<PipelineRun>]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [six, i32, 0]
+            - while:
+                condition: { lt: [six, run.stages.len] }
+                body:
+                  - decl: [stg, PipelineStage, { at: [run.stages, six] }]
+                  - set: [six, { +: [six, 1] }]
+                  - if: { condition: { '||': [{ eq: [stg.status, "failed"] }, { eq: [stg.status, "running"] }] }, then: [{ return: stg.stage_id }] }
+            - if: { condition: { gt: [run.stages.len, 0] }, then: [{ decl: [one, PipelineStage, { at: [run.stages, 0] }] }, { return: one.stage_id }] }
+            - return: ""

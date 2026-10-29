@@ -1,0 +1,52 @@
+# Das ANGEBOT des Wirts an Konsolen-Skripte (doc/spec/108 §5).
+#
+# Wird als `shared_lib` gebaut und dem Uebersetzer vorgeladen (F108-9): Name und Level
+# kommen aus `deploy/clearance/console_exports.txt`, die ADRESSE aus dieser Bibliothek.
+# Ein `level:` hier waere wirkungslos und irrefuehrend — die Politik steht in der Tabelle,
+# an EINER Stelle (spec/65 F65-23).
+#
+# Scheibe 1 ist NUR LESEND und liest einen SCHNAPPSCHUSS, nicht das KV (F108-9/§11):
+# zwei Prozesse auf demselben AionDB-Speicher sind nicht vorgesehen.  Der Server schreibt
+# die Datei, diese Bibliothek liest sie.  Wirkende Funktionen gehen in Scheibe 2 ueber eine
+# RPC zurueck an den Server — dann bleibt der Server der einzige Schreiber.
+#
+# Beide Wege in diese Bibliothek sind Umgebungsvariablen, weil sie vom WIRT kommen und
+# nicht vom Skript (spec/65 F65-6: das Skript bestimmt seine Lage nicht selbst).
+
+# cosmos_whoami — wer fuehrt dieses Skript aus.  Der Wirt setzt COSMOS_CONSOLE_ACTOR;
+# das Skript kann es nicht faelschen, weil es die Umgebung seines Prozesses nicht setzt.
+- def:
+    name: cosmos_whoami
+    args: []
+    return: { type: string, lifetime: producer }
+    body:
+      - decl: [cenv, map<string:string>, { call: [sys.env] }]
+      - if:
+          condition: { eq: [{ call: [cenv.contains, "COSMOS_CONSOLE_ACTOR"] }, 0] }
+          then: [{ return: "" }]
+      # spec/23 §sys.env: ein Wert aus `.get` lebt NUR so lange wie die Map — die in
+      # spec/61 zugesagte incref findet nicht statt.  Ihn direkt zurueckzugeben waere ein
+      # dangling String (der Aufrufer bekaeme Speicher, der beim Verlassen stirbt).
+      # Die Interpolation KOPIERT, und das ist der in der Spec genannte Weg.
+      - decl: [actor, string, { call: [cenv.get, "COSMOS_CONSOLE_ACTOR"] }]
+      - return: "${actor}"
+
+# cosmos_cluster_summary — der Cluster-Zustand zum Zeitpunkt des Schnappschusses.
+# Fehlt die Datei, ist die Antwort leer und KEIN Fehler: ein Skript soll daran nicht
+# scheitern, und der Wirt sieht am Start, ob er den Schnappschuss schreibt (F108-9b).
+- def:
+    name: cosmos_cluster_summary
+    args: []
+    return: { type: string, lifetime: producer }
+    body:
+      - decl: [senv, map<string:string>, { call: [sys.env] }]
+      - if:
+          condition: { eq: [{ call: [senv.contains, "COSMOS_CONSOLE_SNAPSHOT"] }, 0] }
+          then: [{ return: "" }]
+      # Dieselbe Regel wie oben: erst kopieren, dann benutzen.  Hier entkommt der Borrow
+      # dem Rumpf nicht, aber der Pfad soll nicht an der Lebensdauer der Map haengen.
+      - decl: [sraw, string, { call: [senv.get, "COSMOS_CONSOLE_SNAPSHOT"] }]
+      - decl: [spath, path, "${sraw}"]
+      # io.read_file liefert "" wenn nicht lesbar (spec/42) — eine eigene Existenzpruefung
+      # waere dieselbe Antwort auf zwei Wegen.
+      - return: { call: [io.read_file, spath] }

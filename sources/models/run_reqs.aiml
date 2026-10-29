@@ -1,0 +1,25 @@
+# AP1 (doc/spec/90 §AP1.4): Kommando beauftragen und an den Agenten weiterreichen.
+# cwd festlegbar (leer = Arbeitsverzeichnis des Agenten).
+
+- model:
+    name: RunReq
+    fields:
+      - [token,    string]
+      - [agent_id, string]
+      - [command,  string]
+      - [cwd,      string]
+
+- model:
+    name: RunAck
+    fields:
+      - [accepted, i32]
+      - [run_ref, string]
+      - [reason,  string]
+
+# cosmosd → Agent (targeted send_rpc)
+- model:
+    name: RunCommand
+    fields:
+      - [run_ref, string]
+      - [command, string]
+      - [cwd,     string]

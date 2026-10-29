@@ -1,0 +1,430 @@
+# MatrixView — das Lane-Gitter in 2D (doc/spec/97 §97.7).
+#
+# Berechnet aus dem LAUF-DATENSATZ, nie aus Beschriftungen (F97-14): die Achsen
+# und die Bindungen jedes Eintrags stehen dort (doc/spec/96 F96-34).
+#
+# Die Abbildung ist dieselbe wie fuer 3D (F97-12), nur ohne Kamera:
+#   Achse 0 -> Spalten, Achse 1 -> Zeilen, alle weiteren -> Kacheln.
+# Mehr Achsen auf Farbe oder Groesse zu legen ist ausgeschlossen (F97-2) —
+# Farbe traegt den Status, Groesse waere nicht ablesbar.
+#
+# Stufen sind SCHICHTEN, keine Spalten (F97-13): `build` nimmt den Index der
+# Stufe und liefert nur deren Zellen.
+
+- import: "sources/shared/pipeline_run.aiml"
+
+# Eine Zelle: ein Platz im Gitter, der WIRKLICH existiert.  Eine von `exclude`
+# entfernte Lane erzeugt KEINE Zelle (F97-16) — sie ist eine Luecke, und eine
+# Luecke in neutraler Farbe saehe aus wie ein ausstehender Schritt.
+- model:
+    name: MatrixCell
+    fields:
+      - [col,      i32]
+      - [row,      i32]
+      - [tile,     i32]
+      - [bindings, string]
+      - [status,   string]
+      - [label,    string]
+
+- model:
+    name: MatrixGrid
+    fields:
+      - [cols,        i32]
+      - [rows,        i32]
+      - [tiles,       i32]
+      - [col_axis,    string]
+      - [row_axis,    string]
+      - [tile_axis,   string]   # "a x b" bei mehreren Kachel-Achsen
+      - [stage_name,  string]
+      - [stage_index, i32]
+      - [stage_count, i32]
+      - [cells,       list<MatrixCell>]
+
+- class:
+    name: MatrixView
+    methods:
+      # ── build: eine Schicht des Gitters ─────────────────────────────────
+      - def:
+          name: build
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run, PipelineRun], [stage_index, i32]]
+          return: { type: MatrixGrid, lifetime: producer }
+          body:
+            - decl: [grid, MatrixGrid]
+            - set: [grid.stage_index, stage_index]
+            - set: [grid.cols, 1]
+            - set: [grid.rows, 1]
+            - set: [grid.tiles, 1]
+            # F97-15: keine Achse heisst EINE Zelle, nicht ein leeres Gitter —
+            # eine Pipeline aus `per: once`-Schritten ist ein realer Fall.
+            - if:
+                condition: { gt: [run.axes.len, 0] }
+                then:
+                  - decl: [ax0, PipelineAxis, { at: [run.axes, 0] }]
+                  - set: [grid.cols, ax0.values.len]
+                  - set: [grid.col_axis, ax0.name]
+            - if:
+                condition: { gt: [run.axes.len, 1] }
+                then:
+                  - decl: [ax1, PipelineAxis, { at: [run.axes, 1] }]
+                  - set: [grid.rows, ax1.values.len]
+                  - set: [grid.row_axis, ax1.name]
+            # Jede weitere Achse wird zur Kachel (F97-12).
+            - decl: [tix, i32, 2]
+            - while:
+                condition: { lt: [tix, run.axes.len] }
+                body:
+                  - decl: [axt, PipelineAxis, { at: [run.axes, tix] }]
+                  - set: [grid.tiles, { '*': [grid.tiles, axt.values.len] }]
+                  - if:
+                      condition: { eq: [grid.tile_axis.len, 0] }
+                      then: [{ set: [grid.tile_axis, axt.name] }]
+                      else: [{ set: [grid.tile_axis, "${grid.tile_axis} x ${axt.name}"] }]
+                  - set: [tix, { +: [tix, 1] }]
+
+            # Wie viele Stufen hat der Lauf?  Die Eintraege sind je (Lane,
+            # Stufe) angelegt (doc/spec/96 F96-31), die Stufenzahl ergibt sich
+            # aus den verschiedenen Stufennamen in Reihenfolge.
+            - decl: [stage_names, list<string>]
+            - decl: [eix, i32, 0]
+            - while:
+                condition: { lt: [eix, run.stages.len] }
+                body:
+                  - decl: [ent, PipelineStage, { at: [run.stages, eix] }]
+                  - decl: [sname, string, { call: [<.stage_of, ent.name] }]
+                  - if:
+                      condition: { eq: [{ call: [<.known, stage_names, sname] }, 0] }
+                      then: [{ call: [stage_names.push, sname] }]
+                  - set: [eix, { +: [eix, 1] }]
+            - set: [grid.stage_count, stage_names.len]
+            - if:
+                condition: { '&&': [{ ge: [stage_index, 0] }, { lt: [stage_index, stage_names.len] }] }
+                then: [{ set: [grid.stage_name, { at: [stage_names, stage_index] }] }]
+
+            # Zellen: nur die Eintraege DIESER Stufe, jede an ihrem Platz.
+            - decl: [cix, i32, 0]
+            - while:
+                condition: { lt: [cix, run.stages.len] }
+                body:
+                  - decl: [ent2, PipelineStage, { at: [run.stages, cix] }]
+                  - decl: [sname2, string, { call: [<.stage_of, ent2.name] }]
+                  - if:
+                      condition: { eq: [sname2, grid.stage_name] }
+                      then:
+                        - decl: [cell, MatrixCell]
+                        - set: [cell.bindings, ent2.bindings]
+                        - set: [cell.status, ent2.status]
+                        - set: [cell.label, ent2.name]
+                        - set: [cell.col, { call: [<.index_of_axis, run, 0, ent2.bindings] }]
+                        - set: [cell.row, { call: [<.index_of_axis, run, 1, ent2.bindings] }]
+                        - set: [cell.tile, { call: [<.tile_of, run, ent2.bindings] }]
+                        - call: [grid.cells.push, cell]
+                  - set: [cix, { +: [cix, 1] }]
+            - return: grid
+
+      # ── cell_at: Index der Zelle an diesem Platz, oder -1 ───────────────
+      # -1 ist die LUECKE (F97-16) und ausdruecklich nicht "neutrale Zelle".
+      - def:
+          name: cell_at
+          access: public
+          static_off: ["str_cmp"]
+          args: [[grid, MatrixGrid], [col, i32], [row, i32], [tile, i32]]
+          return: i32
+          body:
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, grid.cells.len] }
+                body:
+                  - decl: [cur, MatrixCell, { at: [grid.cells, idx] }]
+                  - if:
+                      condition: { '&&': [{ eq: [cur.col, col] }, { '&&': [{ eq: [cur.row, row] }, { eq: [cur.tile, tile] }] }] }
+                      then: [{ return: idx }]
+                  - set: [idx, { +: [idx, 1] }]
+            - return: -1
+
+      # ── render: das Gitter als Festbreiten-Tabelle ──────────────────────
+      #
+      # Text statt gezeichneter Kaestchen, weil die cosmos-Oberflaeche ihre
+      # Listen so zeigt (Textbox + Festbreitenschrift) und `set_color_runs` die
+      # Farbe je Zelle ohnehin traegt — dasselbe Mittel wie die
+      # Syntax-Hervorhebung.  Damit braucht das Gitter keine neue
+      # Prefab-Maschinerie und keine Hoechstzahl an Zellen.
+      #
+      # `runs` bekommt Farb-Tripel (Start, Laenge, Farbe) fuer genau die
+      # Statuswoerter.  Beides in EINER Methode, damit Text und Farben nicht
+      # auseinanderlaufen koennen — zwei Durchlaeufe mit derselben Layout-Logik
+      # waeren zwei Stellen, die man gleich halten muss.
+      #
+      # F97-17: die Farbe traegt den Status, der TEXT nennt ihn trotzdem — die
+      # Darstellung haengt nicht allein an Farbe.
+      - def:
+          name: render
+          access: public
+          static_off: ["str_cmp"]
+          args: [[grid, MatrixGrid], [runs, list<i32>]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [out, string, "Stufe ${grid.stage_index} von ${grid.stage_count}: ${grid.stage_name}\n"]
+            - decl: [tix, i32, 0]
+            - while:
+                condition: { lt: [tix, grid.tiles] }
+                body:
+                  - if:
+                      condition: { gt: [grid.tiles, 1] }
+                      then: [{ set: [out, "${out}\n[${grid.tile_axis} #${tix}]\n"] }]
+                      else: [{ set: [out, "${out}\n"] }]
+                  # Kopfzeile: Achsennamen und die Werte der Spaltenachse.
+                  - decl: [corner, string, "${grid.row_axis} / ${grid.col_axis}"]
+                  - decl: [corner_pad, string, { call: [<.pad, corner, 18] }]
+                  - set: [out, "${out}${corner_pad}"]
+                  - decl: [hix, i32, 0]
+                  - while:
+                      condition: { lt: [hix, grid.cols] }
+                      body:
+                        - decl: [col_txt, string, { call: [<.col_label, grid, hix] }]
+                        - decl: [col_pad, string, { call: [<.pad, col_txt, 12] }]
+                        - set: [out, "${out}${col_pad}"]
+                        - set: [hix, { +: [hix, 1] }]
+                  - set: [out, "${out}\n"]
+                  # Je Zeile: der Wert der Zeilenachse, dann je Spalte der Status.
+                  - decl: [rix, i32, 0]
+                  - while:
+                      condition: { lt: [rix, grid.rows] }
+                      body:
+                        - decl: [row_txt, string, { call: [<.row_label, grid, rix] }]
+                        - decl: [row_pad, string, { call: [<.pad, row_txt, 18] }]
+                        - set: [out, "${out}${row_pad}"]
+                        - decl: [cix, i32, 0]
+                        - while:
+                            condition: { lt: [cix, grid.cols] }
+                            body:
+                              - decl: [found, i32, { call: [<.cell_at, grid, cix, rix, tix] }]
+                              - if:
+                                  condition: { lt: [found, 0] }
+                                  then:
+                                    # F97-16: eine ausgeschlossene Lane ist eine
+                                    # LUECKE.  Sie bekommt KEINE Farbe — eine
+                                    # gefaerbte Zelle saehe aus wie ein Status.
+                                    - decl: [gap_pad, string, { call: [<.pad, "--", 12] }]
+                                    - set: [out, "${out}${gap_pad}"]
+                                  else:
+                                    - decl: [cell, MatrixCell, { at: [grid.cells, found] }]
+                                    - call: [runs.push, out.len]
+                                    - call: [runs.push, cell.status.len]
+                                    - call: [runs.push, { call: [<.status_color, cell.status] }]
+                                    - decl: [st_pad, string, { call: [<.pad, cell.status, 12] }]
+                                    - set: [out, "${out}${st_pad}"]
+                              - set: [cix, { +: [cix, 1] }]
+                        - set: [out, "${out}\n"]
+                        - set: [rix, { +: [rix, 1] }]
+                  - set: [tix, { +: [tix, 1] }]
+            - return: out
+
+      # ── render_run: ALLE Stufen als Schichten untereinander ─────────────
+      #
+      # F97-13: Stufen sind die Abfolge, keine Spalten.  Untereinander
+      # gestapelt zeigt genau das — und spart den Umschalt-Knopf, weil eine
+      # Textbox ohnehin rollt.
+      #
+      # Die Farb-Tripel jeder Schicht werden um die bisherige Textlaenge
+      # VERSCHOBEN.  Ohne das zeigen die Laeufe der zweiten Schicht auf die
+      # erste, und die Faerbung waere still falsch.
+      - def:
+          name: render_run
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run, PipelineRun], [runs, list<i32>]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [out, string, ""]
+            - decl: [probe, MatrixGrid, { call: [<.build, run, 0] }]
+            - decl: [total, i32, probe.stage_count]
+            - if: { condition: { lt: [total, 1] }, then: [{ return: "(keine Stufen)" }] }
+            - decl: [six, i32, 0]
+            - while:
+                condition: { lt: [six, total] }
+                body:
+                  - decl: [grid, MatrixGrid, { call: [<.build, run, six] }]
+                  - decl: [layer_runs, list<i32>]
+                  - decl: [layer, string, { call: [<.render, grid, layer_runs] }]
+                  - decl: [offset, i32, out.len]
+                  - decl: [rix, i32, 0]
+                  # `rix + 2` wird GELESEN, also muss `rix + 2` geprueft werden.
+                  # Die Dreier-Teilbarkeit gilt zwar, aber eine Schleife, die
+                  # weiter liest als sie prueft, ist genau die Sorte Zugriff,
+                  # die nativ still danebengreift und in WASM abstuerzt.
+                  - while:
+                      condition: { lt: [{ +: [rix, 2] }, layer_runs.len] }
+                      body:
+                        - call: [runs.push, { +: [{ at: [layer_runs, rix] }, offset] }]
+                        - call: [runs.push, { at: [layer_runs, { +: [rix, 1] }] }]
+                        - call: [runs.push, { at: [layer_runs, { +: [rix, 2] }] }]
+                        - set: [rix, { +: [rix, 3] }]
+                  - set: [out, "${out}${layer}"]
+                  - set: [six, { +: [six, 1] }]
+            - return: out
+
+      # Solange die Bedeutung der sechs aiml-Farben offen ist (spec/62 §16.6),
+      # faerbt die Oberflaeche die LEBENSZYKLUS-Zustaende, die entschieden sind
+      # (F97-17).  Ein unbekannter Status bleibt neutral — nicht gruen.
+      - def:
+          name: status_color
+          access: public
+          static_off: ["str_cmp"]
+          args: [[status, string]]
+          return: i32
+          body:
+            - if: { condition: { eq: [status, "pending"] }, then: [{ return: 0x7A8899FF }] }
+            - if: { condition: { eq: [status, "running"] }, then: [{ return: 0x8FC7FFFF }] }
+            - if: { condition: { eq: [status, "done"] },    then: [{ return: 0xC8E6A0FF }] }
+            - if: { condition: { eq: [status, "failed"] },  then: [{ return: 0xE08A8AFF }] }
+            - return: 0xDDE6F0FF
+
+      - def:
+          name: col_label
+          access: public
+          static_off: ["str_cmp"]
+          args: [[grid, MatrixGrid], [col, i32]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, grid.cells.len] }
+                body:
+                  - decl: [cur, MatrixCell, { at: [grid.cells, idx] }]
+                  - if:
+                      condition: { eq: [cur.col, col] }
+                      then: [{ return: { call: [<.value_of, cur.bindings, grid.col_axis] } }]
+                  - set: [idx, { +: [idx, 1] }]
+            - return: "?"
+
+      - def:
+          name: row_label
+          access: public
+          static_off: ["str_cmp"]
+          args: [[grid, MatrixGrid], [row, i32]]
+          return: { type: string, lifetime: producer }
+          body:
+            - if: { condition: { eq: [grid.row_axis.len, 0] }, then: [{ return: "-" }] }
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, grid.cells.len] }
+                body:
+                  - decl: [cur, MatrixCell, { at: [grid.cells, idx] }]
+                  - if:
+                      condition: { eq: [cur.row, row] }
+                      then: [{ return: { call: [<.value_of, cur.bindings, grid.row_axis] } }]
+                  - set: [idx, { +: [idx, 1] }]
+            - return: "?"
+
+      # Festbreiten-Spalten: ohne Auffuellen verschiebt sich jede Zeile, und
+      # ein Gitter, dessen Spalten nicht untereinander stehen, ist kein Gitter.
+      - def:
+          name: pad
+          access: public
+          static_off: ["str_cmp"]
+          args: [[text, string], [width, i32]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [out, string, text]
+            - while:
+                condition: { lt: [out.len, width] }
+                body: [{ set: [out, "${out} "] }]
+            - return: out
+
+      # ── Hilfen ──────────────────────────────────────────────────────────
+      # Der Wert einer Achse aus der Bindungszeichenkette.  Zerlegt wird an ","
+      # und "=", NICHT per Teilstringsuche: "mode=" steckt auch in
+      # "node_mode=", und so ein Treffer waere still falsch.
+      - def:
+          name: value_of
+          access: public
+          static_off: ["str_cmp"]
+          args: [[bindings, string], [axis_name, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [parts, list<string>, { call: [bindings.split, ","] }]
+            - decl: [pix, i32, 0]
+            - while:
+                condition: { lt: [pix, parts.len] }
+                body:
+                  - decl: [pair, string, { at: [parts, pix] }]
+                  - decl: [pair_parts, list<string>, { call: [pair.split, "="] }]
+                  - if:
+                      condition: { ge: [pair_parts.len, 2] }
+                      then:
+                        - decl: [key_txt, string, { at: [pair_parts, 0] }]
+                        - if:
+                            condition: { eq: [key_txt, axis_name] }
+                            then: [{ return: { at: [pair_parts, 1] } }]
+                  - set: [pix, { +: [pix, 1] }]
+            - return: ""
+
+      - def:
+          name: index_of_axis
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run, PipelineRun], [axis_pos, i32], [bindings, string]]
+          return: i32
+          body:
+            - if: { condition: { ge: [axis_pos, run.axes.len] }, then: [{ return: 0 }] }
+            - decl: [axis, PipelineAxis, { at: [run.axes, axis_pos] }]
+            - decl: [want, string, { call: [<.value_of, bindings, axis.name] }]
+            - decl: [vix, i32, 0]
+            - while:
+                condition: { lt: [vix, axis.values.len] }
+                body:
+                  - decl: [cur, string, { at: [axis.values, vix] }]
+                  - if: { condition: { eq: [cur, want] }, then: [{ return: vix }] }
+                  - set: [vix, { +: [vix, 1] }]
+            - return: 0
+
+      # Kachel-Index: gemischtes Radix ueber die Achsen ab Position 2.
+      - def:
+          name: tile_of
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run, PipelineRun], [bindings, string]]
+          return: i32
+          body:
+            - decl: [acc, i32, 0]
+            - decl: [aix, i32, 2]
+            - while:
+                condition: { lt: [aix, run.axes.len] }
+                body:
+                  - decl: [axis, PipelineAxis, { at: [run.axes, aix] }]
+                  - set: [acc, { '*': [acc, axis.values.len] }]
+                  - set: [acc, { +: [acc, { call: [<.index_of_axis, run, aix, bindings] }] }]
+                  - set: [aix, { +: [aix, 1] }]
+            - return: acc
+
+      # Der Stufenname aus der Beschriftung "compile [arch=...]".  Hier ist das
+      # Zurueckschneiden erlaubt, weil der Name selbst die Quelle ist — die
+      # STRUKTUR (Achsen, Bindungen) kommt dagegen aus den Feldern (F97-14).
+      - def:
+          name: stage_of
+          access: public
+          static_off: ["str_cmp"]
+          args: [[label, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [cut, i32, { call: [label.index_of, " ["] }]
+            - if: { condition: { lt: [cut, 0] }, then: [{ return: label }] }
+            - return: { call: [label.substr, 0, cut] }
+
+      - def:
+          name: known
+          access: public
+          static_off: ["str_cmp"]
+          args: [[names, list<string>], [needle, string]]
+          return: i32
+          body:
+            - decl: [kix, i32, 0]
+            - while:
+                condition: { lt: [kix, names.len] }
+                body:
+                  - decl: [cur, string, { at: [names, kix] }]
+                  - if: { condition: { eq: [cur, needle] }, then: [{ return: 1 }] }
+                  - set: [kix, { +: [kix, 1] }]
+            - return: 0

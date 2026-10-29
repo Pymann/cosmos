@@ -1,0 +1,14 @@
+# Probe: ueberlebt /ws den Container (doc/spec/110 F110-111)?  Stufe eins legt
+# etwas ab, Stufe zwei liest es — und auf dem Wirt muss es danach liegen.
+- pipeline:
+    name: ws_probe
+    image: ubuntu-base
+    steps:
+      - stage:
+          name: ablegen
+          timeout: 60000
+          run: "set -e; mkdir -p /ws/probe; date > /ws/probe/marke; ls -la /ws/probe"
+      - stage:
+          name: lesen
+          timeout: 60000
+          run: "set -e; cat /ws/probe/marke"

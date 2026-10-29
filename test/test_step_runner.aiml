@@ -1,0 +1,244 @@
+# Abnahme §AP2.D Scheibe 3 (doc/spec/91): derselbe Schritt zweimal → der
+# zweite Lauf ist ein Treffer, und der Treffer stellt den Zustand wieder her.
+#
+# Das ist der erste Punkt, an dem der Nutzen messbar ist — und der erste, an
+# dem der ActionCache ueberhaupt benutzt wird (vorher korrekt, aber unverbunden,
+# doc/spec/95 §95.3).
+#
+# Geprueft wird vor allem, dass es KEINEN falschen Treffer gibt: ein geaenderter
+# Rumpf, ein anderer Input-Baum und ein anderes cwd muessen Fehlschlaege sein.
+# Ein falscher Treffer waere schlimmer als gar kein Cache.
+# Expected exit code: 0
+
+- import: "sources/server/step_runner.aiml"
+
+- def:
+    name: expect
+    args: [[what, string], [cond, i32]]
+    return: i32
+    body:
+      - if:
+          condition: { eq: [cond, 1] }
+          then: [{ print: ["  ok   ${what}"] }, { return: 0 }]
+      - print: ["  FAIL ${what}"]
+      - return: 1
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      - decl: [work, string, "/tmp/cosmos_step"]
+      - decl: [work_p, path, work]
+      - call: [io.remove_all, work_p]
+
+      - decl: [store, ptr<CasStore>, { new: CasStore }]
+      - call: [store.init, "${work}/cas"]
+      - decl: [trees, ptr<CasTrees>, { new: CasTrees }]
+      - call: [trees.init, store]
+      - decl: [cache, ptr<ActionCache>, { new: ActionCache }]
+      - decl: [db_dir, path, "${work}/db"]
+      - call: [cache.init, db_dir]
+      - decl: [runner, ptr<StepRunner>, { new: StepRunner }]
+      - call: [runner.init, trees, cache]
+
+      - decl: [env_a, list<string>]
+      - call: [env_a.push, "LANG=C"]
+      - decl: [step, StepDef]
+      - set: [step.kind, "shell"]
+      - set: [step.body, "echo hallo > ergebnis.txt"]
+      - set: [step.input_tree, ""]
+      - set: [step.cwd, "/w"]
+      - set: [step.env, env_a]
+      # Vorgabe ist opaque (spec/62 §4) — wer Wiederverwendung will, sagt es.
+      - set: [step.cache_class, CacheClass.pure]
+
+      # ── Erster Lauf: kein Treffer ────────────────────────────────────────
+      - decl: [miss, StepOutcome, { call: [runner.lookup, step] }]
+      - set: [fails, { +: [fails, { call: [expect, "erster Lauf ist kein Treffer", { eq: [miss.cached, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Schluessel ist 64 Hex", { eq: [miss.step_key.len, 64] }] }] }]
+
+      # ── "Ausfuehrung": der Schritt erzeugt Dateien im Arbeitsverzeichnis ──
+      - decl: [wd1, string, "${work}/run1"]
+      - decl: [wd1_p, path, wd1]
+      - call: [io.mkdir_all, wd1_p]
+      - decl: [res_file, path, "${wd1}/ergebnis.txt"]
+      - call: [io.write_file, res_file, "hallo\n"]
+      - decl: [sub_p, path, "${wd1}/unter"]
+      - call: [io.mkdir_all, sub_p]
+      - decl: [sub_file, path, "${wd1}/unter/tief.txt"]
+      - call: [io.write_file, sub_file, "verschachtelt"]
+
+      - decl: [out_bytes, i64, 6]
+      - decl: [err_bytes, i64, 0]
+      - decl: [rec, StepOutcome, { call: [runner.record, step, wd1, 0, out_bytes, err_bytes] }]
+      - set: [fails, { +: [fails, { call: [expect, "record liefert einen output_tree", { eq: [rec.output_tree.len, 64] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "record nutzt denselben Schluessel", { eq: [rec.step_key, miss.step_key] }] }] }]
+
+      # ── Zweiter Lauf: Treffer mit demselben Baum ─────────────────────────
+      - decl: [hit, StepOutcome, { call: [runner.lookup, step] }]
+      - set: [fails, { +: [fails, { call: [expect, "Scheibe3 zweiter Lauf ist ein Treffer", { eq: [hit.cached, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Scheibe3 Treffer liefert denselben output_tree", { eq: [hit.output_tree, rec.output_tree] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Treffer liefert den Exit-Code", { eq: [hit.exit_code, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Treffer liefert out_bytes", { eq: [hit.out_bytes, 6] }] }] }]
+
+      # ── Der Treffer stellt den Zustand WIEDER HER ───────────────────────
+      # Ein Treffer, der nur "nichts tun" bedeutet, waere nutzlos.
+      - decl: [wd2, string, "${work}/run2"]
+      - decl: [wd2_p, path, wd2]
+      - call: [io.mkdir_all, wd2_p]
+      - decl: [rc_restore, i32, { call: [runner.restore, hit, wd2] }]
+      - set: [fails, { +: [fails, { call: [expect, "restore gelingt", { eq: [rc_restore, 0] }] }] }]
+      - decl: [back_file, path, "${wd2}/ergebnis.txt"]
+      - decl: [back_txt, string, { call: [io.read_file, back_file] }]
+      - set: [fails, { +: [fails, { call: [expect, "Scheibe3 Datei wiederhergestellt", { eq: [back_txt, "hallo\n"] }] }] }]
+      - decl: [back_deep, path, "${wd2}/unter/tief.txt"]
+      - decl: [deep_txt, string, { call: [io.read_file, back_deep] }]
+      - set: [fails, { +: [fails, { call: [expect, "verschachtelte Datei wiederhergestellt", { eq: [deep_txt, "verschachtelt"] }] }] }]
+      # Und der wiederhergestellte Baum hat dieselbe Adresse.
+      - decl: [tree_back, string, { call: [trees.put_tree, wd2] }]
+      - set: [fails, { +: [fails, { call: [expect, "wiederhergestellter Baum hat dieselbe Adresse", { eq: [tree_back, rec.output_tree] }] }] }]
+
+      # ── Kein falscher Treffer ───────────────────────────────────────────
+      - decl: [step_body, StepDef, step]
+      - set: [step_body.body, "echo anders > ergebnis.txt"]
+      - decl: [m_body, StepOutcome, { call: [runner.lookup, step_body] }]
+      - set: [fails, { +: [fails, { call: [expect, "anderer Rumpf → kein Treffer", { eq: [m_body.cached, 0] }] }] }]
+
+      - decl: [step_in, StepDef, step]
+      - set: [step_in.input_tree, "0000000000000000000000000000000000000000000000000000000000000000"]
+      - decl: [m_in, StepOutcome, { call: [runner.lookup, step_in] }]
+      - set: [fails, { +: [fails, { call: [expect, "anderer Input-Baum → kein Treffer", { eq: [m_in.cached, 0] }] }] }]
+
+      - decl: [step_cwd, StepDef, step]
+      - set: [step_cwd.cwd, "/anderswo"]
+      - decl: [m_cwd, StepOutcome, { call: [runner.lookup, step_cwd] }]
+      - set: [fails, { +: [fails, { call: [expect, "anderes cwd → kein Treffer", { eq: [m_cwd.cached, 0] }] }] }]
+
+      - decl: [step_aiml, StepDef, step]
+      - set: [step_aiml.kind, "aiml"]
+      - decl: [m_kind, StepOutcome, { call: [runner.lookup, step_aiml] }]
+      - set: [fails, { +: [fails, { call: [expect, "anderes kind → kein Treffer", { eq: [m_kind.cached, 0] }] }] }]
+
+      # ── Ein Fehlschlag wird ebenfalls gecacht ───────────────────────────
+      # Sonst laeuft ein reproduzierbar kaputter Schritt endlos neu.
+      - decl: [bad_step, StepDef, step]
+      - set: [bad_step.body, "exit 3"]
+      - decl: [wd3, string, "${work}/run3"]
+      - decl: [wd3_p, path, wd3]
+      - call: [io.mkdir_all, wd3_p]
+      - decl: [zero, i64, 0]
+      - decl: [rec_bad, StepOutcome, { call: [runner.record, bad_step, wd3, 3, zero, zero] }]
+      - decl: [hit_bad, StepOutcome, { call: [runner.lookup, bad_step] }]
+      - set: [fails, { +: [fails, { call: [expect, "Fehlschlag wird getroffen", { eq: [hit_bad.cached, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Fehlschlag behaelt seinen Exit-Code", { eq: [hit_bad.exit_code, 3] }] }] }]
+
+
+      # ── §96/§62: Wiederverwendungsklassen ───────────────────────────────
+      # opaque ist die VORGABE (spec/62 §4): nichts wird wiederverwendet, bis
+      # jemand etwas zusichert.  Ein falscher Treffer ist dann immer eine
+      # Aussage des Autors, nie eine Unterstellung des Systems.
+      - decl: [op_step, StepDef, step]
+      - set: [op_step.body, "curl -fsS https://example.invalid/status"]
+      - set: [op_step.cache_class, CacheClass.opaque]
+      - decl: [wd4, string, "${work}/run4"]
+      - decl: [wd4_p, path, wd4]
+      - call: [io.mkdir_all, wd4_p]
+      - decl: [rec_op, StepOutcome, { call: [runner.record, op_step, wd4, 0, zero, zero] }]
+      - decl: [hit_op, StepOutcome, { call: [runner.lookup, op_step] }]
+      - set: [fails, { +: [fails, { call: [expect, "opaque trifft nie", { eq: [hit_op.cached, 0] }] }] }]
+
+      # resolved: die Sonde laeuft immer, ihr Ergebnis steckt im Schluessel.
+      # Das ist der git-clone-Fall: gleicher Branch-Name, anderer Commit.
+      - decl: [git_step, StepDef, step]
+      # Konkrete URL statt ${REPO}: aiml interpoliert ${...} beim Uebersetzen,
+      # ein Platzhalter fuer den Knoten muesste anders aussehen.  Fuer diesen
+      # Test zaehlt die Trennung von Rumpf und Sonde, nicht das Einsetzen.
+      - set: [git_step.body, "git clone --depth 1 -b main https://example.invalid/r.git src"]
+      - set: [git_step.cache_class, CacheClass.resolved]
+      - set: [git_step.resolve, "git ls-remote https://example.invalid/r.git refs/heads/main | cut -f1"]
+      - set: [git_step.resolve_out, "6de20f6092dcf9bdb1c8efe03db4b70c82b423dd"]
+      - decl: [wd5, string, "${work}/run5"]
+      - decl: [wd5_p, path, wd5]
+      - call: [io.mkdir_all, wd5_p]
+      - decl: [rec_git, StepOutcome, { call: [runner.record, git_step, wd5, 0, zero, zero] }]
+      - decl: [hit_git, StepOutcome, { call: [runner.lookup, git_step] }]
+      - set: [fails, { +: [fails, { call: [expect, "resolved trifft bei gleichem Commit", { eq: [hit_git.cached, 1] }] }] }]
+
+      - decl: [moved, StepDef, git_step]
+      - set: [moved.resolve_out, "0000000000000000000000000000000000000000"]
+      - decl: [hit_moved, StepOutcome, { call: [runner.lookup, moved] }]
+      - set: [fails, { +: [fails, { call: [expect, "Branch bewegt → kein Treffer", { eq: [hit_moved.cached, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "bewegter Branch hat anderen Schluessel", { neq: [hit_moved.step_key, hit_git.step_key] }] }] }]
+
+      # Eine FEHLGESCHLAGENE Sonde heisst: der Schluessel ist unbekannt.  Ein
+      # unbekannter Schluessel darf nicht treffen (spec/62 §6) — sonst wird aus
+      # "ich konnte nicht nachsehen" stillschweigend "es hat sich nichts
+      # geaendert".
+      - decl: [unres, StepDef, git_step]
+      - set: [unres.resolve_out, ""]
+      - decl: [hit_unres, StepOutcome, { call: [runner.lookup, unres] }]
+      - set: [fails, { +: [fails, { call: [expect, "ungeloeste Sonde trifft nicht", { eq: [hit_unres.cached, 0] }] }] }]
+
+      # Die Sonden-Ausgabe muss laengenpraefigiert in den Schluessel eingehen:
+      # sonst ergaeben Rumpf "ab" + Sonde "c" und Rumpf "a" + Sonde "bc"
+      # denselben Schluessel.
+      - decl: [sp1, StepDef, git_step]
+      - set: [sp1.body, "ab"]
+      - set: [sp1.resolve_out, "c"]
+      - decl: [sp2, StepDef, git_step]
+      - set: [sp2.body, "a"]
+      - set: [sp2.resolve_out, "bc"]
+      - decl: [k_sp1, string, { call: [runner.key_of, sp1] }]
+      - decl: [k_sp2, string, { call: [runner.key_of, sp2] }]
+      - set: [fails, { +: [fails, { call: [expect, "Rumpf und Sonde sind getrennt", { neq: [k_sp1, k_sp2] }] }] }]
+
+      # pure und resolved mit gleichem Rumpf sind NICHT derselbe Schritt: die
+      # Klasse ist Teil der Aussage, nicht nur Steuerung des Caches.
+      - decl: [pure_same, StepDef, git_step]
+      - set: [pure_same.cache_class, CacheClass.pure]
+      - set: [pure_same.resolve_out, "6de20f6092dcf9bdb1c8efe03db4b70c82b423dd"]
+      - decl: [hit_pure, StepOutcome, { call: [runner.lookup, pure_same] }]
+      - set: [fails, { +: [fails, { call: [expect, "Klasse gehoert zum Schluessel", { eq: [hit_pure.cached, 0] }] }] }]
+      # Die UMGEBUNG gehoert zum Schluessel (aiml spec/62 §18, F62-66/67/130):
+      # derselbe Befehl in zwei Abbildern ist nicht derselbe Schritt.  Verglichen
+      # wird die DIGEST, nicht der Pfad — ein Pfad bewegt sich, der Inhalt nicht.
+      - decl: [img_a, StepDef, git_step]
+      - set: [img_a.image_digest, "sha256:aaa"]
+      - decl: [img_b, StepDef, git_step]
+      - set: [img_b.image_digest, "sha256:bbb"]
+      - decl: [k_img_a, string, { call: [runner.key_of, img_a] }]
+      - decl: [k_img_b, string, { call: [runner.key_of, img_b] }]
+      - set: [fails, { +: [fails, { call: [expect, "zwei Abbilder, zwei Schluessel", { neq: [k_img_a, k_img_b] }] }] }]
+      # Gegenprobe: dieselbe Digest ergibt denselben Schluessel — sonst waere der
+      # Cache nutzlos statt nur sicher.
+      - decl: [img_a2, StepDef, git_step]
+      - set: [img_a2.image_digest, "sha256:aaa"]
+      - decl: [k_img_a2, string, { call: [runner.key_of, img_a2] }]
+      - set: [fails, { +: [fails, { call: [expect, "dieselbe Digest, derselbe Schluessel", { eq: [k_img_a, k_img_a2] }] }] }]
+      # Und derselbe Schritt zweimal gelesen ergibt denselben Schluessel — ein
+      # Schluessel, der sich beim Lesen bewegt, trifft nie, und das sieht wie ein
+      # harmloses "kein Treffer" aus (Ursache war aiml spec/61 §7: eine
+      # Wertmodell-Kopie teilte ihre Stringfelder ohne incref).
+      - decl: [k_wieder, string, { call: [runner.key_of, img_a] }]
+      - set: [fails, { +: [fails, { call: [expect, "zweimal gelesen, derselbe Schluessel", { eq: [k_img_a, k_wieder] }] }] }]
+      # Die FREIGABEN gehoeren dazu (aiml spec/62 §18.1b, F62-139): derselbe
+      # Befehl sieht mit /mnt/quellen etwas anderes als ohne.  Name und Ziel,
+      # nicht der Inhalt — darum bleibt die Vorgabe `opaque`.
+      - decl: [sh_ohne, StepDef, git_step]
+      - decl: [sh_mit, StepDef, git_step]
+      - set: [sh_mit.shares, "quellen:/mnt/quellen:ro"]
+      - decl: [k_ohne, string, { call: [runner.key_of, sh_ohne] }]
+      - decl: [k_mit, string, { call: [runner.key_of, sh_mit] }]
+      - set: [fails, { +: [fails, { call: [expect, "mit Freigabe ist ein anderer Schritt", { neq: [k_ohne, k_mit] }] }] }]
+      - decl: [sh_anders, StepDef, git_step]
+      - set: [sh_anders.shares, "quellen:/mnt/woanders:ro"]
+      - set: [fails, { +: [fails, { call: [expect, "ein anderes Ziel auch", { neq: [k_mit, { call: [runner.key_of, sh_anders] }] }] }] }]
+
+      - call: [io.remove_all, work_p]
+      - if:
+          condition: { neq: [fails, 0] }
+          then: [{ print: ["test_step_runner FAIL (${fails})"] }, { return: 1 }]
+      - print: ["test_step_runner PASS"]
+      - return: 0

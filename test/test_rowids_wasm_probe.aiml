@@ -1,0 +1,111 @@
+# Probe (WASM, headless): ueberlebt ein String-FELD eines Wert-Modells den Weg
+# in eine list<string>, wenn die Kopie des Modells danach verworfen wird?
+#
+# Anlass: der WASM-Client stuerzte nach dem ersten Schnappschuss mit
+# "index out of bounds" ab (Firefox = Speicherzugriff ausserhalb der Grenzen,
+# dieselbe Klasse wie der draw_grid-Absturz 2026-10-13).  Neu im Pfad war
+#   - decl: [jrec, JobDef, { at: [view.job_defs, ix] }]
+#   - call: [<.row_ids.push, jrec.job_id]
+# Wird `job_id` dabei GEBORGT statt kopiert, haelt die Liste nach dem Ende des
+# Schleifenkoerpers einen toten Zeiger — nativ liest man das freigegebene Byte
+# oft noch, WASM faengt es.
+# Expected exit code: 0
+
+- import: "sources/shared/cluster_view.aiml"
+- import: "sources/shared/dashboard.aiml"   # spec/49 §7: main komponiert eine Klasse von aussen
+
+- def:
+    name: expect
+    args: [[what, string], [cond, i32]]
+    return: i32
+    body:
+      - if:
+          condition: { eq: [cond, 1] }
+          then: [{ call: [log.info, "  ok   ${what}"] }, { return: 0 }]
+      - call: [log.info, "  FAIL ${what}"]
+      - return: 1
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      - decl: [view, ClusterView]
+      # Genug Jobs, damit der Allokator zwischendurch wiederverwendet.
+      - decl: [mix, i32, 0]
+      - while:
+          condition: { lt: [mix, 24] }
+          body:
+            - decl: [job, JobDef]
+            - set: [job.job_id, "job-nummer-${mix}-mit-laengerem-namen"]
+            - set: [job.name, "Job ${mix}"]
+            - set: [job.source, "stages:\n  - name: eins\n"]
+            - set: [job.enabled, 1]
+            - set: [job.last_status, "ok"]
+            - call: [view.job_defs.push, job]
+            - set: [mix, { +: [mix, 1] }]
+      - set: [fails, { +: [fails, { call: [expect, "24 Jobs im Schnappschuss", { eq: [view.job_defs.len, 24] }] }] }]
+
+      # Genau die Abfolge aus MainMenuScreen.render: Kopie ziehen, String-Feld
+      # in eine eigene Liste schieben, Kopie am Schleifenende verwerfen.
+      - decl: [row_ids, list<string>]
+      - decl: [rix, i32, 0]
+      - while:
+          condition: { lt: [rix, view.job_defs.len] }
+          body:
+            - decl: [jrec, JobDef, { at: [view.job_defs, rix] }]
+            - call: [row_ids.push, jrec.job_id]
+            - set: [rix, { +: [rix, 1] }]
+      - set: [fails, { +: [fails, { call: [expect, "24 Zeilen-Ids", { eq: [row_ids.len, 24] }] }] }]
+
+      # Zwischendurch Speicher umwaelzen: ein geborgter Zeiger wird hier wirklich
+      # ueberschrieben, statt nur freigegeben zu sein.
+      - decl: [churn, list<string>]
+      - decl: [cix, i32, 0]
+      - while:
+          condition: { lt: [cix, 256] }
+          body:
+            - call: [churn.push, "fuellmaterial-${cix}-fuellmaterial-fuellmaterial"]
+            - set: [cix, { +: [cix, 1] }]
+      - call: [churn.clear]
+
+      # JETZT lesen: eine geborgte Id ist hier Datenmuell (oder ein Trap).
+      - decl: [bad, i32, 0]
+      - decl: [vix, i32, 0]
+      - while:
+          condition: { lt: [vix, row_ids.len] }
+          body:
+            - decl: [want, string, "job-nummer-${vix}-mit-laengerem-namen"]
+            - decl: [got, string, { at: [row_ids, vix] }]
+            - if: { condition: { neq: [got, want] }, then: [{ call: [log.info, "    Zeile ${vix}: '${got}' statt '${want}'"] }, { set: [bad, { +: [bad, 1] }] }] }
+            - set: [vix, { +: [vix, 1] }]
+      - set: [fails, { +: [fails, { call: [expect, "jede Zeilen-Id ist noch ihre eigene", { eq: [bad, 0] }] }] }]
+
+      # Gegenprobe: dasselbe mit einem i32-Feld (kein Besitz im Spiel).
+      - decl: [row_idx, list<i32>]
+      - decl: [kix, i32, 0]
+      - while:
+          condition: { lt: [kix, view.job_defs.len] }
+          body:
+            - call: [row_idx.push, kix]
+            - set: [kix, { +: [kix, 1] }]
+      - decl: [sum, i32, 0]
+      - decl: [six, i32, 0]
+      - while:
+          condition: { lt: [six, row_idx.len] }
+          body:
+            - set: [sum, { +: [sum, { at: [row_idx, six] }] }]
+            - set: [six, { +: [six, 1] }]
+      - set: [fails, { +: [fails, { call: [expect, "i32-Zeilenliste bleibt heil", { eq: [sum, 276] }] }] }]
+
+      # Dieselben Daten durch die Uebersicht (spec/49 §7 + echter Lesepfad).
+      - decl: [dash, ptr<Dashboard>, { new: Dashboard }]
+      - decl: [job_txt, string, { call: [dash.jobs, view] }]
+      - set: [fails, { +: [fails, { call: [expect, "Uebersicht liest die Jobs", { gt: [job_txt.len, 24] }] }] }]
+
+      - if:
+          condition: { eq: [fails, 0] }
+          then: [{ call: [log.info, "PASS rowids_probe"] }, { return: 0 }]
+      - call: [log.info, "FAIL rowids_probe (${fails})"]
+      - return: 1

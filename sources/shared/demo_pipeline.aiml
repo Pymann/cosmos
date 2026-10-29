@@ -1,0 +1,50 @@
+# Das Beispiel-Dokument des Job-Editors (doc/spec/106 G4).
+#
+# Es haelt sich an die Form, die doc/spec/106 §106.3a festschreibt und die
+# aiml spec/62 vorgibt: `steps:` (Liste der Stufen), `agent:`, `timeout:` in
+# Millisekunden, `params` als typisierte Liste.  Bis 2026-10-15 stand hier eine
+# eigene Schreibweise (`stages:`, `label:`, `timeout_s:`, params als Abbildung),
+# die in keiner Spec vorkam.
+#
+# Es steht HIER und nicht im Bildschirm, damit ein Test dieselbe Zeichenkette
+# pruefen kann, die der Mensch im Editor sieht.  Vorher war es eine Attrappe im
+# Client (params als Liste, `steps` statt `stages`, `body: [...]`), die nie
+# geprueft werden konnte — und beim ersten Klick scheiterte.
+#
+# Ein Beispiel, das nicht laeuft, ist schlimmer als keines: es sieht wie ein
+# Produktfehler aus, nicht wie ein Platzhalter.
+
+- class:
+    name: DemoPipeline
+    methods:
+      - def:
+          name: source
+          access: public
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [src, string, "- pipeline:\n"]
+            - set: [src, "${src}    name: demo_build\n"]
+            # F103-3 / aiml F62-47: WER darf das ausfuehren?  `agent:` hier
+            # gilt fuer alle Stufen, `agent:` an einer Stufe schlaegt es.  Als
+            # Etikett zaehlt auch die KENNUNG eines Agenten — damit nagelt man
+            # einen Schritt auf genau einen Rechner.  Ohne Angabe darf jeder ran.
+            - set: [src, "${src}    # agent: linux      # alle Stufen nur auf Agenten mit diesem Etikett\n"]
+            # aiml spec/62 §4.1: die Achsen sind eine typisierte LISTE.  Der Typ
+            # zaehlt, sobald Rumpf-Schritte kommen — dann ist `jobs` ein i32,
+            # mit dem man rechnen kann, und kein Umgebungs-String.
+            - set: [src, "${src}    params:\n"]
+            - set: [src, "${src}      - [arch, string, [x86_64, arm64]]\n"]
+            - set: [src, "${src}      - [mode, string, [debug, release]]\n"]
+            - set: [src, "${src}    exclude:\n"]
+            - set: [src, "${src}      - { arch: arm64, mode: release }\n"]
+            # F62-57: die Liste der STUFEN heisst `steps`.
+            - set: [src, "${src}    steps:\n"]
+            - set: [src, "${src}      - stage:\n"]
+            - set: [src, "${src}          name: checkout\n"]
+            - set: [src, "${src}          run: \"echo checkout $arch $mode; id -u\"\n"]
+            - set: [src, "${src}      - stage:\n"]
+            - set: [src, "${src}          name: build\n"]
+            - set: [src, "${src}          # agent: builder-1  # nur dieser Agent (Etikett ODER Kennung)\n"]
+            - set: [src, "${src}          # timeout: 300000     # ms, Grenze fuer diese Stufe (F62-40)\n"]
+            - set: [src, "${src}          run: \"echo bauen...; sleep 2; echo fertig\"\n"]
+            - return: src

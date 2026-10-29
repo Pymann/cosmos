@@ -1,0 +1,257 @@
+# AgentRegistry — verbundene Agenten als eigene Entität (doc/spec/90 §AP1.2, spec/01 §1.7).
+# Prozesslokal und klein: je Agent eine Zeile + seine Mirror-peer_id (parallele Liste),
+# damit cosmosd ein Kommando GEZIELT an genau diesen Agenten schicken kann.
+# Getrennte Agenten bleiben als status=disconnected sichtbar (Live-Liste zeigt den Wechsel).
+
+- import: "sources/models/agent_exec.aiml"
+
+- class:
+    name: AgentRegistry
+    members:
+      - [agents, list<AgentInfo>]
+      - [peers,  list<i32>]      # parallel zu agents: Mirror-peer_id (0 = getrennt)
+    methods:
+      - def:
+          name: count
+          access: public
+          return: i32
+          body: [{ return: <.agents.len }]
+
+      # Zugriff je Index — der Cluster-Schnappschuss braucht die Zeilen (F104-1).
+      - def:
+          name: at_index
+          access: public
+          args: [[adx, i32]]
+          return: { type: AgentInfo, lifetime: producer }
+          body:
+            - decl: [out, AgentInfo]
+            - if: { condition: { '||': [{ lt: [adx, 0] }, { ge: [adx, <.agents.len] }] }, then: [{ return: out }] }
+            - set: [out, { at: [<.agents, adx] }]
+            - return: out
+
+      - def:
+          name: find
+          access: public
+          static_off: ["str_cmp"]
+          args: [[agent_id, string]]
+          return: i32
+          body:
+            - decl: [fdx, i32, 0]
+            - while:
+                condition: { lt: [fdx, <.agents.len] }
+                body:
+                  - decl: [row, AgentInfo, { at: [<.agents, fdx] }]
+                  - if: { condition: { eq: [row.agent_id, agent_id] }, then: [{ return: fdx }] }
+                  - set: [fdx, { +: [fdx, 1] }]
+            - return: -1
+
+      # upsert: Registrierung oder Re-Registrierung (nach Agent-Neustart).  1 = neu.
+      - def:
+          name: upsert
+          access: public
+          args: [[reg, AgentRegister], [peer_id, i32], [nowm, i64]]
+          return: i32
+          body:
+            - decl: [adx, i32, { call: [<.find, reg.agent_id] }]
+            - decl: [row, AgentInfo]
+            - if: { condition: { ge: [adx, 0] }, then: [{ set: [row, { at: [<.agents, adx] }] }] }
+            - set: [row.agent_id, reg.agent_id]
+            - set: [row.status, AgentStatus.connected]
+            - set: [row.host, reg.host]
+            - set: [row.os_name, reg.os_name]
+            - set: [row.labels, reg.labels]
+            # Die Umgebung gehoert in die Registry: danach wird zugeteilt
+            # (doc/spec/110 F110-73), und ohne sie sieht die Agentenliste zwei
+            # Agenten gleich aus, die in verschiedenen Welten stehen.
+            - set: [row.image, reg.image]
+            - set: [row.caps, reg.caps]
+            - set: [row.last_seen_ms, nowm]
+            - if:
+                condition: { ge: [adx, 0] }
+                then:
+                  - idx: [<.agents, adx, row]
+                  - idx: [<.peers, adx, peer_id]
+                  - return: 0
+            - call: [<.agents.push, row]
+            - call: [<.peers.push, peer_id]
+            - return: 1
+
+      - def:
+          name: heartbeat
+          access: public
+          args: [[agent_id, string], [nowm, i64]]
+          return: i32
+          body:
+            - decl: [adx, i32, { call: [<.find, agent_id] }]
+            - if: { condition: { lt: [adx, 0] }, then: [{ return: 0 }] }
+            - decl: [row, AgentInfo, { at: [<.agents, adx] }]
+            - set: [row.last_seen_ms, nowm]
+            - set: [row.status, AgentStatus.connected]
+            - idx: [<.agents, adx, row]
+            - return: 1
+
+      # peer_of: Mirror-peer_id des Agenten (0 = unbekannt/getrennt → nichts senden).
+      - def:
+          name: peer_of
+          access: public
+          args: [[agent_id, string]]
+          return: i32
+          body:
+            - decl: [adx, i32, { call: [<.find, agent_id] }]
+            - if: { condition: { lt: [adx, 0] }, then: [{ return: 0 }] }
+            - decl: [row, AgentInfo, { at: [<.agents, adx] }]
+            - if: { condition: { neq: [row.status, AgentStatus.connected] }, then: [{ return: 0 }] }
+            - return: { at: [<.peers, adx] }
+
+      - def:
+          name: set_current_run
+          access: public
+          args: [[agent_id, string], [run_ref, string]]
+          body:
+            - decl: [adx, i32, { call: [<.find, agent_id] }]
+            - if: { condition: { lt: [adx, 0] }, then: [{ return: [] }] }
+            - decl: [row, AgentInfo, { at: [<.agents, adx] }]
+            - set: [row.current_run, run_ref]
+            - idx: [<.agents, adx, row]
+
+      # current_run_of: laufendes Kommando des Agenten ("" = idle).
+      - def:
+          name: current_run_of
+          access: public
+          args: [[agent_id, string]]
+          return: string
+          body:
+            - decl: [adx, i32, { call: [<.find, agent_id] }]
+            - if: { condition: { lt: [adx, 0] }, then: [{ return: "" }] }
+            - decl: [row, AgentInfo, { at: [<.agents, adx] }]
+            - return: row.current_run
+
+      # agent_of_peer: welcher Agent hängt an dieser Verbindung ("" = keiner).
+      - def:
+          name: agent_of_peer
+          access: public
+          args: [[peer_id, i32]]
+          return: string
+          body:
+            - decl: [pdx, i32, 0]
+            - while:
+                condition: { lt: [pdx, <.peers.len] }
+                body:
+                  - if:
+                      condition: { eq: [{ at: [<.peers, pdx] }, peer_id] }
+                      then:
+                        - decl: [row, AgentInfo, { at: [<.agents, pdx] }]
+                        - return: row.agent_id
+                  - set: [pdx, { +: [pdx, 1] }]
+            - return: ""
+
+      # drop_peer: Verbindung weg → Agent als getrennt markieren (Live-Liste zeigt es sofort).
+      - def:
+          name: drop_peer
+          access: public
+          args: [[peer_id, i32], [nowm, i64]]
+          return: i32
+          body:
+            - if: { condition: { le: [peer_id, 0] }, then: [{ return: 0 }] }
+            - decl: [ddx, i32, 0]
+            - decl: [hits, i32, 0]
+            - while:
+                condition: { lt: [ddx, <.peers.len] }
+                body:
+                  - if:
+                      condition: { eq: [{ at: [<.peers, ddx] }, peer_id] }
+                      then:
+                        - decl: [row, AgentInfo, { at: [<.agents, ddx] }]
+                        - set: [row.status, AgentStatus.disconnected]
+                        - set: [row.last_seen_ms, nowm]
+                        - set: [row.current_run, ""]
+                        - idx: [<.agents, ddx, row]
+                        - idx: [<.peers, ddx, 0]
+                        - set: [hits, { +: [hits, 1] }]
+                  - set: [ddx, { +: [ddx, 1] }]
+            - return: hits
+
+      - def:
+          name: snapshot
+          access: public
+          return: AgentList
+          body:
+            - decl: [lst, AgentList]
+            - decl: [nowm, i64, { call: [time.now] }]
+            - set: [lst.taken_ms, nowm]
+            - decl: [sdx, i32, 0]
+            - while:
+                condition: { lt: [sdx, <.agents.len] }
+                body:
+                  - decl: [row, AgentInfo, { at: [<.agents, sdx] }]
+                  # Anwesenheit hier entscheiden — nicht beim Leser (F104-3).
+                  - set: [row.online, 0]
+                  - if:
+                      condition: { eq: [row.status, AgentStatus.connected] }
+                      then:
+                        - decl: [age, i64, { -: [nowm, row.last_seen_ms] }]
+                        - if: { condition: { '&&': [{ ge: [age, 0] }, { lt: [age, 15000] }] }, then: [{ set: [row.online, 1] }] }
+                  - call: [lst.agents.push, row]
+                  - set: [sdx, { +: [sdx, 1] }]
+            - return: lst
+
+      # signature: Push-Dedupe — nur bei echter Änderung pushen (wie push_cluster).
+      - def:
+          name: signature
+          access: public
+          return: string
+          body:
+            - decl: [sig, string, "a${<.agents.len}:"]
+            - decl: [gdx, i32, 0]
+            - while:
+                condition: { lt: [gdx, <.agents.len] }
+                body:
+                  - decl: [row, AgentInfo, { at: [<.agents, gdx] }]
+                  # `labels` gehoert dazu: aendert ein Agent beim Neustart seine
+                  # Etiketten, entscheidet das darueber, WAS er nehmen darf —
+                  # ohne das Feld erfuhr der Client davon nie.
+                  # Die Signatur traegt, was der LESER sieht: Anwesenheit und das
+                  # Alter in 10-Sekunden-Stufen.  Ohne das Alter erfuhr der Client
+                  # minutenlang nichts, und seine Kopie wurde still falsch; mit
+                  # jedem Herzschlag zu pushen waere das andere Extrem.
+                  - decl: [onl, i32, 0]
+                  - decl: [sig_age, i64, { -: [{ call: [time.now] }, row.last_seen_ms] }]
+                  - if:
+                      condition: { '&&': [{ eq: [row.status, AgentStatus.connected] }, { '&&': [{ ge: [sig_age, 0] }, { lt: [sig_age, 15000] }] }] }
+                      then: [{ set: [onl, 1] }]
+                  - decl: [bucket, i64, { /: [sig_age, 10000] }]
+                  - set: [sig, "${sig}${row.agent_id}/${row.status}/${row.current_run}/${row.labels}/${row.image}/${row.caps}/${onl}/${bucket}|"]
+                  - set: [gdx, { +: [gdx, 1] }]
+            - return: sig
+
+      # online_count: wie viele Agenten der SERVER gerade als anwesend fuehrt.
+      # Gehoert hierher und nicht in den Aufrufer: `online` entscheidet der Server
+      # (doc/spec/104 F104-3), also zaehlt auch er.
+      - def:
+          name: online_count
+          return: i32
+          body:
+            - decl: [num, i32, 0]
+            - decl: [aci, i32, 0]
+            - while:
+                condition: { lt: [aci, <.agents.len] }
+                body:
+                  - decl: [arow, ref<AgentInfo>, { at: [<.agents, aci] }]
+                  - if: { condition: { neq: [arow.online, 0] }, then: [{ set: [num, { +: [num, 1] }] }] }
+                  - set: [aci, { +: [aci, 1] }]
+            - return: num
+
+      # note_usage: die vom Agenten gemeldete Last uebernehmen (doc/spec/109 F109-7).
+      # `res_seen` wird mitgesetzt, damit die Oberflaeche „noch nichts gemeldet" von
+      # „null Last" unterscheiden kann — sonst sieht ein stummer Agent aus wie ein
+      # untaetiger.
+      - def:
+          name: note_usage
+          args: [[aid, string], [cpu_pm, i32], [rss, i64]]
+          body:
+            - decl: [upos, i32, { call: [<.find, aid] }]
+            - if: { condition: { lt: [upos, 0] }, then: [{ return }] }
+            - decl: [arow, ref<AgentInfo>, { at: [<.agents, upos] }]
+            - set: [arow.cpu_permille, cpu_pm]
+            - set: [arow.rss_kb, rss]
+            - set: [arow.res_seen, 1]

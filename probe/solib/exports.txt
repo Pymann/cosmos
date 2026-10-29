@@ -1,0 +1,3 @@
+# Angebots-Tabelle des Wirts (spec/65 F65-23): Name|Level.
+# 255 = jeder angemeldete Nutzer darf es nennen.
+cosmos_probe_offer|255

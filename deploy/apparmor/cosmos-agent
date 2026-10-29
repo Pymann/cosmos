@@ -1,0 +1,52 @@
+# AppArmor-Profil für den cosmos-Agenten — Voraussetzung für die Isolation
+# nach doc/spec/91 §AP2.A (Weg 2: rootless + User-Namespace).
+#
+# WARUM DAS NÖTIG IST
+# Ubuntu setzt seit 23.10 `kernel.apparmor_restrict_unprivileged_userns=1`.
+# Ein *unconfined* Prozess darf dann einen User-Namespace noch ERZEUGEN, wird
+# dabei aber in das mitgelieferte Profil `unprivileged_userns` überführt — und
+# das verweigert Capabilities und das Schreiben der ID-Abbildung.  Gemessen
+# auf Kernel 7.0.0-34-generic (kern.log):
+#
+#   apparmor="DENIED" operation="capable" profile="unprivileged_userns" capname="setpcap"
+#   apparmor="DENIED" operation="open"    profile="unprivileged_userns"
+#                     name="proc/<pid>/uid_map" requested_mask="wr" denied_mask="wr"
+#
+# Ergebnis: ohne eigenes Profil kann der Agent keine IDs abbilden, also auch
+# kein overlayfs im Namespace mounten — und damit entfällt der
+# Snapshot-/writeset-Mechanismus des Schritt-Modells (§AP2.D).
+#
+# Ein Prozess mit EIGENEM Profil wird nicht nach `unprivileged_userns`
+# überführt; `userns` erlaubt ihm das Erzeugen, und `flags=(unconfined)` sorgt
+# dafür, dass dieses Profil darüber hinaus nichts einschränkt — die
+# Einschränkung des Jobs leistet der Namespace selbst, nicht AppArmor.
+#
+# BEWUSST NICHT: `sysctl kernel.apparmor_restrict_unprivileged_userns=0`.
+# Das hebt den Riegel für den GANZEN Rechner auf, nicht nur für den Agenten.
+#
+# EINSPIELEN (einmal je Agent-Host, braucht root)
+#   1. Pfad unten prüfen (steht auf dem Entwicklerpfad dieses Repos).
+#   2. sudo cp deploy/apparmor/cosmos-agent /etc/apparmor.d/cosmos-agent
+#   3. sudo apparmor_parser -r /etc/apparmor.d/cosmos-agent
+#   4. ./probe_isolation.sh   → muss nun „TRÄGT" melden
+#
+# PRÜFEN
+#   aa-status | grep cosmos        # Profil geladen?
+#   grep DENIED /var/log/kern.log  # was fehlt noch?
+
+abi <abi/4.0>,
+
+include <tunables/global>
+
+# Entwicklerpfad (User-Entscheid 2026-10-09).  Das Muster `{,*/}` deckt auch die
+# Kopien ab, die run_e2e.sh / run_mem_check.sh / probe_*.sh in ihre
+# Arbeitsverzeichnisse legen (.e2e_run/agent, .mem_run/agent, .probe_run/agent) —
+# AppArmor bindet an den BINÄRPFAD, eine Kopie fällt sonst aus dem Profil.
+# Für den Betrieb später auf /opt/cosmos/agent (o.ä.) umstellen.
+profile cosmos-agent /media/nikolai/95a208ef-ffa2-478b-abdd-ff394baa6a76/projects/python/test/cosmos/{,*/}agent flags=(unconfined) {
+    # Erlaubt das Erzeugen von User-Namespaces (das ist der Kern).
+    userns,
+
+    # Standort-spezifische Ergänzungen, ohne dieses Profil zu ändern.
+    include if exists <local/cosmos-agent>
+}

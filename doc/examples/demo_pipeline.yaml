@@ -1,0 +1,32 @@
+# Eine Pipeline, die wirklich auf einem Agenten laeuft (doc/spec/103).
+#
+# `run:` ist der Befehl, den der Agent im SANDKASTEN ausfuehrt.  Ohne `run:`
+# gilt ein Schritt als nicht ausfuehrbar und sagt das (F103-1), statt ewig
+# `pending` zu bleiben.
+#
+# Die Matrix faltet zwei Achsen zu vier Lanes aus; `exclude` nimmt eine wieder
+# heraus — die drei uebrigen laufen unabhaengig, und ein Fehlschlag in einer
+# stoppt die anderen nicht (F96-32).
+
+- pipeline:
+    name: demo_build
+    params:
+      arch: [x86_64, arm64]
+      mode: [debug, release]
+    exclude:
+      - { arch: arm64, mode: release }
+    stages:
+      - stage:
+          name: checkout
+          run: "echo 'checkout fuer' $arch $mode; id -u; ls /opt 2>&1 | head -3"
+
+      - stage:
+          name: build
+          run: "echo bauen...; sleep 2; echo fertig"
+
+      # Mit `label:` nimmt nur ein Agent den Schritt, der dieses Etikett fuehrt
+      # (F103-3).  Ohne passenden Agenten bleibt er liegen — sichtbar, nicht still.
+      - stage:
+          name: paketieren
+          label: ""
+          run: "echo Paket gebaut > artefakt.txt; cat artefakt.txt"

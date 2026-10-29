@@ -1,0 +1,671 @@
+# UI-Shot-Harness (doc/spec/98): instanziert EINE Scene aus client/prefabs.aiml
+# und hält sie kurz offen, damit tools/ui_shot.sh sie unter Xvfb aufnimmt.
+# Selbst-terminierend — kein interaktives Fenster.
+# Requires: display
+# Expected exit code: 0
+- import: "sources/client/prefabs.aiml"
+- import: "sources/client/pipeline_screen.aiml"
+- import: "sources/client/job_runs_screen.aiml"
+- import: "sources/client/job_params_screen.aiml"
+- import: "sources/shared/job_policy.aiml"
+- import: "sources/client/shell_screen.aiml"
+- import: "sources/client/net/live_state.aiml"
+- import: "sources/client/agents_screen.aiml"
+- import: "sources/client/net/agents_state.aiml"
+- import: "sources/client/net/tokens_state.aiml"
+- import: "sources/client/cluster_screen.aiml"
+- import: "sources/models/level_reqs.aiml"
+
+# Ein Lauf von Hand, damit das Gitter etwas zu zeigen hat (doc/spec/97 §97.7).
+# Von Hand und nicht ueber PipelineSubmit, damit die Harness keinen Server-Code
+# zieht — und mit GEMISCHTEN Status, sonst sagt das Bild nichts ueber die Farben.
+- def:
+    name: demo_axis
+    args: [[name_in, string], [val_a, string], [val_b, string]]
+    return: { type: PipelineAxis, lifetime: producer }
+    body:
+      - decl: [axis, PipelineAxis]
+      - set: [axis.name, name_in]
+      - call: [axis.values.push, val_a]
+      - if: { condition: { gt: [val_b.len, 0] }, then: [{ call: [axis.values.push, val_b] }] }
+      - return: axis
+
+- def:
+    name: shoot_params
+    static_off: ["str_cmp", "same_arg"]
+    args: [[win, window_handle], [hold, i32]]
+    return: i32
+    body:
+      - decl: [pscr, ptr<JobParamsScreen>, { new: JobParamsScreen }]
+      - call: [pscr.init]
+      - call: [pscr.open_job, "aiml-vom-base", "aiml vom Base-Image"]
+      - decl: [pview, ptr<ClusterView>, { new: ClusterView }]
+      - decl: [pbag, JobParams]
+      - set: [pbag.owner_id, "aiml-vom-base"]
+      - call: [pbag.rows.push, { call: [shot_param, "branch", "text", "main", ""] }]
+      - call: [pbag.rows.push, { call: [shot_param, "anmerkung", "langtext", "Nachtlauf, zwei Zeilen", ""] }]
+      - call: [pbag.rows.push, { call: [shot_param, "tiefe", "zahl", "8", ""] }]
+      - call: [pbag.rows.push, { call: [shot_param, "mit_tests", "bool", "1", ""] }]
+      - call: [pbag.rows.push, { call: [shot_param, "keystore", "datei", "cas:9f2a", "keystore.p12"] }]
+      - call: [pview.job_params.push, pbag]
+      - decl: [ppol, JobPolicy]
+      - set: [ppol.owner_id, "aiml-vom-base"]
+      - set: [ppol.priority, 3]
+      - call: [pview.job_policy.push, ppol]
+      # Zweimal zeichnen: der erste Durchgang legt die Zeilen an, der
+      # zweite fuellt sie (der Container entsteht beim Binden).
+      - call: [pscr.render, pview]
+      - call: [pscr.render, pview]
+      # Der Container legt seine Zeilen erst beim ZEICHNEN an (container_sync
+      # laeuft im Rahmen).  Darum gehoert `render` IN die Schleife: vorher
+      # gibt es keine Zeilen, die man fuellen koennte.
+      - decl: [p_end, i64, { +: [{ call: [time.mono_ms] }, hold] }]
+      - while:
+          condition: { lt: [{ call: [time.mono_ms] }, p_end] }
+          body:
+            - call: [pscr.render, pview]
+            - call: [gl.clear_all, 0.04, 0.04, 0.08, 1.0]
+            - call: [engine.draw_scene]
+            - call: [engine.swap, win]
+      - call: [engine.destroy_window, win]
+      - print: ["ui_shot JobParamsScene done"]
+      - return: 0
+
+- def:
+    name: shot_param
+    static_off: ["same_arg"]
+    args: [[prm_name, string], [kind, string], [value, string], [fname, string]]
+    return: { type: ParamRow, lifetime: producer }
+    body:
+      - decl: [row, ParamRow]
+      - set: [row.name, prm_name]
+      - set: [row.kind, kind]
+      - set: [row.value, value]
+      - set: [row.file_name, fname]
+      - if: { condition: { gt: [fname.len, 0] }, then: [{ set: [row.file_size, 4312] }] }
+      - return: row
+
+- def:
+    name: demo_entry
+    args: [[stage_name, string], [bindings, string], [status, string]]
+    return: { type: PipelineStage, lifetime: producer }
+    body:
+      - decl: [entry, PipelineStage]
+      - set: [entry.stage_id, "${stage_name}-${bindings}"]
+      - set: [entry.name, "${stage_name} [${bindings}]"]
+      - set: [entry.stage_kind, "pipeline"]
+      - set: [entry.status, status]
+      - set: [entry.bindings, bindings]
+      - return: entry
+
+- def:
+    name: demo_agents
+    return: { type: ptr<AgentList>, lifetime: producer }
+    body:
+      - decl: [lst, ptr<AgentList>, { new: AgentList }]
+      - decl: [now_ms, i64, { call: [time.now] }]
+      - decl: [one, AgentInfo]
+      - set: [one.agent_id, "builder-1"]
+      - set: [one.status, AgentStatus.connected]
+      - set: [one.host, "builder-1.example"]
+      - set: [one.last_seen_ms, { -: [now_ms, 2000] }]
+      - set: [one.current_run, "run-demo-412"]
+      # doc/spec/109: einer meldet Last, einer meldet nichts — damit das Bild zeigt,
+      # dass „noch nichts gemeldet" als Strich erscheint und nicht als 0 %.
+      - set: [one.cpu_permille, 342]
+      - set: [one.rss_kb, 185000]
+      - set: [one.res_seen, 1]
+      - set: [one.online, 1]
+      - call: [lst.agents.push, one]
+      - decl: [two, AgentInfo]
+      - set: [two.agent_id, "builder-arm"]
+      - set: [two.status, AgentStatus.connected]
+      - set: [two.host, "arm.example"]
+      - set: [two.last_seen_ms, { -: [now_ms, 48000] }]
+      - set: [two.cpu_permille, 15]
+      - set: [two.rss_kb, 41000]
+      - set: [two.res_seen, 1]
+      - set: [two.online, 1]
+      - call: [lst.agents.push, two]
+      - decl: [three, AgentInfo]
+      - set: [three.agent_id, "builder-old"]
+      - set: [three.status, AgentStatus.connected]
+      - set: [three.host, "old.example"]
+      - set: [three.last_seen_ms, { -: [now_ms, 400000] }]
+      - call: [lst.agents.push, three]
+      - return: lst
+
+- def:
+    name: demo_store
+    args: [[name_in, string], [entries, i64], [wal, i64], [writes, i64]]
+    return: { type: KvStoreInfo, lifetime: producer }
+    body:
+      - decl: [row, KvStoreInfo]
+      - set: [row.name, name_in]
+      - set: [row.path, "/srv/cosmos/aiondb/${name_in}.kvwal"]
+      - set: [row.entries, entries]
+      - set: [row.wal_used, wal]
+      - set: [row.writes, writes]
+      - return: row
+
+- def:
+    name: demo_run_record
+    return: { type: PipelineRun, lifetime: producer }
+    body:
+      - decl: [run, PipelineRun]
+      - set: [run.run_id, "run-demo-412"]
+      - set: [run.pipeline_name, "build_matrix"]
+      - set: [run.status, "running"]
+      - decl: [axis_arch, PipelineAxis, { call: [demo_axis, "arch", "x86_64", "arm64"] }]
+      - call: [run.axes.push, axis_arch]
+      - decl: [axis_mode, PipelineAxis, { call: [demo_axis, "mode", "debug", "release"] }]
+      - call: [run.axes.push, axis_mode]
+      - call: [run.stages.push, { call: [demo_entry, "compile", "arch=x86_64,mode=debug", "done"] }]
+      - call: [run.stages.push, { call: [demo_entry, "compile", "arch=x86_64,mode=release", "done"] }]
+      - call: [run.stages.push, { call: [demo_entry, "compile", "arch=arm64,mode=debug", "running"] }]
+      - call: [run.stages.push, { call: [demo_entry, "test", "arch=x86_64,mode=debug", "failed"] }]
+      - call: [run.stages.push, { call: [demo_entry, "test", "arch=x86_64,mode=release", "pending"] }]
+      - call: [run.stages.push, { call: [demo_entry, "test", "arch=arm64,mode=debug", "pending"] }]
+      - return: run
+
+# shot_layer: eine Schichtzeile fuer die Aufnahme (doc/spec/107 §107.1c).
+# `files` wird aus den Bytes geschaetzt — in der Aufnahme zaehlt nur, dass eine
+# Zahl dasteht; die echte kommt im Betrieb vom Agenten.
+- def:
+    name: shot_layer
+    static_off: ["str_cmp"]
+    args: [[run_id, string], [stage, string], [lane, string], [bytes, i64]]
+    return: { type: StageLayer, lifetime: producer }
+    body:
+      - decl: [out, StageLayer]
+      - set: [out.run_id, run_id]
+      - set: [out.stage, stage]
+      - set: [out.bindings, lane]
+      - set: [out.bytes, bytes]
+      - set: [out.files, { cast: [{ /: [bytes, 4096] }, i32] }]
+      - set: [out.reuse, ReuseClass.opaque]
+      - return: out
+
+# shot_time: eine Laufzeit-Zeile fuer die Aufnahme (doc/spec/107 §107.1h).
+- def:
+    name: shot_time
+    static_off: ["str_cmp"]
+    args: [[stage, string], [lane, string], [von_ms, i64], [bis_ms, i64]]
+    return: { type: StageTime, lifetime: producer }
+    body:
+      - decl: [out, StageTime]
+      - set: [out.run_id, "api-main-12"]
+      - set: [out.stage, stage]
+      - set: [out.bindings, lane]
+      - set: [out.started_ms, von_ms]
+      - set: [out.ended_ms, bis_ms]
+      - return: out
+
+# shot_layers: die vier Zeilen in den Schnappschuss.  Als eigener Helfer, weil
+# `main` an der 300-Zeilen-Grenze steht (aiml spec/49) — und weil eine Probe,
+# die vier Zeilen setzt, ohnehin eine Sache ist.
+- def:
+    name: shot_layers
+    static_off: ["str_cmp"]
+    args: [[snap, ref<ClusterView>]]
+    body:
+      - call: [snap.layers.push, { call: [shot_layer, "api-main-12", "checkout", "arch=x86_64", 2400000] }]
+      - call: [snap.layers.push, { call: [shot_layer, "api-main-12", "build", "arch=x86_64", 1500000000] }]
+      - call: [snap.layers.push, { call: [shot_layer, "api-main-12", "checkout", "arch=arm64", 2300000] }]
+      - call: [snap.layers.push, { call: [shot_layer, "api-main-12", "build", "arch=arm64", 46000] }]
+      # Und die Laufzeiten (doc/spec/107 §107.1h): eine fertige Stufe, eine
+      # laufende (ended 0 → die Aufnahme zaehlt gegen jetzt).
+      - call: [snap.times.push, { call: [shot_time, "checkout", "arch=x86_64", 1760000000000, 1760000012000] }]
+      - call: [snap.times.push, { call: [shot_time, "build", "arch=x86_64", 1760000012000, 1760000794000] }]
+      - call: [snap.times.push, { call: [shot_time, "checkout", "arch=arm64", 1760000000000, 1760000009000] }]
+
+- def:
+    name: shot_stage
+    args: [[stage_id, string], [name, string], [bindings, string], [status, string]]
+    return: { type: PipelineStage, lifetime: producer }
+    body:
+      - decl: [stg, PipelineStage]
+      - set: [stg.stage_id, stage_id]
+      - set: [stg.name, name]
+      - set: [stg.bindings, bindings]
+      - set: [stg.status, status]
+      - return: stg
+
+# Drei Konten mit sichtbar verschiedenen Freigaben (1 / 7 / 255) — eine Liste
+# mit nur einer Zeile zeigt nicht, ob die Spalten stimmen.
+- def:
+    name: demo_users
+    return: { type: ptr<UserLevelResult>, lifetime: producer }
+    body:
+      - decl: [lst, ptr<UserLevelResult>, { new: UserLevelResult }]
+      - decl: [adm, UserLevelRow]
+      - set: [adm.email, "nikolai@example.com"]
+      - set: [adm.display_name, "nikolai"]
+      - set: [adm.level, 1]
+      - call: [lst.users.push, adm]
+      - decl: [bld, UserLevelRow]
+      - set: [bld.email, "builder@example.com"]
+      - set: [bld.display_name, "builder"]
+      - set: [bld.level, 7]
+      - call: [lst.users.push, bld]
+      - decl: [gst, UserLevelRow]
+      - set: [gst.email, "gast@example.com"]
+      - set: [gst.display_name, "gast"]
+      - set: [gst.level, 255]
+      - call: [lst.users.push, gst]
+      - return: lst
+
+# Die Zeilen beschriften — wie UsersScreen.render, nur ohne Server.
+- def:
+    name: fill_users
+    args: [[scene, prefab_instance], [rows, ref<UserLevelResult>]]
+    body:
+      - call: [scene.bind_list, "rows_box", rows.users]
+      - decl: [urx, i32, 0]
+      - while:
+          condition: { lt: [urx, rows.users.len] }
+          body:
+            - decl: [urow, prefab_instance, { call: [scene.container_row, "rows_box", urx] }]
+            - if:
+                condition: { neq: [urow, null] }
+                then:
+                  - decl: [uone, UserLevelRow, { at: [rows.users, urx] }]
+                  - call: [urow.set_text, "mail_lbl", uone.email]
+                  - call: [urow.set_text, "nick_lbl", uone.display_name]
+                  - call: [urow.set_text, "lvl_cell", "${uone.level}"]
+            - set: [urx, { +: [urx, 1] }]
+
+# Zwei Speicher fuer das Netzbild — die Trommeln brauchen Namen und Fuellstand.
+- def:
+    name: demo_stores
+    args: [[view, ref<ClusterView>]]
+    body:
+      - decl: [kv_users, KvStoreInfo]
+      - set: [kv_users.name, "users"]
+      - set: [kv_users.entries, 37]
+      - call: [view.live.stores.push, kv_users]
+      - decl: [kv_defs, KvStoreInfo]
+      - set: [kv_defs.name, "job_defs"]
+      - set: [kv_defs.entries, 1]
+      - call: [view.live.stores.push, kv_defs]
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [want, string, { call: [sys.get_arg, 1] }]
+      - if: { condition: { eq: [want.len, 0] }, then: [{ set: [want, "MainMenuScene"] }] }
+      - decl: [hold_ms, string, { call: [sys.get_arg, 2] }]
+      - decl: [hold, i32, 2500]
+      - if: { condition: { gt: [hold_ms.len, 0] }, then: [{ set: [hold, { call: [hold_ms.parse_i32] }] }] }
+
+      - decl: [win, window_handle, { call: [engine.create_window, 1280, 720, "cosmos ui shot"] }]
+      - if: { condition: { eq: [win, null] }, then: [{ print: ["FAIL create_window"] }, { return: 1 }] }
+      - call: [gl.init]
+      - call: [gl.viewport, 0, 0, 1280, 720]
+      - call: [gl.enable_blend]
+      - call: [ui.init]
+      - call: [engine.prefab_scene_init, 1280, 720]
+      - call: [engine.target_fps, 30]
+      - decl: [font, ui_font, { call: [gl.font, "ui", 14.0] }]
+      - if: { condition: { peq: [font, null] }, then: [{ set: [font, { call: [ui.load_font_default, 14.0] }] }] }
+      - if: { condition: { neq: [font, null] }, then: [{ call: [ui.set_default_font, font] }, { call: [engine.prefab_set_font, font] }] }
+      # Monospace fuer Codefelder (spec/98 F98-15): eigener Font, weil ein
+      # globaler nicht beides sein kann.
+      - decl: [mono, ui_font, { call: [gl.font, "mono", 13.0] }]
+      - if: { condition: { neq: [mono, null] }, then: [{ call: [engine.prefab_add_font, "mono", mono] }] }
+
+      # Manche Szenen haben eine Screen-Klasse ohne Server-Abhaengigkeit — die
+      # fuellt Listen und Kaesten, sonst waeren sie leer.
+      #
+      # Der Fall „RunsScene" ist am 15.10.2026 entfallen: die Lauf-Ansicht ist
+      # die Job-Seite (doc/spec/107 F107-10), und RunsScreen gibt es nicht mehr.
+      - if: { condition: { eq: [want, "JobParamsScene"] }, then: [{ return: { call: [shoot_params, win, hold] } }] }
+      # JobRunsScene: die drei Spalten MIT Daten — ohne Server.  Eine leere
+      # Aufnahme zeigt nur, dass nichts uebereinanderliegt; ob Zeilen, Knoten
+      # und Ausgabe zusammenpassen, sieht man erst mit Inhalt.
+      - if:
+          condition: { eq: [want, "JobRunsScene"] }
+          then:
+            - decl: [jscr, ptr<JobRunsScreen>, { new: JobRunsScreen }]
+            - call: [jscr.init]
+            - call: [jscr.open_job, "api-main", "api-main"]
+            - decl: [shot_crew, ptr<AgentList>, { new: AgentList }]
+            - decl: [crew_one, AgentInfo]
+            - set: [crew_one.agent_id, "builder-1"]
+            - set: [crew_one.online, 1]
+            - call: [shot_crew.agents.push, crew_one]
+            - decl: [crew_two, AgentInfo]
+            - set: [crew_two.agent_id, "builder-2"]
+            - set: [crew_two.online, 0]
+            - call: [shot_crew.agents.push, crew_two]
+            - call: [jscr.set_crew, shot_crew]
+            - decl: [jview, ptr<ClusterView>, { new: ClusterView }]
+            - decl: [shot_run, PipelineRun]
+            - set: [shot_run.run_id, "api-main-12"]
+            - set: [shot_run.job_id, "api-main"]
+            - set: [shot_run.build_number, 12]
+            - set: [shot_run.started_ms, 1760000000000]
+            - set: [shot_run.status, "failed"]
+            - call: [shot_run.stages.push, { call: [shot_stage, "api-main-12-0-0", "checkout [arch=x86_64]", "arch=x86_64", "done"] }]
+            - call: [shot_run.stages.push, { call: [shot_stage, "api-main-12-0-1", "build [arch=x86_64]", "arch=x86_64", "failed"] }]
+            - call: [shot_run.stages.push, { call: [shot_stage, "api-main-12-0-2", "test [arch=x86_64]", "arch=x86_64", "pending"] }]
+            - call: [shot_run.stages.push, { call: [shot_stage, "api-main-12-1-0", "checkout [arch=arm64]", "arch=arm64", "done"] }]
+            - call: [shot_run.stages.push, { call: [shot_stage, "api-main-12-1-1", "build [arch=arm64]", "arch=arm64", "running"] }]
+            - call: [shot_run.stages.push, { call: [shot_stage, "api-main-12-1-2", "test [arch=arm64]", "arch=arm64", "pending"] }]
+            - call: [jview.pipelines.push, shot_run]
+            # Die Schichten (doc/spec/107 §107.1c): im Betrieb meldet sie der
+            # Agent, hier stehen sie als Probe — eine Aufnahme soll zeigen, ob
+            # die Leiter aus F107-30 die Groessenordnungen auch auseinander
+            # haelt, und das tut sie nur mit Zahlen, die weit auseinander liegen.
+            - call: [shot_layers, jview]
+            - decl: [older, PipelineRun]
+            - set: [older.run_id, "api-main-11"]
+            - set: [older.job_id, "api-main"]
+            - set: [older.build_number, 11]
+            - set: [older.started_ms, 1759990000000]
+            - set: [older.status, "done"]
+            - call: [jview.pipelines.push, older]
+            # Eine LANGE Zeile gehoert in die Probe: nur so zeigt die Aufnahme, ob
+            # der waagerechte Balken erscheint und ob die Schrift den Rahmen
+            # beruehrt (gemeldet 22.10.2026).
+            - call: [jscr.scene.set_text, "log_box", "+ cc -c src/main.c\ncc1: error: unknown option\n+ /opt/venv/bin/exodus build --all --config exodus-client.json --jobs 8 --target wasm32-unknown-emscripten --sysroot /opt/emsdk/upstream/emscripten/cache/sysroot\nmake: *** [main.o] Error 1\n"]
+            - decl: [jshl, ptr<ShellScreen>, { new: ShellScreen }]
+            - call: [jshl.init]
+            - call: [jshl.set_status, 1, 2, 2, "api-main #12 laeuft"]
+            - call: [jshl.mark_area, 0]
+            - decl: [envm2, map<string:string>, { call: [sys.env] }]
+            - if: { condition: { gt: [{ call: [envm2.contains, "SHOT_WIDE"] }, 0] }, then: [{ call: [jscr.toggle_wide] }] }
+            - call: [jscr.paint, jview, "schuss"]
+            - decl: [fb_chk, ivec2, { call: [engine.framebuffer_size, win] }]
+            - print: ["SHOT fenster: ${fb_chk.x}x${fb_chk.y}"]
+            - print: ["SHOT 3d: ready=${{ call: [jscr.gfx_ready] }} koerper=${{ call: [jscr.body_count] }}"]
+            - decl: [j_end, i64, { +: [{ call: [time.mono_ms] }, hold] }]
+            - while:
+                condition: { lt: [{ call: [time.mono_ms] }, j_end] }
+                body:
+                  - call: [jscr.paint, jview, "schuss"]
+                  - call: [gl.clear_all, 0.04, 0.04, 0.08, 1.0]
+                  - call: [engine.draw_scene]
+                  # §107.1b: der Raum kommt NACH der Oberflaeche.
+                  - decl: [fb_now, ivec2, { call: [engine.framebuffer_size, win] }]
+                  - call: [jscr.draw3d, 0.016, fb_now.x, fb_now.y]
+                  - call: [engine.swap, win]
+            - call: [engine.destroy_window, win]
+            - print: ["ui_shot ${want} done"]
+            - return: 0
+
+      - if:
+          condition: { eq: [want, "PipelineScene"] }
+          then:
+            - call: [io.write, io.stderr, "SHOT a: vor new\n"]
+            - decl: [pscr, ptr<PipelineScreen>, { new: PipelineScreen }]
+            - call: [io.write, io.stderr, "SHOT b: vor init\n"]
+            - call: [pscr.init]
+            - call: [io.write, io.stderr, "SHOT c: nach init\n"]
+            # Huelle mitzeichnen (spec/98 F98-16): der Bereich sitzt bei y=48.
+            # Fokus auf das Quelltextfeld, damit die Aufnahme den CURSOR zeigt:
+            # seine Lage ist das Einzige, was ein Bild ueber ihn verraet.
+            - call: [pscr.new_job]
+            - call: [pscr.scene.focus, "src_box"]
+            - decl: [shl, ptr<ShellScreen>, { new: ShellScreen }]
+            - call: [shl.init]
+            - call: [shl.set_status, 1, 2, 2, "Lauf #412 laeuft (4/6 Lanes)"]
+            - call: [shl.mark_area, 0]
+            - decl: [p_end, i64, { +: [{ call: [time.mono_ms] }, hold] }]
+            - while:
+                condition: { lt: [{ call: [time.mono_ms] }, p_end] }
+                body:
+                  - call: [io.write, io.stderr, "SHOT d: vor render\n"]
+                  - call: [pscr.render]
+                  - call: [io.write, io.stderr, "SHOT e: nach render\n"]
+                  - call: [gl.clear_all, 0.04, 0.04, 0.08, 1.0]
+                  - call: [engine.draw_scene]
+                  - call: [engine.swap, win]
+            - call: [engine.destroy_window, win]
+            - print: ["ui_shot ${want} done"]
+            - return: 0
+
+      # Die Agentenliste gehoert HIERHER und nicht in den `if`-Zweig: ein Container
+      # haelt seine gebundene Liste als VERWEIS, und ein Besitzer, der am Ende des
+      # Zweigs stirbt, laesst ihn auf freigegebenen Speicher zeigen — die Zeilen
+      # bleiben leer (gemessen 17.10.2026; dieselbe Klasse Fehler wie der
+      # Prefab-OOM im Deck-Editor).
+      - decl: [alist, ptr<AgentList>, { call: [demo_agents] }]
+      # Dieselbe Regel wie bei `alist`: der Container haelt die Liste als VERWEIS,
+      # ein Besitzer aus einem inneren Block waere beim Zeichnen schon tot.
+      # In einem MODELL, nicht als blanke Lokale: `bind_list` nimmt eine Liste, die
+      # in einem Modell liegt (bei den Agenten ist es `alist.agents`).
+      - decl: [ulist, ptr<UserLevelResult>, { call: [demo_users] }]
+      - decl: [jview, ptr<ClusterView>, { new: ClusterView }]
+      - decl: [jd_a, JobDef]
+      - set: [jd_a.job_id, "test"]
+      - call: [jview.job_defs.push, jd_a]
+      - decl: [jd_b, JobDef]
+      - set: [jd_b.job_id, "build/api"]
+      - call: [jview.job_defs.push, jd_b]
+      - decl: [scene, prefab_instance, { call: [engine.instantiate, want] }]
+      - call: [scene.set_pos, 0.0, 0.0]
+      - call: [scene.set_z, 0]
+      - call: [scene.set_visible, 1]
+      # Nur die LoginScene hat noch ein logo_img; set_texture WIRFT bei
+      # fehlendem Kind (kein No-op).  Die MainMenuScene ist seit doc/spec/107
+      # die Jobliste und traegt kein Logo mehr.
+      - if:
+          condition: { eq: [want, "LoginScene"] }
+          then:
+            - call: [scene.set_texture, "logo_img", { call: [gl.tex, "cosmos_logo"] }]
+
+      # ControllerScene (doc/spec/108 + 109): mit Inhalt, sonst sagt das Bild nichts ueber
+      # Zeilennummern und ueber die Trennung Ausgabe/Befunde.  Der Befund ist echt —
+      # so lehnt die Clearance einen `db.open_kv`-Aufruf ab (spec/65 F65-35).
+      #
+      # Die Texte sind EINZEILIG geschrieben (mit \n), weil YAML im Flow-Kontext
+      # Klammern im Skalar sonst als Sequenz liest — eigener Fehler 2026-10-17.
+      # UsersScene (doc/spec/108 §2) mit Inhalt — ein leerer Bereich zeigt nicht,
+      # ob die Liste und die Richtungs-Erklaerung lesbar sind.
+      # AgentsScene mit Agenten fuellen (doc/spec/109 R4): der generische Zweig
+      # instanziiert nur die Szene, er fuellt sie nicht — ohne Daten sagt das Bild
+      # nichts ueber die Last-Spalte.
+      - if:
+          condition: { eq: [want, "AgentsScene"] }
+          then:
+            - call: [scene.bind_list, "agents_list", alist.agents]
+
+      # ClusterScene (doc/spec/107 §107.5): das Netzbild braucht Knoten, sonst zeigt es
+      # nur Linien ins Leere.  Die Speicherliste haengt hier an `job_defs` — der Harness
+      # hat keine KvStoreInfo-Liste, und fuer das LAYOUT zaehlt die Zeilenzahl.
+      - if:
+          condition: { eq: [want, "ClusterScene"] }
+          then:
+            - call: [scene.set_text, "stand_lbl", "Stand: vor 2 s"]
+            - call: [scene.set_text, "ctl_bind", "ws://0.0.0.0:8765"]
+            - call: [scene.set_text, "ctl_load", "7 % Prozessor · 182 MB"]
+            - call: [scene.set_text, "ctl_conn", "2 angemeldet · 0 offen"]
+            - call: [scene.set_text, "ctl_note", "2 Speicher · 3 Agenten bekannt"]
+            - call: [scene.bind_list, "agt_list", alist.agents]
+            - call: [scene.bind_list, "kv_list", jview.job_defs]
+            # Der raeumliche Teil gehoert ins Bild: eine Aufnahme ohne ihn zeigte
+            # ein leeres Kaestchen und behauptete, so sehe der Reiter aus
+            # (doc/spec/107 §107.5 — ein veraltetes Bild ist ein falsches Bild).
+            - call: [demo_stores, jview]
+            - set: [jview.srv_cpu_permille, 70]
+            - set: [jview.srv_rss_kb, 186368]
+      - if:
+          condition: { eq: [want, "UsersScene"] }
+          then:
+            - call: [scene.set_text, "msg_lbl", "nikolai@example.com hat jetzt Freigabe 7"]
+            - call: [scene.set_text, "tgt_input", "nikolai@example.com"]
+            - call: [scene.set_text, "lvl_input", "7"]
+            # MIT Zeilen: ein leerer Bereich zeigt nicht, ob Spalten und Liste
+            # zusammenpassen — und genau das ist am Umbau zum Bereich neu.
+
+      # AccountScene (doc/spec/107 §107.6): der Bereich „Konto".  Ohne die Zeile
+      # „Angemeldet als" sagt das Bild nichts darueber, wessen Konto man sieht.
+      - if:
+          condition: { eq: [want, "AccountScene"] }
+          then:
+            - call: [scene.set_text, "cur_email_lbl", "Angemeldet als: nikolai@example.com"]
+
+      - if:
+          condition: { eq: [want, "ControllerScene"] }
+          then:
+            - call: [scene.set_text, "host_lbl", "cosmosd auf 0.0.0.0:8765 · seit 3 h 12 min"]
+            - call: [scene.set_text, "cpu_val", "7 %"]
+            - call: [scene.set_text, "ram_val", "182 MB"]
+            - call: [scene.set_text, "agt_val", "2 / 3"]
+            - call: [scene.set_text, "run_val", "1"]
+            - call: [scene.set_text, "status_lbl", "ausgeführt in 42 ms · Prozess beendet mit 0"]
+            - call: [scene.set_text, "src_box", "- def:\n    name: main\n    return: i32\n    body:\n      - decl: who, string, call cosmos_whoami\n      - decl: sum, string, call cosmos_cluster_summary\n      - call: log.info, \"actor=\", who\n      - call: log.info, sum\n      - call: db.open_kv, \"x\"\n      - return: 0"]
+            - call: [scene.set_text, "out_box", "actor=u_admin001\nnodes=3 ready=3\nworkloads=2 running=2"]
+            - call: [scene.set_text, "diag_box", "run_7.aiml:14: clearance-builtin: db.open_kv ist\nfuer diese Sitzung nicht erreichbar (spec/65\nF65-35).  Offen sind math, hash, enums,\ncompress, cascade und log."]
+            # doc/spec/108 §6a: die beanstandete Zeile rot ueber die Syntaxfarben.
+            # Zeile 9 des Skripts ist der db.open_kv-Aufruf; die Laufzeit rechnet die
+            # Praeambel heraus, hier wird der Versatz von Hand gesetzt.
+            - decl: [marks, list<i32>]
+            - call: [marks.push, 215]
+            - call: [marks.push, 29]
+            - call: [marks.push, 0xFF6655FF]
+            - call: [scene.set_color_runs, "src_box", marks]
+
+            # Mit COSMOS_SHOT_NOADMIN=1 der Zustand OHNE Freigabe — das ist der, den
+            # ein neues Konto sieht, und der frueher gar keinen Reiter hatte.
+            - decl: [shot_env, map<string:string>, { call: [sys.env] }]
+            - if:
+                condition: { gt: [{ call: [shot_env.contains, "COSMOS_SHOT_NOADMIN"] }, 0] }
+                then:
+                  - call: [scene.set_text, "clear_lbl", "Freigabe: 255 · Skripte brauchen Freigabe 1.  Am Server:  ./cosmosd --grant-email <konto> --grant-level 1"]
+                  - call: [scene.set_text, "status_lbl", "bereit"]
+                  - call: [scene.set_text, "src_box", ""]
+                  - call: [scene.set_text, "out_box", ""]
+                  - call: [scene.set_text, "diag_box", ""]
+                else:
+                  - call: [scene.set_text, "clear_lbl", "Freigabe: 1 (Admin) · Skripte laufen mit dieser Freigabe"]
+
+      - decl: [c_space, ptr<PipeScene>, { new: PipeScene }]
+      - decl: [c_view, ptr<Pipe3D>, { new: Pipe3D }]
+      - decl: [c_body, list<SceneItem>]
+      - if:
+          condition: { eq: [want, "ClusterScene"] }
+          then:
+            - decl: [built, list<SceneItem>, { call: [c_space.of_cluster, jview, alist] }]
+            - decl: [bix, i32, 0]
+            - while:
+                condition: { lt: [bix, built.len] }
+                body:
+                  - call: [c_body.push, { at: [built, bix] }]
+                  - set: [bix, { +: [bix, 1] }]
+            - if:
+                condition: { eq: [{ call: [c_view.init] }, 1] }
+                then: [{ call: [c_view.fit, c_body] }]
+                else: [{ call: [log.warn, "[shot] kein GL fuer das Netzbild"] }]
+
+      - decl: [t_end, i64, { +: [{ call: [time.mono_ms] }, hold] }]
+      - while:
+          condition: { lt: [{ call: [time.mono_ms] }, t_end] }
+          body:
+            # MainMenuScene: die Jobliste mit ECHTEN Zahlen aus der Datenbank des
+            # Nutzers (Job `test`: 11 gestartet, 7 fertig, 0 gescheitert) — genau der
+            # Fall, der als „0/7" unverstaendlich war.
+            - if:
+                condition: { eq: [want, "MainMenuScene"] }
+                then:
+                  - call: [scene.bind_list, "jobs_list", jview.job_defs]
+                  - decl: [jr0, prefab_instance, { call: [scene.container_row, "jobs_list", 0] }]
+                  - if:
+                      condition: { neq: [jr0, null] }
+                      then:
+                        - call: [jr0.set_text, "name_lblx", "test"]
+                        - call: [jr0.set_text, "last_lblx", "done in 4 s"]
+                        - call: [jr0.set_bg_color, "stat_dotx", 0x66CC88FF]
+                        - call: [jr0.set_text, "tally_lbl", "7 fertig · 0 gescheitert"]
+                        - call: [jr0.set_text, "tally_sub", "4 ohne Ergebnis"]
+                  - decl: [jr1, prefab_instance, { call: [scene.container_row, "jobs_list", 1] }]
+                  - if:
+                      condition: { neq: [jr1, null] }
+                      then:
+                        - call: [jr1.set_text, "name_lblx", "build/api"]
+                        - call: [jr1.set_text, "last_lblx", "failed in 12 s"]
+                        - call: [jr1.set_bg_color, "stat_dotx", 0xDD6655FF]
+                        - call: [jr1.set_text, "tally_lbl", "23 fertig · 2 gescheitert"]
+                        - call: [jr1.set_text, "tally_sub", ""]
+
+            # Zeilen JE RAHMEN beschriften: der Container erzeugt sie erst beim
+            # Zeichnen, also liefert `container_row` davor null — vorher gesetzte
+            # Texte landen im Nichts (gemessen 17.10.2026).  Die echten Bildschirme
+            # machen es aus demselben Grund in `render`.
+            - if:
+                condition: { eq: [want, "ClusterScene"] }
+                then:
+                  - decl: [cki, i32, 0]
+                  - while:
+                      condition: { lt: [cki, 4] }
+                      body:
+                        - decl: [ckr, prefab_instance, { call: [scene.container_row, "kv_list", cki] }]
+                        - if:
+                            condition: { neq: [ckr, null] }
+                            then:
+                              - if: { condition: { eq: [cki, 0] }, then: [{ call: [ckr.set_text, "kv_name", "users"] }, { call: [ckr.set_text, "kv_meta", "37 Einträge · 0 MB WAL · 118 Schreibvorgänge"] }] }
+                              - if: { condition: { eq: [cki, 1] }, then: [{ call: [ckr.set_text, "kv_name", "job_defs"] }, { call: [ckr.set_text, "kv_meta", "1 Eintrag · 16 MB WAL · 24 Schreibvorgänge"] }] }
+                        - set: [cki, { +: [cki, 1] }]
+                  - decl: [cai, i32, 0]
+                  - while:
+                      condition: { lt: [cai, alist.agents.len] }
+                      body:
+                        - decl: [car, prefab_instance, { call: [scene.container_row, "agt_list", cai] }]
+                        - if:
+                            condition: { neq: [car, null] }
+                            then:
+                              - decl: [cag, AgentInfo, { at: [alist.agents, cai] }]
+                              - call: [car.set_text, "ag_name", cag.agent_id]
+                              - if:
+                                  condition: { neq: [cag.online, 0] }
+                                  then:
+                                    - decl: [cpc, i32, { /: [cag.cpu_permille, 10] }]
+                                    - decl: [cmb, i64, { /: [cag.rss_kb, 1024] }]
+                                    - call: [car.set_bg_color, "ag_dot", 0x66CC88FF]
+                                    - call: [car.set_text, "ag_meta", "verbunden · ${cpc} % · ${cmb} MB"]
+                                  else: [{ call: [car.set_text, "ag_meta", "nicht verbunden · Last: k. A."] }]
+                        - set: [cai, { +: [cai, 1] }]
+            - if:
+                condition: { eq: [want, "UsersScene"] }
+                then: [{ call: [fill_users, scene, ulist] }]
+            - if:
+                condition: { eq: [want, "AgentsScene"] }
+                then:
+                  - decl: [agi, i32, 0]
+                  - while:
+                      condition: { lt: [agi, alist.agents.len] }
+                      body:
+                        - decl: [arow, prefab_instance, { call: [scene.container_row, "agents_list", agi] }]
+                        - if:
+                            condition: { neq: [arow, null] }
+                            then:
+                              - decl: [ainfo, AgentInfo, { at: [alist.agents, agi] }]
+                              - call: [arow.set_text, "name_lblx", ainfo.agent_id]
+                              - call: [arow.set_text, "labs_lblx", ainfo.host]
+                              - call: [arow.set_text, "seen_lblx", "vor wenigen Sekunden"]
+                              - call: [arow.set_text, "work_lblx", "bereit"]
+                              - decl: [ld_txt, string, "k. A."]
+                              - if:
+                                  condition: { neq: [ainfo.res_seen, 0] }
+                                  then:
+                                    - decl: [a_pct, i32, { /: [ainfo.cpu_permille, 10] }]
+                                    - decl: [a_mb, i64, { /: [ainfo.rss_kb, 1024] }]
+                                    - set: [ld_txt, "${a_pct}% · ${a_mb} MB"]
+                              - call: [arow.set_text, "load_lblx", ld_txt]
+                        - set: [agi, { +: [agi, 1] }]
+            - call: [gl.clear_all, 0.04, 0.04, 0.08, 1.0]
+            - call: [engine.draw_scene]
+            # Der Ausschnitt des Netzbildes: x 378, y 160, 524x400 (y zaehlt in
+            # GL von unten) — dieselben Masse wie ClusterScreen.draw3d.
+            - if:
+                condition: { '&&': [{ eq: [want, "ClusterScene"] }, { gt: [c_body.len, 0] }] }
+                then:
+                  - call: [c_view.draw, c_body, 378, 160, 524, 400]
+                  - call: [gl.viewport, 0, 0, 1280, 720]
+            - call: [engine.swap, win]
+      - call: [engine.destroy_window, win]
+      - print: ["ui_shot ${want} done"]
+      - return: 0

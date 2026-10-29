@@ -1,0 +1,99 @@
+# Abnahme doc/spec/99: die Betriebssicht als Tabelle.
+#
+# Geprueft wird die RECHNUNG, nicht das Zeichnen — darum ohne Display:
+#   * ein Agent ohne Takt ist erst "still", dann "weg" (F99-4)
+#   * das Alter steht in der Sicht (F99-3); ohne das sieht eine eingefrorene
+#     Sicht aus wie eine gesunde
+#   * Farbe NUR auf dem Zustandswort, und der Text nennt ihn trotzdem (F99-2)
+#   * Speicher zeigen Kennzahlen, keine Inhalte (F99-7)
+# Expected exit code: 0
+
+- import: "sources/shared/live_table.aiml"
+
+- def:
+    name: expect
+    args: [[what, string], [cond, i32]]
+    return: i32
+    body:
+      - if:
+          condition: { eq: [cond, 1] }
+          then: [{ print: ["  ok   ${what}"] }, { return: 0 }]
+      - print: ["  FAIL ${what}"]
+      - return: 1
+
+- def:
+    name: mk_agent
+    args: [[agent_id, string], [status, i32], [last_seen, i64], [run_id, string]]
+    return: { type: AgentInfo, lifetime: producer }
+    body:
+      - decl: [row, AgentInfo]
+      - set: [row.agent_id, agent_id]
+      - set: [row.status, status]
+      - set: [row.last_seen_ms, last_seen]
+      - set: [row.current_run, run_id]
+      - set: [row.host, "node.example"]
+      - return: row
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      - decl: [table, ptr<LiveTable>, { new: LiveTable }]
+      - decl: [now_ms, i64, 1000000]
+
+      # Drei Agenten: frisch, still (45 s), weg (300 s).
+      - decl: [lst, ptr<AgentList>, { new: AgentList }]
+      - call: [lst.agents.push, { call: [mk_agent, "builder-1", AgentStatus.connected, { -: [now_ms, 2000] }, "run-7"] }]
+      - call: [lst.agents.push, { call: [mk_agent, "builder-2", AgentStatus.connected, { -: [now_ms, 45000] }, ""] }]
+      - call: [lst.agents.push, { call: [mk_agent, "builder-3", AgentStatus.connected, { -: [now_ms, 300000] }, ""] }]
+
+      - decl: [runs, list<i32>]
+      - decl: [txt, string, { call: [table.agents, lst, now_ms, runs] }]
+      - print: ["--- Agenten ---"]
+      - print: [txt]
+      - set: [fails, { +: [fails, { call: [expect, "frischer Agent ist verbunden", { gt: [{ call: [txt.index_of, "verbunden"] }, -1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "45 s ohne Takt ist still, nicht weg", { gt: [{ call: [txt.index_of, "still"] }, -1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "300 s ohne Takt ist weg", { gt: [{ call: [txt.index_of, "weg"] }, -1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "der laufende Schritt steht dabei", { gt: [{ call: [txt.index_of, "run-7"] }, -1] }] }] }]
+      # Drei Zustandswoerter -> drei Farb-Tripel; nichts sonst wird gefaerbt.
+      - set: [fails, { +: [fails, { call: [expect, "ein Farb-Tripel je Zustandswort", { eq: [runs.len, 9] }] }] }]
+      - decl: [last_start, i32, { at: [runs, 6] }]
+      - decl: [last_len, i32, { at: [runs, 7] }]
+      - set: [fails, { +: [fails, { call: [expect, "jeder Farblauf liegt im Text", { le: [{ +: [last_start, last_len] }, txt.len] }] }] }]
+
+      # Leere Liste sagt das, statt leer zu bleiben.
+      - decl: [empty_lst, ptr<AgentList>, { new: AgentList }]
+      - decl: [runs2, list<i32>]
+      - decl: [txt2, string, { call: [table.agents, empty_lst, now_ms, runs2] }]
+      - set: [fails, { +: [fails, { call: [expect, "leere Liste sagt es ausdruecklich", { gt: [{ call: [txt2.index_of, "kein Agent"] }, -1] }] }] }]
+
+      # Speicher: Kennzahlen, keine Inhalte.
+      - decl: [live, LiveView]
+      - set: [live.taken_ms, { -: [now_ms, 3000] }]
+      - decl: [store_row, KvStoreInfo]
+      - set: [store_row.name, "cas_actions"]
+      - set: [store_row.path, "/srv/cosmos/aiondb/cas_actions.kvwal"]
+      - set: [store_row.wal_used, 16777216]
+      - set: [store_row.entries, 4211]
+      - set: [store_row.writes, 90210]
+      - call: [live.stores.push, store_row]
+      - decl: [runs3, list<i32>]
+      - decl: [stxt, string, { call: [table.stores, live, runs3] }]
+      - print: ["--- Speicher ---"]
+      - print: [stxt]
+      - set: [fails, { +: [fails, { call: [expect, "Speicher nennt seinen Namen", { gt: [{ call: [stxt.index_of, "cas_actions"] }, -1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "WAL-Groesse steht da (16384 KB)", { gt: [{ call: [stxt.index_of, "16384"] }, -1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Schreibzaehler steht da", { gt: [{ call: [stxt.index_of, "90210"] }, -1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "kein Pfad in der Tabelle (knapp halten)", { eq: [{ call: [stxt.index_of, "/srv/cosmos"] }, -1] }] }] }]
+
+      # Alter des Schnappschusses.
+      - decl: [age_txt, string, { call: [table.age_line, live, now_ms] }]
+      - set: [fails, { +: [fails, { call: [expect, "das Alter steht in der Sicht", { gt: [{ call: [age_txt.index_of, "3 s"] }, -1] }] }] }]
+
+      - if:
+          condition: { neq: [fails, 0] }
+          then: [{ print: ["test_live_table FAIL (${fails})"] }, { return: 1 }]
+      - print: ["test_live_table PASS"]
+      - return: 0

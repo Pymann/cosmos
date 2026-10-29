@@ -1,0 +1,329 @@
+# DemoPurge — entfernt GENAU die bekannten Beispiel-Schluessel aus dem Speicher.
+# Klasse getrennt vom Einstieg (spec/49 §7) und im Server-Zweig, weil sie
+# dieselben Speicher oeffnet wie der Betrieb.
+- import: "sources/models/login_throttle.aiml"
+- import: "sources/shared/node.aiml"
+- import: "sources/shared/workload.aiml"
+- import: "sources/shared/pipeline_run.aiml"
+- import: "sources/shared/job_def.aiml"
+- import: "sources/shared/job_record.aiml"
+
+- class:
+    name: DemoPurge
+    members:
+      - [nodes,     Kv<string:Node>]
+      - [workloads, Kv<string:Workload>]
+      - [pipelines, Kv<string:PipelineRun>]
+      - [job_defs,  Kv<string:JobDef>]
+      - [jobs,      Kv<string:JobRecord>]
+      # Die Register-Bremse je IP (sources/auth/auth_service.aiml).  Ihr Zaehler
+      # sinkt NIE: ab der 7. Registrierung sperrt sie eine Stunde, und jede
+      # weitere verlaengert nicht, aber die Zahl bleibt stehen — auf einem
+      # Entwicklungsrechner, auf dem Proben staendig Konten anlegen, wird daraus
+      # eine Dauersperre.  Hier steht nur das Aufraeumen; der fehlende Abbau ist
+      # ein eigener Befund (doc/spec/101 §101.7a).
+      - [reg_throttle, Kv<string:LoginThrottle>]
+    methods:
+      - def:
+          name: open_all
+          access: public
+          body:
+            - set: [<.reg_throttle, { call: [db.open_kv, "reg_throttle", {persist: true}] }]
+            - set: [<.nodes,     { call: [db.open_kv, "nodes",     {persist: true}] }]
+            - set: [<.workloads, { call: [db.open_kv, "workloads", {persist: true}] }]
+            - set: [<.pipelines, { call: [db.open_kv, "pipelines", {persist: true}] }]
+            - set: [<.job_defs,  { call: [db.open_kv, "job_defs",  {persist: true}] }]
+            - set: [<.jobs,      { call: [db.open_kv, "jobs",      {persist: true}] }]
+
+      # dump: Jobs und Laeufe mit ihrem Zustand nennen — zum Nachsehen, wenn
+      # die Oberflaeche und das Gefuehl auseinandergehen.
+      - def:
+          name: dump
+          access: public
+          static_off: ["str_cmp"]
+          body:
+            - decl: [dit, iterator<string>, { call: [<.job_defs.iter] }]
+            - call: [log.info, "── Jobs ──"]
+            - while:
+                condition: { gt: [{ call: [dit.has_next] }, 0] }
+                body:
+                  - decl: [dkey, string, { call: [dit.next] }]
+                  - decl: [jdef, JobDef, { call: [<.job_defs.get_copy, dkey] }]
+                  - call: [log.info, "  ${jdef.job_id}  naechste Nummer ${jdef.next_build}  letzter Stand '${jdef.last_status}'  ${jdef.runs_failed}/${jdef.runs_total} gescheitert"]
+            - call: [log.info, "── Laeufe ──"]
+            - decl: [rit, iterator<string>, { call: [<.pipelines.iter] }]
+            - while:
+                condition: { gt: [{ call: [rit.has_next] }, 0] }
+                body:
+                  - decl: [rkey, string, { call: [rit.next] }]
+                  - decl: [prun, PipelineRun, { call: [<.pipelines.get_copy, rkey] }]
+                  - decl: [open_n, i32, 0]
+                  - decl: [six, i32, 0]
+                  - while:
+                      condition: { lt: [six, prun.stages.len] }
+                      body:
+                        - decl: [stg, PipelineStage, { at: [prun.stages, six] }]
+                        - if: { condition: { neq: [stg.status, "done"] }, then: [{ set: [open_n, { +: [open_n, 1] }] }] }
+                        - set: [six, { +: [six, 1] }]
+                  - call: [log.info, "  ${prun.run_id}  Zustand '${prun.status}'  ${prun.stages.len} Stufen, davon ${open_n} offen"]
+
+      - def:
+          name: drop_node
+          access: public
+          args: [[key, string]]
+          return: i32
+          body:
+            - if: { condition: { eq: [{ call: [<.nodes.has, key] }, 0] }, then: [{ return: 0 }] }
+            - call: [<.nodes.delete, key]
+            - call: [log.info, "  entfernt: nodes/${key}"]
+            - return: 1
+
+      - def:
+          name: drop_workload
+          access: public
+          args: [[key, string]]
+          return: i32
+          body:
+            - if: { condition: { eq: [{ call: [<.workloads.has, key] }, 0] }, then: [{ return: 0 }] }
+            - call: [<.workloads.delete, key]
+            - call: [log.info, "  entfernt: workloads/${key}"]
+            - return: 1
+
+      # refresh_sources: Quellen in ALTER Syntax durch das heutige Beispiel
+      # ersetzen (doc/spec/106 §106.3a).
+      #
+      # Nur dort, wo die alten Schluessel stehen UND der Rumpf das
+      # unveraenderte Beispiel ist — eine selbst geschriebene Pipeline wird
+      # NICHT angefasst, die gehoert ihrem Autor.  Was ersetzt wurde, steht im
+      # Protokoll; was nicht, auch.
+      - def:
+          name: refresh_sources
+          access: public
+          static_off: ["str_cmp"]
+          args: [[fresh, string]]
+          return: i32
+          body:
+            - decl: [done_n, i32, 0]
+            - decl: [keys, list<string>]
+            - decl: [sit, iterator<string>, { call: [<.job_defs.iter] }]
+            - while:
+                condition: { gt: [{ call: [sit.has_next] }, 0] }
+                body: [{ call: [keys.push, { call: [sit.next] }] }]
+            - decl: [kix, i32, 0]
+            - while:
+                condition: { lt: [kix, keys.len] }
+                body:
+                  - decl: [jkey, string, { at: [keys, kix] }]
+                  - set: [kix, { +: [kix, 1] }]
+                  - decl: [jdef, JobDef, { call: [<.job_defs.get_copy, jkey] }]
+                  - decl: [has_old, i32, 0]
+                  - if: { condition: { ge: [{ call: [jdef.source.index_of, "\n    stages:"] }, 0] }, then: [{ set: [has_old, 1] }] }
+                  - if:
+                      condition: { eq: [has_old, 0] }
+                      then: [{ call: [log.info, "  ${jkey}: schon heutige Form — unberuehrt"] }]
+                      else:
+                        - decl: [is_demo, i32, 0]
+                        - if: { condition: { ge: [{ call: [jdef.source.index_of, "name: demo_build"] }, 0] }, then: [{ set: [is_demo, 1] }] }
+                        - if:
+                            condition: { eq: [is_demo, 0] }
+                            then: [{ call: [log.warn, "  ${jkey}: ALTE Form, aber eigener Inhalt — bitte von Hand umstellen (siehe doc/spec/106 §106.3a)"] }]
+                            else:
+                              - set: [jdef.source, fresh]
+                              - call: [<.job_defs.set, jkey, jdef]
+                              - set: [done_n, { +: [done_n, 1] }]
+                              - call: [log.info, "  ${jkey}: Beispiel auf heutige Form gebracht"]
+            - return: done_n
+
+      # clear_reg_throttle: die Register-Bremse zuruecksetzen.  AUSDRUECKLICH
+      # und benannt, nicht nebenbei: es ist ein Schutz, und wer ihn loescht,
+      # soll es gesagt haben.  Gedacht fuer den Entwicklungsrechner, auf dem
+      # die eigenen Proben die Bremse ausgeloest haben.
+      - def:
+          name: clear_reg_throttle
+          access: public
+          static_off: ["str_cmp"]
+          return: i32
+          body:
+            - decl: [gone, i32, 0]
+            - decl: [keys, list<string>]
+            - decl: [tit, iterator<string>, { call: [<.reg_throttle.iter] }]
+            - while:
+                condition: { gt: [{ call: [tit.has_next] }, 0] }
+                body: [{ call: [keys.push, { call: [tit.next] }] }]
+            - decl: [kix, i32, 0]
+            - while:
+                condition: { lt: [kix, keys.len] }
+                body:
+                  - decl: [one, string, { at: [keys, kix] }]
+                  - set: [kix, { +: [kix, 1] }]
+                  - call: [<.reg_throttle.delete, one]
+                  - call: [log.info, "  Register-Bremse geloescht fuer ${one}"]
+                  - set: [gone, { +: [gone, 1] }]
+            - return: gone
+
+      # drop_unreadable: Laeufe, die sich nicht mehr entschluesseln lassen
+      # (doc/spec/102 F102-8).  Ihre Geschichte ist verloren, sobald das Modell
+      # sich geaendert hat — sie zu behalten heisst nur, bei jedem Zugriff eine
+      # FATAL-Zeile zu erzeugen.
+      - def:
+          name: drop_unreadable
+          access: public
+          static_off: ["str_cmp"]
+          return: i32
+          body:
+            - decl: [gone, i32, 0]
+            - decl: [keys, list<string>]
+            - decl: [uit, iterator<string>, { call: [<.pipelines.iter] }]
+            - while:
+                condition: { gt: [{ call: [uit.has_next] }, 0] }
+                body: [{ call: [keys.push, { call: [uit.next] }] }]
+            - decl: [kix, i32, 0]
+            - while:
+                condition: { lt: [kix, keys.len] }
+                body:
+                  - decl: [ukey, string, { at: [keys, kix] }]
+                  - set: [kix, { +: [kix, 1] }]
+                  - decl: [urun, PipelineRun, { call: [<.pipelines.get_copy, ukey] }]
+                  - if:
+                      condition: { eq: [urun.run_id.len, 0] }
+                      then:
+                        - call: [<.pipelines.delete, ukey]
+                        - call: [log.info, "  unlesbarer Lauf entfernt: ${ukey}"]
+                        - set: [gone, { +: [gone, 1] }]
+            - return: gone
+
+      # sources: die gespeicherten Quellen anzeigen — lesend.  Nach einer
+      # Syntax-Umstellung (doc/spec/106 §106.3a) ist das die Frage, die zaehlt:
+      # welche Jobs tragen noch die alte Form?
+      - def:
+          name: sources
+          access: public
+          static_off: ["str_cmp"]
+          body:
+            - decl: [sit, iterator<string>, { call: [<.job_defs.iter] }]
+            - while:
+                condition: { gt: [{ call: [sit.has_next] }, 0] }
+                body:
+                  - decl: [skey, string, { call: [sit.next] }]
+                  - decl: [sdef, JobDef, { call: [<.job_defs.get_copy, skey] }]
+                  - decl: [mark, string, "neue Form"]
+                  - if: { condition: { ge: [{ call: [sdef.source.index_of, "stages:"] }, 0] }, then: [{ set: [mark, "ALT: stages:"] }] }
+                  - if: { condition: { ge: [{ call: [sdef.source.index_of, "timeout_s:"] }, 0] }, then: [{ set: [mark, "ALT: timeout_s:"] }] }
+                  - if: { condition: { ge: [{ call: [sdef.source.index_of, "label:"] }, 0] }, then: [{ set: [mark, "ALT: label:"] }] }
+                  - call: [log.info, "── ${sdef.job_id} (${mark}) ──"]
+                  - call: [log.info, sdef.source]
+
+      # drop_prefix: Jobs UND ihre Laeufe, deren Kennung mit `pre` beginnt.
+      #
+      # Anlass: Logik-Tests, die GEGEN DEN BETRIEBSSPEICHER liefen (direkt im
+      # Projektverzeichnis gestartet statt ueber run_tests.sh), hinterliessen
+      # dutzende `testjob-*` — mit Zeitplan, sofort faellig und nicht
+      # ausfaltbar.  Der Server protokollierte daraufhin alle 5 s einen Fehler.
+      # Gezielt nach Praefix, nicht pauschal: echte Jobs bleiben stehen.
+      - def:
+          name: drop_prefix
+          access: public
+          static_off: ["str_cmp"]
+          args: [[pre, string]]
+          return: i32
+          body:
+            - if: { condition: { lt: [pre.len, 3] }, then: [{ call: [log.error, "Praefix zu kurz — das loescht zu viel"] }, { return: 0 }] }
+            - decl: [gone, i32, 0]
+            - decl: [defs, list<string>]
+            - decl: [dit, iterator<string>, { call: [<.job_defs.iter] }]
+            - while:
+                condition: { gt: [{ call: [dit.has_next] }, 0] }
+                body: [{ call: [defs.push, { call: [dit.next] }] }]
+            - decl: [dix, i32, 0]
+            - while:
+                condition: { lt: [dix, defs.len] }
+                body:
+                  - decl: [dkey, string, { at: [defs, dix] }]
+                  - set: [dix, { +: [dix, 1] }]
+                  - if:
+                      condition: { eq: [{ call: [dkey.starts_with, pre] }, true] }
+                      then:
+                        - call: [<.job_defs.delete, dkey]
+                        - call: [log.info, "  Job entfernt: ${dkey}"]
+                        - set: [gone, { +: [gone, 1] }]
+            - decl: [runs, list<string>]
+            - decl: [rit, iterator<string>, { call: [<.pipelines.iter] }]
+            - while:
+                condition: { gt: [{ call: [rit.has_next] }, 0] }
+                body: [{ call: [runs.push, { call: [rit.next] }] }]
+            - decl: [rix, i32, 0]
+            - while:
+                condition: { lt: [rix, runs.len] }
+                body:
+                  - decl: [rkey, string, { at: [runs, rix] }]
+                  - set: [rix, { +: [rix, 1] }]
+                  - if:
+                      condition: { eq: [{ call: [rkey.starts_with, pre] }, true] }
+                      then:
+                        - call: [<.pipelines.delete, rkey]
+                        - set: [gone, { +: [gone, 1] }]
+            - return: gone
+
+      # wipe_runs_and_jobs: ALLE Laeufe, Job-Definitionen und Lauf-Datensaetze.
+      # Ausdruecklich angefordert (User 2026-10-15).  Agenten, Token und Konten
+      # bleiben unberuehrt — hier wird nur die Arbeitsgeschichte geleert.
+      - def:
+          name: wipe_runs_and_jobs
+          access: public
+          return: i32
+          body:
+            - decl: [gone, i32, 0]
+            - decl: [runs, list<string>]
+            - decl: [rit, iterator<string>, { call: [<.pipelines.iter] }]
+            - while:
+                condition: { gt: [{ call: [rit.has_next] }, 0] }
+                body: [{ call: [runs.push, { call: [rit.next] }] }]
+            - decl: [rix, i32, 0]
+            - while:
+                condition: { lt: [rix, runs.len] }
+                body:
+                  - decl: [rkey, string, { at: [runs, rix] }]
+                  - call: [<.pipelines.delete, rkey]
+                  - call: [log.info, "  Lauf entfernt: ${rkey}"]
+                  - set: [gone, { +: [gone, 1] }]
+                  - set: [rix, { +: [rix, 1] }]
+            - decl: [defs, list<string>]
+            - decl: [dit, iterator<string>, { call: [<.job_defs.iter] }]
+            - while:
+                condition: { gt: [{ call: [dit.has_next] }, 0] }
+                body: [{ call: [defs.push, { call: [dit.next] }] }]
+            - decl: [dix, i32, 0]
+            - while:
+                condition: { lt: [dix, defs.len] }
+                body:
+                  - decl: [dkey, string, { at: [defs, dix] }]
+                  - call: [<.job_defs.delete, dkey]
+                  - call: [log.info, "  Job entfernt: ${dkey}"]
+                  - set: [gone, { +: [gone, 1] }]
+                  - set: [dix, { +: [dix, 1] }]
+            - decl: [recs, list<string>]
+            - decl: [jit, iterator<string>, { call: [<.jobs.iter] }]
+            - while:
+                condition: { gt: [{ call: [jit.has_next] }, 0] }
+                body: [{ call: [recs.push, { call: [jit.next] }] }]
+            - decl: [jix, i32, 0]
+            - while:
+                condition: { lt: [jix, recs.len] }
+                body:
+                  - decl: [jkey, string, { at: [recs, jix] }]
+                  - call: [<.jobs.delete, jkey]
+                  - set: [gone, { +: [gone, 1] }]
+                  - set: [jix, { +: [jix, 1] }]
+            - return: gone
+
+      - def:
+          name: drop_run
+          access: public
+          args: [[key, string]]
+          return: i32
+          body:
+            - if: { condition: { eq: [{ call: [<.pipelines.has, key] }, 0] }, then: [{ return: 0 }] }
+            - call: [<.pipelines.delete, key]
+            - call: [log.info, "  entfernt: pipelines/${key}"]
+            - return: 1
+

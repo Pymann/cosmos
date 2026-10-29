@@ -1,0 +1,494 @@
+# ApiGateway — REST /api/v1 vor cosmosd (doc/spec/111 §111.8).
+#
+# Jede Route uebersetzt HTTP in GENAU EINEN (selten zwei) cosmosd-RPC.  Das
+# Gateway entscheidet nichts selbst: Token, Freigabe und Rollen prueft
+# cosmosd.  Es kennt nur die Abbildung auf Statuscodes:
+#   401  kein/ungueltiges Token (Probe ueber `my_clearance`, immer erlaubt)
+#   403  Token gilt, der RPC wurde abgewiesen (Rolle/Freigabe)
+#   400  Anfrage ungueltig, 422 Plan mit Befunden, 502 cosmosd nicht erreichbar
+#
+# Koerper sind JSON; Felder heissen wie in den RPC-Modellen.  Das Token kommt
+# aus `Authorization: Bearer <token>` — Sitzungs-Token (login) oder API-Token
+# (`cosmos_…`, §111.7).
+#
+# Static-Check (aiml spec/49 §14): 1 class.
+
+- import: "sources/api/api_link.aiml"
+- import: "sources/api/api_exchange.aiml"
+- import: "sources/models/auth_reqs.aiml"
+- import: "sources/models/auth_result.aiml"
+- import: "sources/models/level_reqs.aiml"
+- import: "sources/models/cluster_reqs.aiml"
+- import: "sources/models/job_reqs.aiml"
+- import: "sources/models/pipeline_reqs.aiml"
+- import: "sources/models/console_reqs.aiml"
+- import: "sources/models/run_control.aiml"
+- import: "sources/models/casc_resp.aiml"
+- import: "sources/models/api_token.aiml"
+- import: "sources/models/api_token_reqs.aiml"
+- import: "sources/models/museum_event.aiml"
+- import: "sources/models/api_views.aiml"
+- import: "sources/models/api_may.aiml"
+- import: "sources/models/sso_reqs.aiml"
+
+- class:
+    name: ApiGateway
+    members:
+      - [link,  ApiLink]
+      - [style, JsonStyle]
+      # Der HTTP-Server laeuft mit einem Faden JE VERBINDUNG (aiml spec/32_2 §3.12);
+      # die eine Mirror-Sitzung darf aber nur ein Faden zugleich benutzen — zwei
+      # gleichzeitige send_and_await lasen denselben Socket (SIGSEGV in SSL_read,
+      # gemessen in run_e2e_museum.sh: Webhook + Kampagnen-Abfrage).  `serial`
+      # nimmt jede Route ganz; cosmosd ist ohnehin der einzige Schreiber.
+      - [serial, lock, null, { access: public }]
+    methods:
+      - def:
+          name: init
+          access: public
+          args: [[url, string]]
+          body:
+            - call: [<.link.init, url]
+            - set: [<.style.bare, 1]
+            - call: [<.serial.init]
+
+      # up: cosmosd erreichbar?  Sonst 502 senden und 0 liefern.
+      - def:
+          name: up
+          args: [[xch, ref<ApiExchange>]]
+          return: i32
+          body:
+            - if: { condition: { eq: [{ call: [<.link.ensure] }, 1] }, then: [{ return: 1 }] }
+            - call: [xch.error, 502, "upstream", "cosmosd nicht erreichbar"]
+            - return: 0
+
+      # authed: Token der Anfrage, wenn cosmosd es kennt; sonst 401 und "".
+      - def:
+          name: authed
+          args: [[xch, ref<ApiExchange>]]
+          return: { type: string, lifetime: producer }
+          body:
+            - if: { condition: { eq: [{ call: [<.up, xch] }, 0] }, then: [{ return: "" }] }
+            - decl: [tok, string, { call: [xch.bearer] }]
+            - if:
+                condition: { eq: [tok.len, 0] }
+                then: [{ call: [xch.error, 401, "unauthenticated", "Authorization: Bearer <token> fehlt"] }, { return: "" }]
+            - decl: [req, SetUserLevelReq]
+            - set: [req.token, tok]
+            - decl: [out, ptr<UserLevelResult>, { new: UserLevelResult }]
+            - decl: [got, i32, { call: [<.link.sess.send_and_await, 0, "my_clearance", req, out, <.link.timeout_ms] }]
+            - if: { condition: { neq: [got, 1] }, then: [{ call: [xch.error, 504, "timeout", "cosmosd antwortet nicht"] }, { return: "" }] }
+            - if:
+                condition: { neq: [out.success, 1] }
+                then: [{ call: [xch.error, 401, "unauthenticated", "Token ungueltig oder abgelaufen"] }, { return: "" }]
+            - return: tok
+
+      # allowed: darf das Token `method`?  Sonst 403 und 0.  Nur fuer RPCs,
+      # die eine Ablehnung nicht als Fehler melden (get_cluster).
+      - def:
+          name: allowed
+          args: [[xch, ref<ApiExchange>], [tok, string], [method, string]]
+          return: i32
+          body:
+            - decl: [req, ApiMayReq]
+            - set: [req.token, tok]
+            - set: [req.method, method]
+            - decl: [out, ptr<ApiMayResp>, { new: ApiMayResp }]
+            - decl: [got, i32, { call: [<.link.sess.send_and_await, 0, "may_call", req, out, <.link.timeout_ms] }]
+            - if: { condition: { neq: [got, 1] }, then: [{ call: [xch.error, 504, "timeout", "cosmosd antwortet nicht"] }, { return: 0 }] }
+            - if: { condition: { eq: [out.allowed, 1] }, then: [{ return: 1 }] }
+            - call: [xch.error, 403, "forbidden", out.message]
+            - return: 0
+
+      - def:
+          name: no_answer
+          args: [[xch, ref<ApiExchange>], [got, i32]]
+          return: i32
+          body:
+            - if: { condition: { eq: [got, 1] }, then: [{ return: 0 }] }
+            - call: [xch.error, 504, "timeout", "cosmosd antwortet nicht"]
+            - return: 1
+
+      # ---------------------------------------------------------------- Sitzung
+
+      - def:
+          name: health
+          access: public
+          args: [[xch, ref<ApiExchange>]]
+          body:
+            - decl: [linked, i32, { call: [<.link.ensure] }]
+            - call: [xch.json, 200, "{\"status\":\"ok\",\"cosmosd\":${linked}}"]
+
+      - def:
+          name: login
+          access: public
+          args: [[xch, ref<ApiExchange>]]
+          body:
+            - if: { condition: { eq: [{ call: [<.up, xch] }, 0] }, then: [{ return: [] }] }
+            - decl: [req, LoginReq, { call: [sys.deserialize, { call: [xch.text] }, "LoginReq"] }]
+            - decl: [out, ptr<AuthResult>, { new: AuthResult }]
+            - decl: [got, i32, { call: [<.link.sess.send_and_await, 0, "submit_login", req, out, <.link.timeout_ms] }]
+            - if: { condition: { eq: [{ call: [<.no_answer, xch, got] }, 1] }, then: [{ return: [] }] }
+            - if: { condition: { neq: [out.success, 1] }, then: [{ call: [xch.error, 401, "login_failed", out.message] }, { return: [] }] }
+            - call: [xch.json, 200, { call: [sys.serialize, out, <.style] }]
+
+      # register: Konto anlegen (wie die Anmeldemaske).  Die Freigabe vergibt
+      # danach ein Admin — ein neues Konto darf nichts (doc/spec/65).
+      - def:
+          name: register
+          access: public
+          args: [[xch, ref<ApiExchange>]]
+          body:
+            - if: { condition: { eq: [{ call: [<.up, xch] }, 0] }, then: [{ return: [] }] }
+            - decl: [req, RegisterReq, { call: [sys.deserialize, { call: [xch.text] }, "RegisterReq"] }]
+            - decl: [out, ptr<AuthResult>, { new: AuthResult }]
+            - decl: [got, i32, { call: [<.link.sess.send_and_await, 0, "submit_register", req, out, <.link.timeout_ms] }]
+            - if: { condition: { eq: [{ call: [<.no_answer, xch, got] }, 1] }, then: [{ return: [] }] }
+            - if: { condition: { neq: [out.success, 1] }, then: [{ call: [xch.error, 400, "register_failed", out.message] }, { return: [] }] }
+            - call: [xch.json, 201, { call: [sys.serialize, out, <.style] }]
+
+      - def:
+          name: logout
+          access: public
+          args: [[xch, ref<ApiExchange>]]
+          body:
+            - decl: [tok, string, { call: [<.authed, xch] }]
+            - if: { condition: { eq: [tok.len, 0] }, then: [{ return: [] }] }
+            - decl: [req, TokenReq]
+            - set: [req.token, tok]
+            - decl: [out, ptr<AuthResult>, { new: AuthResult }]
+            - decl: [got, i32, { call: [<.link.sess.send_and_await, 0, "logout", req, out, <.link.timeout_ms] }]
+            - if: { condition: { eq: [{ call: [<.no_answer, xch, got] }, 1] }, then: [{ return: [] }] }
+            - call: [xch.json, { call: [xch.status_for, out.success, out.message] }, "{\"success\":${out.success}}"]
+
+      - def:
+          name: whoami
+          access: public
+          args: [[xch, ref<ApiExchange>]]
+          body:
+            - decl: [tok, string, { call: [<.authed, xch] }]
+            - if: { condition: { eq: [tok.len, 0] }, then: [{ return: [] }] }
+            - decl: [req, SetUserLevelReq]
+            - set: [req.token, tok]
+            - decl: [out, ptr<UserLevelResult>, { new: UserLevelResult }]
+            - decl: [got, i32, { call: [<.link.sess.send_and_await, 0, "my_clearance", req, out, <.link.timeout_ms] }]
+            - if: { condition: { eq: [{ call: [<.no_answer, xch, got] }, 1] }, then: [{ return: [] }] }
+            - decl: [who, ApiWhoami]
+            - set: [who.success, out.success]
+            - set: [who.level, out.my_level]
+            - set: [who.kind, "session"]
+            - if: { condition: { eq: [{ call: [tok.starts_with, "cosmos_"] }, 1] }, then: [{ set: [who.kind, "api_token"] }] }
+            - call: [xch.json, 200, { call: [sys.serialize, who, <.style] }]
+
+      # ---------------------------------------------------------------- Lesen
+
+      - def:
+          name: cluster
+          access: public
+          static_off: ["str_cmp"]
+          args: [[xch, ref<ApiExchange>], [part, string]]
+          body:
+            - decl: [tok, string, { call: [<.authed, xch] }]
+            - if: { condition: { eq: [tok.len, 0] }, then: [{ return: [] }] }
+            - if: { condition: { eq: [{ call: [<.allowed, xch, tok, "get_cluster"] }, 0] }, then: [{ return: [] }] }
+            - decl: [req, ClusterReq]
+            - set: [req.token, tok]
+            - decl: [view, ptr<ClusterView>, { new: ClusterView }]
+            - decl: [got, i32, { call: [<.link.sess.send_and_await, 0, "get_cluster", req, view, <.link.timeout_ms] }]
+            - if: { condition: { eq: [{ call: [<.no_answer, xch, got] }, 1] }, then: [{ return: [] }] }
+            - if:
+                condition: { eq: [part, "jobs"] }
+                then:
+                  - decl: [jobs, ApiJobList]
+                  - set: [jobs.jobs, view.job_defs]
+                  - set: [jobs.params, view.job_params]
+                  - call: [xch.json, 200, { call: [sys.serialize, jobs, <.style] }]
+                  - return: []
+            - if:
+                condition: { eq: [part, "runs"] }
+                then:
+                  - decl: [runs, ApiRunList]
+                  - set: [runs.runs, view.pipelines]
+                  - set: [runs.layers, view.layers]
+                  - call: [xch.json, 200, { call: [sys.serialize, runs, <.style] }]
+                  - return: []
+            - call: [xch.json, 200, { call: [sys.serialize, view, <.style] }]
+
+      # ---------------------------------------------------------------- Laeufe
+
+      # run_pipeline: Koerper = Pipeline-Quelltext (wie im Editor).
+      - def:
+          name: submit
+          access: public
+          args: [[xch, ref<ApiExchange>]]
+          body:
+            - decl: [tok, string, { call: [<.authed, xch] }]
+            - if: { condition: { eq: [tok.len, 0] }, then: [{ return: [] }] }
+            - decl: [req, PipelineSubmitReq]
+            - set: [req.token, tok]
+            - set: [req.source, { call: [xch.text] }]
+            - decl: [out, ptr<PipelineSubmitResp>, { new: PipelineSubmitResp }]
+            - decl: [got, i32, { call: [<.link.sess.send_and_await, 0, "run_pipeline", req, out, <.link.timeout_ms] }]
+            - if: { condition: { eq: [{ call: [<.no_answer, xch, got] }, 1] }, then: [{ return: [] }] }
+            - decl: [code, i32, { call: [xch.status_for, out.accepted, out.message] }]
+            - if: { condition: { eq: [code, 200] }, then: [{ set: [code, 201] }] }
+            - call: [xch.json, code, { call: [sys.serialize, out, <.style] }]
+
+      # run_ctrl: pause_run / resume_run / step_run / rewind_run.
+      # Koerper (optional): {"stage_id": "...", "steps": n}.
+      - def:
+          name: run_ctrl
+          access: public
+          args: [[xch, ref<ApiExchange>], [method, string]]
+          body:
+            - decl: [tok, string, { call: [<.authed, xch] }]
+            - if: { condition: { eq: [tok.len, 0] }, then: [{ return: [] }] }
+            - decl: [raw, string, { call: [xch.text] }]
+            - decl: [req, RunCtrlReq]
+            - if: { condition: { gt: [raw.len, 1] }, then: [{ set: [req, { call: [sys.deserialize, raw, "RunCtrlReq"] }] }] }
+            - set: [req.token, tok]
+            - set: [req.run_id, { call: [xch.param, "id"] }]
+            - decl: [out, ptr<RunCtrlResp>, { new: RunCtrlResp }]
+            - decl: [got, i32, { call: [<.link.sess.send_and_await, 0, method, req, out, <.link.timeout_ms] }]
+            - if: { condition: { eq: [{ call: [<.no_answer, xch, got] }, 1] }, then: [{ return: [] }] }
+            - call: [xch.json, { call: [xch.status_for, out.accepted, out.message] }, { call: [sys.serialize, out, <.style] }]
+
+      # ---------------------------------------------------------------- Jobs
+
+      # save_job: PUT /jobs/:id, Koerper wie SaveJobReq (ohne token/job_id).
+      - def:
+          name: save_job
+          access: public
+          args: [[xch, ref<ApiExchange>]]
+          body:
+            - decl: [tok, string, { call: [<.authed, xch] }]
+            - if: { condition: { eq: [tok.len, 0] }, then: [{ return: [] }] }
+            - decl: [req, SaveJobReq, { call: [sys.deserialize, { call: [xch.text] }, "SaveJobReq"] }]
+            - set: [req.token, tok]
+            - set: [req.job_id, { call: [xch.param, "id"] }]
+            - decl: [out, ptr<JobAck>, { new: JobAck }]
+            - decl: [got, i32, { call: [<.link.sess.send_and_await, 0, "save_job", req, out, <.link.timeout_ms] }]
+            - if: { condition: { eq: [{ call: [<.no_answer, xch, got] }, 1] }, then: [{ return: [] }] }
+            - call: [xch.json, { call: [xch.status_for, out.accepted, out.message] }, { call: [sys.serialize, out, <.style] }]
+
+      - def:
+          name: run_job
+          access: public
+          args: [[xch, ref<ApiExchange>]]
+          body:
+            - decl: [tok, string, { call: [<.authed, xch] }]
+            - if: { condition: { eq: [tok.len, 0] }, then: [{ return: [] }] }
+            - decl: [req, RunJobReq]
+            - set: [req.token, tok]
+            - set: [req.job_id, { call: [xch.param, "id"] }]
+            - decl: [out, ptr<JobAck>, { new: JobAck }]
+            - decl: [got, i32, { call: [<.link.sess.send_and_await, 0, "run_job", req, out, <.link.timeout_ms] }]
+            - if: { condition: { eq: [{ call: [<.no_answer, xch, got] }, 1] }, then: [{ return: [] }] }
+            - decl: [code, i32, { call: [xch.status_for, out.accepted, out.message] }]
+            - if: { condition: { eq: [code, 200] }, then: [{ set: [code, 201] }] }
+            - call: [xch.json, code, { call: [sys.serialize, out, <.style] }]
+
+      # ---------------------------------------------------------------- Konsole
+
+      # console: Koerper = Skript.  Der Lauf ist asynchron (F108-18); das
+      # Gateway fragt nach, bis er fertig ist oder `?wait=<s>` (Standard 60)
+      # vergangen ist, und liefert dann den letzten Stand (finished=0 = laeuft noch).
+      - def:
+          name: console
+          access: public
+          args: [[xch, ref<ApiExchange>]]
+          body:
+            - decl: [tok, string, { call: [<.authed, xch] }]
+            - if: { condition: { eq: [tok.len, 0] }, then: [{ return: [] }] }
+            - decl: [wait_s, i32, 60]
+            - decl: [wait_txt, string, { call: [xch.query, "wait"] }]
+            - if: { condition: { gt: [wait_txt.len, 0] }, then: [{ set: [wait_s, { call: [wait_txt.to_int] }] }] }
+            - decl: [req, ConsoleExecReq]
+            - set: [req.token, tok]
+            - set: [req.source, { call: [xch.text] }]
+            - decl: [out, ptr<ConsoleExecResult>, { new: ConsoleExecResult }]
+            - decl: [got, i32, { call: [<.link.sess.send_and_await, 0, "console_exec", req, out, <.link.timeout_ms] }]
+            - if: { condition: { eq: [{ call: [<.no_answer, xch, got] }, 1] }, then: [{ return: [] }] }
+            - decl: [deadline, i64, { +: [{ call: [time.now] }, { '*': [wait_s, 1000] }] }]
+            - while:
+                condition: { '&&': [{ '&&': [{ eq: [out.success, 1] }, { eq: [out.finished, 0] }] }, { '&&': [{ gt: [out.run_id, 0] }, { lt: [{ call: [time.now] }, deadline] }] }] }
+                body:
+                  - call: [time.sleep_ms, 200]
+                  - decl: [poll, ConsoleExecReq]
+                  - set: [poll.token, tok]
+                  - set: [poll.poll_id, out.run_id]
+                  - set: [got, { call: [<.link.sess.send_and_await, 0, "console_exec", poll, out, <.link.timeout_ms] }]
+                  - if: { condition: { eq: [{ call: [<.no_answer, xch, got] }, 1] }, then: [{ return: [] }] }
+            - call: [xch.json, { call: [xch.status_for, out.success, out.message] }, { call: [sys.serialize, out, <.style] }]
+
+      # ---------------------------------------------------------------- Config as Code
+
+      # casc: config_plan / config_apply / config_read.
+      #   Koerper = YAML-Text der CasC-Datei; oder `?path=<datei>` (auf dem
+      #   cosmosd-Rechner, relativ zu COSMOS_CASC_ROOT).
+      - def:
+          name: casc
+          access: public
+          static_off: ["str_cmp"]
+          args: [[xch, ref<ApiExchange>], [method, string]]
+          body:
+            - decl: [tok, string, { call: [<.authed, xch] }]
+            - if: { condition: { eq: [tok.len, 0] }, then: [{ return: [] }] }
+            - decl: [req, CascReq]
+            - set: [req.token, tok]
+            - set: [req.path, { call: [xch.query, "path"] }]
+            - set: [req.text, { call: [xch.text] }]
+            - if:
+                condition: { eq: [method, "config_read"] }
+                then:
+                  - decl: [cur, ptr<CascReadResp>, { new: CascReadResp }]
+                  - decl: [got_r, i32, { call: [<.link.sess.send_and_await, 0, method, req, cur, <.link.timeout_ms] }]
+                  - if: { condition: { eq: [{ call: [<.no_answer, xch, got_r] }, 1] }, then: [{ return: [] }] }
+                  - call: [xch.json, { call: [xch.status_for, cur.success, cur.message] }, { call: [sys.serialize, cur, <.style] }]
+                  - return: []
+            - decl: [plan, ptr<CascPlan>, { new: CascPlan }]
+            - decl: [got, i32, { call: [<.link.sess.send_and_await, 0, method, req, plan, 60000] }]
+            - if: { condition: { eq: [{ call: [<.no_answer, xch, got] }, 1] }, then: [{ return: [] }] }
+            - decl: [code, i32, 200]
+            - if:
+                condition: { neq: [plan.success, 1] }
+                then:
+                  - set: [code, 422]
+                  - decl: [first, string, ""]
+                  - if: { condition: { gt: [plan.errors.len, 0] }, then: [{ set: [first, { call: [plan.errors.get, 0] }] }] }
+                  - if: { condition: { eq: [{ call: [xch.status_for, 0, first] }, 403] }, then: [{ set: [code, 403] }] }
+            - call: [xch.json, code, { call: [sys.serialize, plan, <.style] }]
+
+      # ---------------------------------------------------------------- API-Tokens
+
+      - def:
+          name: token_create
+          access: public
+          args: [[xch, ref<ApiExchange>]]
+          body:
+            - decl: [tok, string, { call: [<.authed, xch] }]
+            - if: { condition: { eq: [tok.len, 0] }, then: [{ return: [] }] }
+            - decl: [raw, string, { call: [xch.text] }]
+            - decl: [req, ApiTokenReq]
+            - if: { condition: { gt: [raw.len, 1] }, then: [{ set: [req, { call: [sys.deserialize, raw, "ApiTokenReq"] }] }] }
+            - set: [req.token, tok]
+            - decl: [out, ptr<ApiTokenMade>, { new: ApiTokenMade }]
+            - decl: [got, i32, { call: [<.link.sess.send_and_await, 0, "create_api_token", req, out, <.link.timeout_ms] }]
+            - if: { condition: { eq: [{ call: [<.no_answer, xch, got] }, 1] }, then: [{ return: [] }] }
+            - decl: [code, i32, { call: [xch.status_for, out.success, out.message] }]
+            - if: { condition: { eq: [code, 200] }, then: [{ set: [code, 201] }] }
+            - call: [xch.json, code, { call: [sys.serialize, out, <.style] }]
+
+      - def:
+          name: token_list
+          access: public
+          args: [[xch, ref<ApiExchange>]]
+          body:
+            - decl: [tok, string, { call: [<.authed, xch] }]
+            - if: { condition: { eq: [tok.len, 0] }, then: [{ return: [] }] }
+            - decl: [req, ApiTokenReq]
+            - set: [req.token, tok]
+            - decl: [out, ptr<ApiTokenList>, { new: ApiTokenList }]
+            - decl: [got, i32, { call: [<.link.sess.send_and_await, 0, "list_api_tokens", req, out, <.link.timeout_ms] }]
+            - if: { condition: { eq: [{ call: [<.no_answer, xch, got] }, 1] }, then: [{ return: [] }] }
+            - call: [xch.json, { call: [xch.status_for, out.success, out.message] }, { call: [sys.serialize, out, <.style] }]
+
+      - def:
+          name: token_revoke
+          access: public
+          args: [[xch, ref<ApiExchange>]]
+          body:
+            - decl: [tok, string, { call: [<.authed, xch] }]
+            - if: { condition: { eq: [tok.len, 0] }, then: [{ return: [] }] }
+            - decl: [req, ApiTokenReq]
+            - set: [req.token, tok]
+            - set: [req.token_id, { call: [xch.param, "id"] }]
+            - decl: [out, ptr<ApiTokenMade>, { new: ApiTokenMade }]
+            - decl: [got, i32, { call: [<.link.sess.send_and_await, 0, "revoke_api_token", req, out, <.link.timeout_ms] }]
+            - if: { condition: { eq: [{ call: [<.no_answer, xch, got] }, 1] }, then: [{ return: [] }] }
+            - decl: [code, i32, { call: [xch.status_for, out.success, out.message] }]
+            - if: { condition: { ge: [{ call: [out.message.index_of, "unbekannt"] }, 0] }, then: [{ set: [code, 404] }] }
+            - call: [xch.json, code, { call: [sys.serialize, out, <.style] }]
+
+      # ---------------------------------------------------------------- SAML
+
+      # sso_login: GET /sso/saml/login?relay=/pfad → 302 zum IdP.
+      - def:
+          name: sso_login
+          access: public
+          args: [[xch, ref<ApiExchange>]]
+          body:
+            - if: { condition: { eq: [{ call: [<.up, xch] }, 0] }, then: [{ return: [] }] }
+            - decl: [req, SamlBeginReq]
+            - set: [req.relay_state, { call: [xch.query, "relay"] }]
+            - decl: [out, ptr<SamlBegin>, { new: SamlBegin }]
+            - decl: [got, i32, { call: [<.link.sess.send_and_await, 0, "saml_begin", req, out, <.link.timeout_ms] }]
+            - if: { condition: { eq: [{ call: [<.no_answer, xch, got] }, 1] }, then: [{ return: [] }] }
+            - if: { condition: { neq: [out.success, 1] }, then: [{ call: [xch.error, 404, "saml_off", out.message] }, { return: [] }] }
+            - call: [xch.redirect, out.url]
+
+      # sso_acs: POST /sso/saml/acs (SAMLResponse, RelayState).  Erfolg: mit
+      # einem RelayState, der ein PFAD dieses Dienstes ist ("/…", nicht "//…"),
+      # 302 dorthin mit `#token=…` — das Fragment geht an keinen Server.  Ohne
+      # RelayState die Sitzung als JSON.  Fremde Ziele werden nie angesprungen
+      # (sonst waere der ACS ein offener Umleiter fuer frische Tokens).
+      - def:
+          name: sso_acs
+          access: public
+          args: [[xch, ref<ApiExchange>]]
+          body:
+            - if: { condition: { eq: [{ call: [<.up, xch] }, 0] }, then: [{ return: [] }] }
+            - decl: [req, SamlFinishReq]
+            - set: [req.saml_response, { call: [xch.form, "SAMLResponse"] }]
+            - decl: [relay, string, { call: [xch.form, "RelayState"] }]
+            - if: { condition: { eq: [req.saml_response.len, 0] }, then: [{ call: [xch.error, 400, "bad_request", "SAMLResponse fehlt"] }, { return: [] }] }
+            - decl: [out, ptr<AuthResult>, { new: AuthResult }]
+            - decl: [got, i32, { call: [<.link.sess.send_and_await, 0, "saml_finish", req, out, <.link.timeout_ms] }]
+            - if: { condition: { eq: [{ call: [<.no_answer, xch, got] }, 1] }, then: [{ return: [] }] }
+            - if: { condition: { neq: [out.success, 1] }, then: [{ call: [xch.error, 401, "saml_rejected", out.message] }, { return: [] }] }
+            - decl: [local, i32, 0]
+            - if: { condition: { '&&': [{ eq: [{ call: [relay.starts_with, "/"] }, 1] }, { eq: [{ call: [relay.starts_with, "//"] }, 0] }] }, then: [{ set: [local, 1] }] }
+            - if: { condition: { ge: [{ call: [relay.index_of, "\\"] }, 0] }, then: [{ set: [local, 0] }] }
+            - if: { condition: { eq: [local, 1] }, then: [{ call: [xch.redirect, "${relay}#token=${out.token}"] }, { return: [] }] }
+            - call: [xch.json, 200, { call: [sys.serialize, out, <.style] }]
+
+      # ---------------------------------------------------------------- museum
+
+      # museum_hook: Webhook von museum (museum doc/ecosystem.md §4).  KEIN
+      # Bearer — die Echtheit belegt die HMAC-Signatur, und die prueft cosmosd.
+      - def:
+          name: museum_hook
+          access: public
+          args: [[xch, ref<ApiExchange>]]
+          body:
+            - if: { condition: { eq: [{ call: [<.up, xch] }, 0] }, then: [{ return: [] }] }
+            - decl: [req, MuseumEventReq]
+            - set: [req.event, { call: [xch.header, "x-museum-event"] }]
+            - set: [req.delivery, { call: [xch.header, "x-museum-delivery"] }]
+            - set: [req.signature, { call: [xch.header, "x-museum-signature-256"] }]
+            - set: [req.body, { call: [xch.text] }]
+            - decl: [out, ptr<MuseumEventResp>, { new: MuseumEventResp }]
+            - decl: [got, i32, { call: [<.link.sess.send_and_await, 0, "museum_event", req, out, <.link.timeout_ms] }]
+            - if: { condition: { eq: [{ call: [<.no_answer, xch, got] }, 1] }, then: [{ return: [] }] }
+            - decl: [code, i32, 202]
+            - if:
+                condition: { neq: [out.success, 1] }
+                then:
+                  - set: [code, 400]
+                  - if: { condition: { ge: [{ call: [out.message.index_of, "Signatur"] }, 0] }, then: [{ set: [code, 401] }] }
+            - call: [xch.json, code, { call: [sys.serialize, out, <.style] }]
+
+      # campaigns: GET /campaigns — Rebuild-Kampagnen (§111.6).
+      - def:
+          name: campaigns
+          access: public
+          args: [[xch, ref<ApiExchange>]]
+          body:
+            - decl: [tok, string, { call: [<.authed, xch] }]
+            - if: { condition: { eq: [tok.len, 0] }, then: [{ return: [] }] }
+            - decl: [req, TokenReq]
+            - set: [req.token, tok]
+            - decl: [out, ptr<CampaignList>, { new: CampaignList }]
+            - decl: [got, i32, { call: [<.link.sess.send_and_await, 0, "list_campaigns", req, out, <.link.timeout_ms] }]
+            - if: { condition: { eq: [{ call: [<.no_answer, xch, got] }, 1] }, then: [{ return: [] }] }
+            - call: [xch.json, { call: [xch.status_for, out.success, out.message] }, { call: [sys.serialize, out, <.style] }]

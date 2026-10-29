@@ -1,0 +1,58 @@
+# Ausgabe nachziehen: EINE Stelle fuer das, was dabei schiefgeht.
+#
+# Sowohl der AP1-Einzelbefehl (doc/spec/90) als auch der Pipeline-Schritt
+# (doc/spec/103 §103.4e) muessen dieselbe Arbeit tun: aus einer Datei ab einem
+# Offset lesen und als Chunk schicken.  Zwei Kopien hiessen zwei Orte, an denen
+# die folgenden zwei Lehren verloren gehen koennen.
+#
+#   1. DECKEL je Chunk (64 KiB).  Ein unbegrenzter Schwall (gemessen: 6,9 MB in
+#      einem Rutsch) fuehrte reproduzierbar dazu, dass der Server die noch
+#      lebende Agenten-Verbindung als getrennt meldete und die restliche
+#      Ausgabe verwarf — die Mirror-Queue ist pro Sender begrenzt (4096 Events /
+#      64 MiB, spec/44_5), und der relayende Konsument ist langsamer als der
+#      Produzent.
+#   2. `sess.update()` NACH jedem Send.  Ein Schwall von Sends ohne update()
+#      laesst die Verbindung serverseitig als getrennt gelten (2026-10-09).
+
+- import: "sources/models/agent_proto.aiml"   # OutStream
+- import: "sources/models/run_output.aiml"
+
+- class:
+    name: OutPump
+    methods:
+      # tail: nur die neuen Bytes ab `off` lesen und als Chunk senden.
+      # Rueckgabe: der neue Offset (unveraendert, wenn es nichts Neues gab).
+      - def:
+          name: tail
+          access: public
+          args: [[sess, mirror_session], [run_ref, string], [stream, i32], [spath, string], [off, i64]]
+          return: i64
+          body:
+            - decl: [total, i64, { call: [io.file_size, spath] }]
+            - if: { condition: { le: [total, off] }, then: [{ return: off }] }
+            - decl: [want, i64, { -: [total, off] }]
+            - if: { condition: { gt: [want, 65536] }, then: [{ set: [want, 65536] }] }
+            - decl: [src, file_handle, { call: [io.open, spath, "r"] }]
+            - if: { condition: { eq: [src, null] }, then: [{ return: off }] }
+            - call: [io.seek, src, off]
+            - decl: [text, string, { call: [io.read, src, want] }]
+            - call: [io.close, src]
+            - if: { condition: { eq: [text.len, 0] }, then: [{ return: off }] }
+            - call: [<.send_text, sess, run_ref, stream, text, off]
+            - return: { +: [off, text.len] }
+
+      # send_text: einen fertigen Text als Chunk schicken (auch fuer Hinweise
+      # wie „Ausgabe abgeschnitten", die nicht aus einer Datei kommen).
+      - def:
+          name: send_text
+          access: public
+          args: [[sess, mirror_session], [run_ref, string], [stream, i32], [text, string], [off, i64]]
+          body:
+            - decl: [msg, OutChunk]
+            - set: [msg.run_ref, run_ref]
+            - set: [msg.stream, stream]
+            - set: [msg.chunk, text]
+            - set: [msg.offset, off]
+            - call: [sess.send_rpc, 0, "command_output", 0, msg]
+            # Siehe Lehre 2 im Dateikopf.
+            - call: [sess.update]

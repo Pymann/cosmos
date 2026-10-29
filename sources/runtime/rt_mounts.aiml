@@ -1,0 +1,165 @@
+# rt_mounts — aus dem Bundle wird ein Einrichtungsplan (doc/spec/110 M2).
+#
+# Die OCI-Spec gibt Mount-Optionen als WÖRTER an ("nosuid", "ro", "mode=1777").
+# Der Kernel will Bits und eine Datenzeichenkette.  Diese Übersetzung ist
+# Politik, kein Systemaufruf — sie gehört hierher und ist ohne Rechte prüfbar.
+#
+# Die Trennung zahlt sich sofort aus: `test_rt` prüft die Übersetzung auf jedem
+# Rechner, auch ohne AppArmor-Profil und ohne User-Namespace.
+
+- import: "sources/runtime/rt_bundle.aiml"
+
+- extern: "C"
+  defs:
+    - def: { name: rt_ms_bit,       args: [[name, string]], return: i64 }
+    - def: { name: rt_plan_reset,   args: [], return: void }
+    - def: { name: rt_set_rootfs,   args: [[path, string], [readonly, i32]], return: i32 }
+    - def: { name: rt_plan_mount,   args: [[src, string], [dst, string], [type, string], [flags, i64], [data, string]], return: i32 }
+    - def: { name: rt_plan_mask,    args: [[path, string]], return: i32 }
+    - def: { name: rt_plan_readonly, args: [[path, string]], return: i32 }
+    - def: { name: rt_plan_count,   args: [], return: i32 }
+
+- class:
+    name: RtMounts
+    methods:
+      # ms_flags: die Bits einer Optionsliste.  Ein Wort mit `=` ist KEIN Bit,
+      # sondern Dateisystem-Daten (`mode=1777`) — es wird hier übergangen und
+      # von `ms_data` eingesammelt.
+      - def:
+          name: ms_flags
+          access: public
+          static_off: ["str_cmp"]
+          args: [[options, list<string>]]
+          return: i64
+          body:
+            - decl: [bits, i64, 0]
+            - decl: [oix, i32, 0]
+            - while:
+                condition: { lt: [oix, options.len] }
+                body:
+                  - decl: [word, string, { at: [options, oix] }]
+                  - set: [oix, { +: [oix, 1] }]
+                  # Ein Wort mit `=` traegt Daten, kein Bit (aiml kennt kein
+                  # `continue`, also steht die Bedingung positiv).
+                  - if:
+                      condition: { lt: [{ call: [word.index_of, "="] }, 0] }
+                      then: [{ set: [bits, { bor: [bits, { call: [rt_ms_bit, word] }] }] }]
+            - return: bits
+
+      # ms_data: alles mit `=`, durch Komma getrennt — so will es `mount(2)`.
+      - def:
+          name: ms_data
+          access: public
+          static_off: ["str_cmp"]
+          args: [[options, list<string>]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [out, string, ""]
+            - decl: [oix, i32, 0]
+            - while:
+                condition: { lt: [oix, options.len] }
+                body:
+                  - decl: [word, string, { at: [options, oix] }]
+                  - set: [oix, { +: [oix, 1] }]
+                  - if:
+                      condition: { ge: [{ call: [word.index_of, "="] }, 0] }
+                      then:
+                        - if: { condition: { eq: [out.len, 0] }, then: [{ set: [out, word] }], else: [{ set: [out, "${out},${word}"] }] }
+            - return: out
+
+      # build: den ganzen Plan aufstellen.  Reihenfolge ist Absicht und steht
+      # auch in der C-Schicht so: erst die Mounts (sie zeigen noch auf die alte
+      # Wurzel), dann der Wurzelwechsel, dann Maske und Schreibschutz INNEN.
+      - def:
+          name: build
+          access: public
+          static_off: ["str_cmp"]
+          args: [[conf, ref<RtConfig>], [rootfs_at, string]]
+          return: i32
+          body:
+            - call: [rt_plan_reset]
+            - decl: [ro_root, i32, 0]
+            - if: { condition: { eq: [conf.root.readonly, true] }, then: [{ set: [ro_root, 1] }] }
+            - call: [rt_set_rootfs, rootfs_at, ro_root]
+
+            - decl: [mix, i32, 0]
+            - while:
+                condition: { lt: [mix, conf.mounts.len] }
+                body:
+                  - decl: [one, RtMount, { at: [conf.mounts, mix] }]
+                  - set: [mix, { +: [mix, 1] }]
+                  # Das Ziel liegt INNERHALB des neuen Wurzelverzeichnisses; vor
+                  # dem Wechsel ist es über den rootfs-Pfad erreichbar.
+                  - decl: [dst, string, "${rootfs_at}${one.destination}"]
+                  - call: [rt_plan_mount, one.source, dst, one.type,
+                           { call: [<.ms_flags, one.options] }, { call: [<.ms_data, one.options] }]
+
+            - decl: [kix, i32, 0]
+            - while:
+                condition: { lt: [kix, conf.linux.maskedPaths.len] }
+                body:
+                  - call: [rt_plan_mask, { at: [conf.linux.maskedPaths, kix] }]
+                  - set: [kix, { +: [kix, 1] }]
+
+            - decl: [rix, i32, 0]
+            - while:
+                condition: { lt: [rix, conf.linux.readonlyPaths.len] }
+                body:
+                  - call: [rt_plan_readonly, { at: [conf.linux.readonlyPaths, rix] }]
+                  - set: [rix, { +: [rix, 1] }]
+
+            - return: { call: [rt_plan_count] }
+
+      # ── Durchgriffe für Proben ──────────────────────────────────────────
+      # Die `extern`-Kante gilt nur in dieser Datei (aiml spec/21 §2.1) — das
+      # ist gewollt, also reicht sie hier gezielt weiter statt überall.
+      - def:
+          name: reset
+          access: public
+          body: [{ call: [rt_plan_reset] }]
+
+      - def:
+          name: set_root
+          access: public
+          static_off: ["str_cmp"]
+          args: [[path, string], [readonly, i32]]
+          body: [{ call: [rt_set_rootfs, path, readonly] }]
+
+      # bind: dasselbe Verzeichnis an einer zweiten Stelle sichtbar machen.
+      # `rbind` nimmt die Untereinhängungen mit — ohne das fehlt z.B. /usr/share.
+      - def:
+          name: bind
+          access: public
+          static_off: ["str_cmp"]
+          args: [[src, string], [dst, string]]
+          body:
+            - decl: [opts, list<string>]
+            - call: [opts.push, "rbind"]
+            - call: [rt_plan_mount, src, dst, "", { call: [<.ms_flags, opts] }, ""]
+
+      - def:
+          name: filesystem
+          access: public
+          static_off: ["str_cmp"]
+          args: [[src, string], [dst, string], [kind, string], [data, string]]
+          body: [{ call: [rt_plan_mount, src, dst, kind, 0, data] }]
+
+      - def:
+          name: mask
+          access: public
+          static_off: ["str_cmp"]
+          args: [[path, string]]
+          body: [{ call: [rt_plan_mask, path] }]
+
+      - def:
+          name: readonly
+          access: public
+          static_off: ["str_cmp"]
+          args: [[path, string]]
+          body: [{ call: [rt_plan_readonly, path] }]
+
+      - def:
+          name: step_count
+          access: public
+          return: i32
+          body: [{ return: { call: [rt_plan_count] } }]

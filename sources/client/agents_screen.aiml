@@ -1,0 +1,560 @@
+# AgentsScreen (AP1, doc/spec/90) — Live-Übersicht aller verbundenen Agenten und
+# Remote-Kommando (Kommando + cwd) auf einem gewählten Agenten.
+#
+# Live ohne Poll: der Server pusht `agents_update` an authentifizierte Abonnenten
+# und `command_output`/`command_result` an genau den Anfrager; gerendert wird, wenn
+# sich die jeweilige Sequenz ändert.
+#
+# §AP1.5a: die Ausgabe-Box zeigt das BEGRENZTE Tail-Fenster (agents.run_tail).  "Anfang"
+# holt per read_run_output ein Fenster vom Dateianfang — der Client lädt also nur,
+# was angefragt wurde, und hält nie den ganzen Lauf.
+
+- import: "sources/client/net/session_state.aiml"
+- import: "sources/client/prefabs.aiml"
+- import: "sources/client/net/agents_state.aiml"
+- import: "sources/client/net/tokens_state.aiml"
+- import: "sources/client/net/provision_state.aiml"
+
+- import: "sources/shared/presence.aiml"
+
+- class:
+    name: AgentsScreen
+    members:
+      # Kollaborateur; von der Gruppe ueber `sees: [session]` verdrahtet (spec/58 §5.1).
+      - [session, ref<SessionState>]
+      - [provisioning, ref<ProvisionState>]
+      - [initialized,  i32]
+      - [pres,         Presence]   # doc/spec/104: „vor 3 s" statt einer Zeitmarke
+      - [scene,        prefab_instance]
+      - [is_visible,   i32]
+      - [agents_seq,   i32]
+      # User 2026-10-15: hier werden keine Laeufe mehr gestartet — statt
+      # Eingabefeldern eine Liste mit Auswahl.  `row_ids` gibt der Zeilen-ANZAHL
+      # ihre Wahrheit, der Inhalt kommt aus der Agentenliste.
+      - [row_ids,      list<string>]
+      - [sel_agent,    string]
+      - [sel_host,     string]   # Rechner des gewaehlten Agenten (fuer „Erneuern")
+      - [tok_overlay,  prefab_instance]
+      - [tok_on,       i32]
+      - [tok_seq,      i32]
+      - [prov_overlay, prefab_instance]
+      - [prov_on,      i32]
+      # 0 = nichts, 1 = Host-Key holen, 2 = einrichten.  Der Aufruf blockiert
+      # (auf einem echten Knoten Sekunden bis Minuten), darum wird die Absicht
+      # erst gemerkt, EIN Frame mit "läuft…" gezeichnet und der Aufruf im
+      # naechsten Frame gefahren — sonst friert die Oberflaeche stumm ein.
+      - [prov_pending, i32]
+      # doc/spec/94 F94-13: Zeitpunkt, zu dem sich der Dialog selbst schliesst
+      # (0 = bleibt offen).  Gesetzt wird er NUR bei Erfolg — nach einem
+      # Fehlschlag steht dort die Begruendung, und die wirft man nicht weg.
+      - [prov_close,   i64]
+      - [prov_watch,   i32]    # 1 = ein Einrichtungs-Auftrag laeuft, Stand abfragen
+    methods:
+      - def:
+          name: init
+          body:
+            - if: { condition: { eq: [<.initialized, 1] }, then: [{ return }] }
+            - set: [<.scene, { call: [engine.instantiate, "AgentsScene"] }]
+            - call: [<.scene.set_pos, 0.0, 0.0]
+            - call: [<.scene.set_z, 0]
+            - call: [<.scene.bind_list, "agents_list", <.row_ids]
+            - call: [<.scene.set_text, "detail_box", "Kein Agent gewählt."]
+            - set: [<.tok_overlay, { call: [engine.instantiate, "AgentTokenOverlay"] }]
+            - call: [<.tok_overlay.set_pos, 0.0, 0.0]
+            - call: [<.tok_overlay.set_z, 200]
+            - call: [<.tok_overlay.set_visible, 0]
+            - call: [<.tok_overlay.set_text, "hint_lbl", "Ein Token wird NUR EINMAL angezeigt.  Der Server speichert davon nur einen sha256-Hash."]
+            # Kein erfundener Name im Feld: „builder-1" sah aus wie ein
+            # vorhandener Knoten.  Der Hinweis steht daneben, das Feld bleibt leer.
+            - call: [<.tok_overlay.set_text, "label_input", ""]
+            - set: [<.tok_on, 0]
+            - set: [<.tok_seq, -1]
+            - set: [<.prov_overlay, { call: [engine.instantiate, "ProvisionOverlay"] }]
+            - call: [<.prov_overlay.set_pos, 0.0, 0.0]
+            - call: [<.prov_overlay.set_z, 210]
+            - call: [<.prov_overlay.set_visible, 0]
+            - call: [<.prov_overlay.set_text, "hint_lbl", "Der Server richtet den Knoten per SSH ein: Binary, AppArmor-Profil, uidmap, Dienst und Token.  Auf dem Knoten ist nichts von Hand zu tun.  Das sudo-Feld nur fuellen, wenn es vom SSH-Passwort abweicht.  Kein Passwort wird gespeichert."]
+            - call: [<.prov_overlay.set_text, "port_input", "22"]
+            - call: [<.prov_overlay.set_text, "user_input", "deploy"]
+            - set: [<.prov_on, 0]
+            - set: [<.prov_pending, 0]
+            - set: [<.prov_close, 0]
+            - set: [<.initialized, 1]
+            - set: [<.is_visible, 0]
+            - set: [<.agents_seq, -1]
+
+      # apply_agents: die Zeilen-Identitaeten aus der Agentenliste setzen.
+      # Der Inhalt jeder Zeile kommt in fill_rows aus derselben Liste — eine
+      # zweite Kopie waere die zweite Quelle (doc/spec/104 §104.0).
+      - def:
+          name: apply_agents
+          static_off: ["str_cmp"]
+          # ref<>, nicht ptr<>: ein ptr<>-Argument verschoebe den Besitz und
+          # gaebe die uebergebene Liste frei (spec/61 §6.2/§10).
+          args: [[lst, ref<AgentList>]]
+          body:
+            - if: { condition: { peq: [lst, null] }, then: [{ return: [] }] }
+            - call: [<.row_ids.clear]
+            - decl: [adx, i32, 0]
+            - while:
+                condition: { lt: [adx, lst.agents.len] }
+                body:
+                  - decl: [row, AgentInfo, { at: [lst.agents, adx] }]
+                  - call: [<.row_ids.push, row.agent_id]
+                  - set: [adx, { +: [adx, 1] }]
+            - decl: [none_txt, string, ""]
+            - if: { condition: { eq: [lst.agents.len, 0] }, then: [{ set: [none_txt, "Kein Agent eingerichtet — über „Agent einrichten“ einen Knoten aufnehmen."] }] }
+            - call: [<.scene.set_text, "agents_none", none_txt]
+
+      # fill_rows: jede Zeile beschriften und ihre Klicks einsammeln — JEDEN
+      # Rahmen, weil der Container seine Zeilen selbst aufspannt (spec/44_6 §5c).
+      - def:
+          name: fill_rows
+          static_off: ["str_cmp"]
+          args: [[lst, ref<AgentList>], [now_ms, i64]]
+          body:
+            - if: { condition: { peq: [lst, null] }, then: [{ return: [] }] }
+            - decl: [rcc, i32, { call: [<.scene.container_row_count, "agents_list"] }]
+            - decl: [rci, i32, 0]
+            - while:
+                condition: { lt: [rci, rcc] }
+                body:
+                  - decl: [row, prefab_instance, { call: [<.scene.container_row, "agents_list", rci] }]
+                  - if:
+                      condition: { '&&': [{ neq: [row, null] }, { lt: [rci, lst.agents.len] }] }
+                      then:
+                        - decl: [info, AgentInfo, { at: [lst.agents, rci] }]
+                        - decl: [mark, string, info.agent_id]
+                        - if: { condition: { eq: [info.agent_id, <.sel_agent] }, then: [{ set: [mark, "▸ ${info.agent_id}"] }] }
+                        - call: [row.set_text, "name_lblx", mark]
+                        - decl: [labs, string, info.labels]
+                        - if: { condition: { eq: [labs.len, 0] }, then: [{ set: [labs, "(keine)"] }] }
+                        - call: [row.set_text, "labs_lblx", labs]
+                        - call: [row.set_text, "seen_lblx", { call: [<.pres.ago, info.last_seen_ms, now_ms] }]
+                        - decl: [work, string, "bereit"]
+                        - if: { condition: { gt: [info.current_run.len, 0] }, then: [{ set: [work, info.current_run] }] }
+                        # Ein Agent ohne „steps" nimmt keine Schritte an — er
+                        # haengt nur am Netz.  Als „bereit" zu fuehren, waehrend
+                        # Jobs liegen bleiben, ist die teuerste Luege der Liste.
+                        - decl: [able, i32, { call: [info.caps.index_of, "steps"] }]
+                        - if: { condition: { lt: [able, 0] }, then: [{ set: [work, "veraltet"] }] }
+                        # `online` vom Server, nicht selbst gerechnet (F104-3).
+                        - if: { condition: { neq: [info.online, 1] }, then: [{ set: [work, "nicht verbunden"] }] }
+                        - call: [row.set_text, "work_lblx", work]
+                        # doc/spec/109 R6: „noch nichts gemeldet" ist NICHT „null Last".
+                        # Ein Strich sagt „ich weiss es nicht", eine 0 saehe aus wie
+                        # „der Agent tut nichts" — und das waere eine Behauptung.
+                        - decl: [load_txt, string, "k. A."]
+                        - if:
+                            condition: { neq: [info.res_seen, 0] }
+                            then:
+                              - decl: [cpu_pct, i32, { /: [info.cpu_permille, 10] }]
+                              - decl: [rss_mb, i64, { /: [info.rss_kb, 1024] }]
+                              - set: [load_txt, "${cpu_pct}% · ${rss_mb} MB"]
+                        - call: [row.set_text, "load_lblx", load_txt]
+                        - decl: [dotc, i32, 0x667788FF]
+                        - if: { condition: { eq: [info.online, 1] }, then: [{ set: [dotc, 0x66CC88FF] }] }
+                        - if: { condition: { '&&': [{ eq: [info.online, 1] }, { lt: [able, 0] }] }, then: [{ set: [dotc, 0xDDAA44FF] }] }
+                        - call: [row.set_bg_color, "stat_dotx", dotc]
+                        # Erneuern hat Vorrang vor der Auswahl: der Knopf liegt
+                        # oben, sonst waere jeder Druck zugleich ein Klick auf
+                        # die Zeile.
+                        - if:
+                            condition: { eq: [{ call: [row.child_clicked, "updat_btn"] }, 1] }
+                            then:
+                              - set: [<.sel_agent, info.agent_id]
+                              - set: [<.sel_host, info.host]
+                              - call: [<.show_detail, info, now_ms]
+                              - call: [<.open_renew, info]
+                            else:
+                              - if:
+                                  condition: { eq: [{ call: [row.child_clicked, "click_area"] }, 1] }
+                                  then:
+                                    - set: [<.sel_agent, info.agent_id]
+                                    - set: [<.sel_host, info.host]
+                                    - call: [<.show_detail, info, now_ms]
+                        # Das Detailfeld nennt ein ALTER — es muss mitlaufen,
+                        # sonst steht dort „zuletzt gesehen: vor 2 s", waehrend
+                        # der Agent laengst weg ist.
+                        - if: { condition: { eq: [info.agent_id, <.sel_agent] }, then: [{ call: [<.show_detail, info, now_ms] }] }
+                  - set: [rci, { +: [rci, 1] }]
+
+      # show_detail: was dieser Agent IST — Rechner, System, Etiketten, Stand.
+      - def:
+          name: show_detail
+          static_off: ["str_cmp"]
+          args: [[info, ref<AgentInfo>], [now_ms, i64]]
+          body:
+            - decl: [host, string, info.host]
+            - if: { condition: { eq: [host.len, 0] }, then: [{ set: [host, "(unbekannt)"] }] }
+            - decl: [osn, string, info.os_name]
+            - if: { condition: { eq: [osn.len, 0] }, then: [{ set: [osn, "(unbekannt)"] }] }
+            - decl: [labs, string, info.labels]
+            - if: { condition: { eq: [labs.len, 0] }, then: [{ set: [labs, "(keine)"] }] }
+            - decl: [work, string, "bereit"]
+            - if: { condition: { gt: [info.current_run.len, 0] }, then: [{ set: [work, info.current_run] }] }
+            - if: { condition: { neq: [info.online, 1] }, then: [{ set: [work, "nicht verbunden"] }] }
+            - decl: [seen, string, { call: [<.pres.ago, info.last_seen_ms, now_ms] }]
+            - decl: [able2, i32, { call: [info.caps.index_of, "steps"] }]
+            - if: { condition: { lt: [able2, 0] }, then: [{ set: [work, "veraltet — nimmt keine Schritte (Agent erneuern)"] }] }
+            - decl: [txt, string, "${info.agent_id}   auf ${host}   ${osn}\n"]
+            - set: [txt, "${txt}Etiketten: ${labs}\n"]
+            - set: [txt, "${txt}Zuletzt gesehen: ${seen}   Zustand: ${work}"]
+            - call: [<.scene.set_text, "detail_box", txt]
+            # F103-3: das Etikett ist der Weg, einen Schritt hierher zu lenken.
+            - call: [<.scene.set_text, "status_lbl", "Im Job-Quelltext `label: ${info.agent_id}` schreibt einen Schritt genau auf diesen Agenten fest."]
+
+      # Hier standen apply_output / load_head / go_live / start_run: der
+      # Ad-hoc-Befehl samt Ausgabe-Fenster.  Entfernt (User 2026-10-15) —
+      # dieser Bildschirm VERWALTET Agenten.  Ein Lauf gehoert zu einem Job
+      # (doc/spec/106 G4); der RPC `run_on_agent` bleibt fuer die Abnahme.
+
+
+      # apply_tokens: Liste der Tokens rendern (ohne Geheimnisse — die kennt der Server nicht mehr).
+      - def:
+          name: apply_tokens
+          # Die Instanz statt der blossen Liste: Liste, Stand und das frisch
+          # erzeugte Geheimnis gehoeren zusammen (doc/spec/105 Schritt 3).
+          args: [[tokens, ref<TokensState>]]
+          body:
+            - if: { condition: { peq: [tokens.list, null] }, then: [{ return: [] }] }
+            - decl: [txt, string, ""]
+            - decl: [tdx, i32, 0]
+            - while:
+                condition: { lt: [tdx, tokens.list.tokens.len] }
+                body:
+                  - decl: [row, AgentTokenInfo, { at: [tokens.list.tokens, tdx] }]
+                  - decl: [state, string, "aktiv"]
+                  - if: { condition: { neq: [row.revoked, 0] }, then: [{ set: [state, "WIDERRUFEN"] }] }
+                  - decl: [used, string, "nie benutzt"]
+                  - if: { condition: { gt: [row.use_count, 0] }, then: [{ set: [used, "${row.use_count}x benutzt"] }] }
+                  - set: [txt, "${txt}${row.token_id}  ${row.label}  [${state}]  ${used}\n"]
+                  - set: [tdx, { +: [tdx, 1] }]
+            - if: { condition: { eq: [tokens.list.tokens.len, 0] }, then: [{ set: [txt, "(noch kein Token — oben eines erzeugen)"] }] }
+            - call: [<.tok_overlay.set_text, "list_box", txt]
+
+      - def:
+          name: open_tokens
+          args: [[tokens, ref<TokensState>]]
+          body:
+            - call: [<.tok_overlay.set_text, "secret_box", ""]
+            - call: [<.tok_overlay.set_text, "start_box", ""]
+            - call: [<.tok_overlay.set_visible, 1]
+            # Dialog ECHT modal: die Hauptszene ausblenden.  Sonst liegen deren
+            # Widgets unter dem Overlay und stehlen den Fokus (agents_box
+            # überlappt den Token-Kasten) — Ctrl+C würde dann die falsche Box
+            # kopieren.  Textboxen sind seit spec/44_6 §5f fokussierbar.
+            - call: [<.scene.set_visible, 0]
+            - set: [<.tok_on, 1]
+            - decl: [got, i32, { call: [tokens.refresh] }]
+            - if: { condition: { pneq: [tokens.list, null] }, then: [{ call: [<.apply_tokens, tokens] }, { set: [<.tok_seq, { call: [tokens.revision] }] }] }
+
+      - def:
+          name: close_tokens
+          args: [[tokens, ref<TokensState>]]
+          body:
+            - call: [tokens.forget_secret]
+            - call: [<.tok_overlay.set_text, "secret_box", ""]
+            - call: [<.tok_overlay.set_text, "start_box", ""]
+            - call: [<.tok_overlay.set_visible, 0]
+            - set: [<.tok_on, 0]
+            # Hauptszene nur zurückholen, wenn der Screen selbst sichtbar ist
+            # (set_visible(0) ruft close_tokens → darf nicht wieder einblenden).
+            - if: { condition: { eq: [<.is_visible, 1] }, then: [{ call: [<.scene.set_visible, 1] }] }
+
+      - def:
+          name: create_token
+          args: [[tokens, ref<TokensState>]]
+          body:
+            - decl: [label, string, { call: [<.tok_overlay.text_value, "label_input"] }]
+            - if:
+                condition: { eq: [label.len, 0] }
+                then: [{ call: [<.tok_overlay.set_text, "start_box", "Bitte eine Bezeichnung angeben — sie wird der Name des Agenten."] }, { return: [] }]
+            - decl: [res, AgentTokenNew, { call: [tokens.create, label] }]
+            - if:
+                condition: { eq: [res.accepted, 1] }
+                then:
+                  # FERTIGE Startzeile: echter Server (<.session.server_url) und echtes
+                  # Token eingesetzt, nichts zum Selbst-Ersetzen.  Direkt
+                  # vorausgewählt (spec/44_6 §5f) → Ctrl+C und einfügen.
+                  - call: [<.tok_overlay.set_text, "secret_box", "./agent --exec-url ${<.session.server_url} --agent-id ${label} --agent-token ${res.secret}"]
+                  - call: [<.tok_overlay.select_all, "secret_box"]
+                  - call: [<.tok_overlay.set_text, "start_box", "Markiert — Ctrl+C, dann im Terminal im cosmos-Verzeichnis einfuegen.  --agent-id ist der Name, unter dem der Agent oben in der Liste erscheint.  Die Zeile enthaelt das Token: nicht weitergeben, und es wird NICHT erneut angezeigt.  Soll es nicht in der Prozessliste stehen: Token in eine Datei und --agent-token-file token.txt nutzen."]
+                  - call: [<.tok_overlay.set_text, "label_input", ""]
+                else:
+                  - call: [<.tok_overlay.set_text, "secret_box", ""]
+                  - call: [<.tok_overlay.set_text, "start_box", "fehlgeschlagen: ${res.reason}"]
+
+      - def:
+          name: revoke_token
+          args: [[tokens, ref<TokensState>]]
+          body:
+            - decl: [tid, string, { call: [<.tok_overlay.text_value, "revoke_input"] }]
+            - if: { condition: { eq: [tid.len, 0] }, then: [{ return: [] }] }
+            - decl: [done, i32, { call: [tokens.revoke, tid] }]
+            - if:
+                condition: { eq: [done, 1] }
+                then:
+                  - call: [<.tok_overlay.set_text, "revoke_input", ""]
+                  - call: [<.tok_overlay.set_text, "start_box", "Token ${tid} widerrufen — Agenten damit können sich nicht mehr neu registrieren."]
+                else: [{ call: [<.tok_overlay.set_text, "secret_box", "Widerruf fehlgeschlagen (ID prüfen)"] }]
+
+      - def:
+          name: set_visible
+          args: [[vis, i32], [agents, ref<AgentsState>], [tokens, ref<TokensState>]]
+          body:
+            - if: { condition: { eq: [<.initialized, 0] }, then: [{ call: [<.init] }] }
+            - call: [<.scene.set_visible, vis]
+            - set: [<.is_visible, vis]
+            - if: { condition: { eq: [vis, 0] }, then: [{ call: [<.close_tokens, tokens] }] }
+            - if:
+                condition: { eq: [vis, 1] }
+                then:
+                  - if: { condition: { pneq: [agents.list, null] }, then: [{ call: [<.apply_agents, agents.list] }, { set: [<.agents_seq, { call: [agents.revision] }] }] }
+
+      # back_pressed entfiel: die Navigation sitzt im Kopf der Huelle
+      # (doc/spec/107 F107-2), ein zweiter Weg zurueck hatte keinen Aufrufer.
+
+      - def:
+          name: render
+          args: [[agents, ref<AgentsState>], [tokens, ref<TokensState>]]
+          body:
+            - if: { condition: { eq: [<.is_visible, 0] }, then: [{ return }] }
+            # Live-Push angekommen? → neu rendern (kein Timer-Poll).
+            - if:
+                condition: { neq: [{ call: [agents.revision] }, <.agents_seq] }
+                then:
+                  - if: { condition: { pneq: [agents.list, null] }, then: [{ call: [<.apply_agents, agents.list] }] }
+                  - set: [<.agents_seq, { call: [agents.revision] }]
+            # Zeilen JEDEN Rahmen beschriften: der Container spannt sie selbst auf.
+            # EINE Uhr: die fortgeschriebene Server-Zeit (doc/spec/104 F99-10).
+            - if: { condition: { pneq: [agents.list, null] }, then: [{ call: [<.fill_rows, agents.list, { call: [agents.server_now] }] }] }
+            # Einrichtungs-Dialog modal.  Erst die gemerkte Absicht ausfuehren
+            # (der "läuft…"-Frame wurde bereits gezeichnet), dann Klicks.
+            - if:
+                condition: { eq: [<.prov_on, 1] }
+                then:
+                  - if:
+                      condition: { eq: [<.prov_pending, 1] }
+                      then: [{ set: [<.prov_pending, 0] }, { call: [<.do_probe] }, { return: [] }]
+                  - if:
+                      condition: { eq: [<.prov_pending, 2] }
+                      then: [{ set: [<.prov_pending, 0] }, { call: [<.do_install] }, { return: [] }]
+                  - if:
+                      condition: { eq: [<.prov_pending, 3] }
+                      then: [{ set: [<.prov_pending, 0] }, { call: [<.do_teardown] }, { return: [] }]
+                  - call: [<.poll_install]
+                  # F94-13: nach einem Erfolg schliesst er sich selbst.
+                  - if:
+                      condition: { '&&': [{ gt: [<.prov_close, 0] }, { ge: [{ call: [time.now] }, <.prov_close] }] }
+                      then: [{ call: [<.close_provision] }, { return: [] }]
+                  - if:
+                      condition: { eq: [{ call: [<.prov_overlay.child_clicked, "probe_btn"] }, 1] }
+                      then:
+                        - call: [<.prov_overlay.set_text, "status_box", "Verbinde mit dem Knoten und lese den Host-Key…"]
+                        - set: [<.prov_pending, 1]
+                  - if:
+                      condition: { eq: [{ call: [<.prov_overlay.child_clicked, "install_btn"] }, 1] }
+                      then:
+                        - call: [<.prov_overlay.set_text, "status_box", "Richte ein… (Binary, Profil, uidmap, Dienst).  Das kann auf einem echten Knoten eine Weile dauern."]
+                        - set: [<.prov_pending, 2]
+                  - if:
+                      condition: { eq: [{ call: [<.prov_overlay.child_clicked, "teardown_btn"] }, 1] }
+                      then:
+                        - call: [<.prov_overlay.set_text, "status_box", "Baue zurueck… (Dienst, Einheit, Token, Binary, Profil, ID-Bereich, Nutzer)."]
+                        - set: [<.prov_pending, 3]
+                  - if: { condition: { eq: [{ call: [<.prov_overlay.child_clicked, "close_btn"] }, 1] }, then: [{ call: [<.close_provision] }] }
+                  - return: []
+            # Token-Dialog modal: offen → nur dessen Buttons verarbeiten.
+            - if:
+                condition: { eq: [<.tok_on, 1] }
+                then:
+                  - if: { condition: { neq: [{ call: [tokens.revision] }, <.tok_seq] }, then: [{ call: [<.apply_tokens, tokens] }, { set: [<.tok_seq, { call: [tokens.revision] }] }] }
+                  - if: { condition: { eq: [{ call: [<.tok_overlay.child_clicked, "create_btn"] }, 1] }, then: [{ call: [<.create_token, tokens] }] }
+                  - if: { condition: { eq: [{ call: [<.tok_overlay.child_clicked, "revoke_btn"] }, 1] }, then: [{ call: [<.revoke_token, tokens] }] }
+                  - if: { condition: { eq: [{ call: [<.tok_overlay.child_clicked, "close_btn"] }, 1] }, then: [{ call: [<.close_tokens, tokens] }] }
+                  - return: []
+            - if: { condition: { eq: [{ call: [<.scene.child_clicked, "token_btn"] }, 1] }, then: [{ call: [<.open_tokens, tokens] }] }
+            - if: { condition: { eq: [{ call: [<.scene.child_clicked, "prov_btn"] }, 1] }, then: [{ call: [<.open_provision, "", 0] }] }
+
+
+
+      # open_renew: Erneuerung fuer EINEN Agenten.  Vorbelegt wird nur, was
+      # wirklich bekannt ist — Name und Etiketten kommen aus der Liste, der
+      # Rechner nur, wenn der Agent ihn gemeldet hat.  Lieber ein leeres
+      # Feld als ein falsch geratenes.
+      - def:
+          name: open_renew
+          static_off: ["str_cmp"]
+          args: [[info, ref<AgentInfo>]]
+          body:
+            - call: [<.open_provision, info.host, 1]
+            - call: [<.prov_overlay.set_text, "label_input", info.agent_id]
+            - call: [<.prov_overlay.set_text, "labs_input", info.labels]
+            - decl: [where_txt, string, info.host]
+            - if: { condition: { eq: [where_txt.len, 0] }, then: [{ set: [where_txt, "(Rechner eintragen)"] }] }
+            - call: [<.prov_overlay.set_text, "status_box", "ERNEUERN von ${info.agent_id} auf ${where_txt}: ersetzt das Binary und startet den Dienst NEU.  Name und Etiketten sind vorbelegt; SSH-Konto und Passwort werden nicht gespeichert und muessen erneut eingegeben werden."]
+
+      - def:
+          name: open_provision
+          args: [[host, string], [renew, i32]]
+          body:
+            - set: [<.prov_on, 1]
+            - set: [<.prov_pending, 0]
+            # Einen alten Schliess-Zeitpunkt loeschen: sonst faellt ein frisch
+            # geoeffneter Dialog sofort einer abgelaufenen Frist zum Opfer.
+            - set: [<.prov_close, 0]
+            - call: [<.prov_overlay.set_visible, 1]
+            - call: [<.prov_overlay.set_text, "fp_box", ""]
+            - if:
+                condition: { eq: [renew, 1] }
+                then:
+                  - call: [<.prov_overlay.set_text, "host_input", host]
+                  - call: [<.prov_overlay.set_text, "status_box", "ERNEUERN von ${host}: derselbe Ablauf wie beim Einrichten — er ersetzt das Binary und startet den Dienst NEU.  Host-Key holen, dann einrichten."]
+                else:
+                  - call: [<.prov_overlay.set_text, "status_box", "Host und Konto eintragen, dann den Host-Key holen."]
+            - set: [<.provisioning.fingerprint, ""]
+            - set: [<.provisioning.done, 0]
+
+      # Rueckbau: nimmt alles wieder weg und widerruft das Token.
+      - def:
+          name: do_teardown
+          static_off: ["str_cmp"]
+          body:
+            - if:
+                condition: { eq: [<.provisioning.fingerprint.len, 0] }
+                then:
+                  - call: [<.prov_overlay.set_text, "status_box", "Zuerst den Host-Key holen und pruefen."]
+                  - return: []
+            - decl: [req, ProvisionReq, { call: [<.build_req] }]
+            - set: [req.expected_fp, <.provisioning.fingerprint]
+            - set: [req.token_id, { call: [<.prov_overlay.text_value, "tokid_input"] }]
+            - decl: [res, ProvisionResp, { call: [<.provisioning.deprovision, req] }]
+            - if:
+                condition: { eq: [res.success, 1] }
+                then:
+                  - set: [<.provisioning.done, 0]
+                  - call: [<.prov_done, "Zurueckgebaut.  Schritte: ${res.steps_done}.  Token widerrufen: ${res.token_id}."]
+                  - return: []
+            - call: [<.prov_overlay.set_text, "status_box", "Rueckbau unvollstaendig bei '${res.failed_step}' (${res.steps_done} Schritte gelangen).\n${res.message}"]
+
+      # prov_done: das Ergebnis festhalten und den Dialog auf Zeit stellen
+      # (F94-13).  Die Zeile im Bildschirm UEBERLEBT das Fenster — ein Dialog,
+      # der sich schliesst, nimmt sonst seine Nachricht mit, und niemand kann
+      # nachlesen, was gerade geschehen ist.
+      - def:
+          name: prov_done
+          static_off: ["str_cmp"]
+          args: [[text, string]]
+          body:
+            - call: [<.prov_overlay.set_text, "status_box", text]
+            - call: [<.scene.set_text, "status_lbl", text]
+            # 1,5 s: lang genug, um es im Dialog gelesen zu haben, kurz genug,
+            # dass niemand auf „Schliessen" wartet.
+            - set: [<.prov_close, { +: [{ call: [time.now] }, 1500] }]
+
+      - def:
+          name: close_provision
+          body:
+            - set: [<.prov_on, 0]
+            - set: [<.prov_pending, 0]
+            - set: [<.prov_close, 0]
+            - call: [<.prov_overlay.set_visible, 0]
+            # Das sudo-Passwort nicht im Feld stehen lassen.
+            - call: [<.prov_overlay.set_text, "sudo_input", ""]
+            - call: [<.prov_overlay.set_text, "pw_input", ""]
+
+      # build_req: die Eingaben einsammeln.  Das sudo-Passwort wird hier
+      # gelesen und sonst nirgends gehalten (§94.3 S1).
+      - def:
+          name: build_req
+          static_off: ["str_cmp"]
+          return: { type: ProvisionReq, lifetime: producer }
+          body:
+            - decl: [req, ProvisionReq]
+            - set: [req.host, { call: [<.prov_overlay.text_value, "host_input"] }]
+            - decl: [port_txt, string, { call: [<.prov_overlay.text_value, "port_input"] }]
+            - decl: [port_num, i32, { call: [port_txt.parse_i32] }]
+            - if: { condition: { lt: [port_num, 1] }, then: [{ set: [port_num, 22] }] }
+            - set: [req.port, port_num]
+            - set: [req.login_user, { call: [<.prov_overlay.text_value, "user_input"] }]
+            - set: [req.login_password, { call: [<.prov_overlay.text_value, "pw_input"] }]
+            - decl: [sudo_pw, string, { call: [<.prov_overlay.text_value, "sudo_input"] }]
+            # Zwei Felder, weil es zwei verschiedene Dinge sind: das eine meldet
+            # am Knoten an, das andere erhoeht dort die Rechte.  Meist ist es
+            # dasselbe Konto und damit dasselbe Passwort — dann reicht EINE
+            # Eingabe, und das sudo-Feld bleibt leer.  Nur wenn es abweicht,
+            # wird es gebraucht (§94.5a).
+            - if:
+                condition: { '&&': [{ eq: [sudo_pw.len, 0] }, { gt: [req.login_password.len, 0] }] }
+                then: [{ set: [sudo_pw, req.login_password] }]
+            - set: [req.sudo_password, sudo_pw]
+            - decl: [aname, string, { call: [<.prov_overlay.text_value, "label_input"] }]
+            - set: [req.label, aname]
+            # Der Name geht auch als `--agent-id` in die Dienst-Einheit, die
+            # Etiketten als `--labels` — ohne sie hiess jeder Knoten gleich
+            # und fuehrte keine Etiketten (gemeldet 2026-10-15).
+            - set: [req.agent_id, aname]
+            - set: [req.agent_labels, { call: [<.prov_overlay.text_value, "labs_input"] }]
+            - return: req
+
+      # Phase 1: Host-Key holen.  Der Server fuehrt dabei KEINEN Schritt aus.
+      - def:
+          name: do_probe
+          static_off: ["str_cmp"]
+          body:
+            - decl: [req, ProvisionReq, { call: [<.build_req] }]
+            - set: [req.expected_fp, ""]
+            - decl: [res, ProvisionResp, { call: [<.provisioning.provision, req] }]
+            - if:
+                condition: { eq: [res.fingerprint.len, 0] }
+                then:
+                  - call: [<.prov_overlay.set_text, "status_box", "Kein Host-Key: ${res.message}"]
+                  - return: []
+            - set: [<.provisioning.fingerprint, res.fingerprint]
+            - call: [<.prov_overlay.set_text, "fp_box", res.fingerprint]
+            - call: [<.prov_overlay.set_text, "status_box", "Fingerprint pruefen.  Stimmt er mit dem Knoten ueberein, einrichten — er entscheidet, wem das sudo-Passwort gegeben wird."]
+
+      # Phase 2: einrichten.  Ohne bestaetigten Fingerprint gar nicht erst
+      # losschicken (der Server lehnte es ohnehin ab).
+      - def:
+          name: do_install
+          static_off: ["str_cmp"]
+          body:
+            - if:
+                condition: { eq: [<.provisioning.fingerprint.len, 0] }
+                then:
+                  - call: [<.prov_overlay.set_text, "status_box", "Zuerst den Host-Key holen und pruefen."]
+                  - return: []
+            - decl: [req, ProvisionReq, { call: [<.build_req] }]
+            - set: [req.expected_fp, <.provisioning.fingerprint]
+            - decl: [res, ProvisionResp, { call: [<.provisioning.provision, req] }]
+            # Der Aufruf STARTET nur: die Schritte laufen auf dem Server
+            # nebenher, damit er waehrenddessen antwortet (doc/spec/94).  Ab
+            # jetzt fragt diese Ansicht jeden Rahmen den Stand ab.
+            - if:
+                condition: { eq: [res.running, 1] }
+                then:
+                  - set: [<.prov_watch, 1]
+                  - call: [<.prov_overlay.set_text, "tokid_input", res.token_id]
+                  - call: [<.prov_overlay.set_text, "status_box", "Einrichtung laeuft — die Oberflaeche bleibt bedienbar."]
+                  - return: []
+            - call: [<.prov_overlay.set_text, "status_box", "Nicht gestartet: ${res.message}"]
+
+      # poll_install: den laufenden Auftrag verfolgen.  Ohne das haette der
+      # Nutzer nur „laeuft" und nie ein Ergebnis.
+      - def:
+          name: poll_install
+          static_off: ["str_cmp"]
+          body:
+            - if: { condition: { neq: [<.prov_watch, 1] }, then: [{ return: [] }] }
+            - decl: [state_now, ProvisionResp, { call: [<.provisioning.status] }]
+            - if: { condition: { eq: [state_now.running, 1] }, then: [{ call: [<.prov_overlay.set_text, "status_box", "Einrichtung laeuft — ${state_now.steps_done} Schritte."] }, { return: [] }] }
+            - set: [<.prov_watch, 0]
+            - if:
+                condition: { eq: [state_now.success, 1] }
+                then:
+                  - set: [<.provisioning.done, 1]
+                  - call: [<.prov_done, "Eingerichtet.  Schritte: ${state_now.steps_done}.  Der Agent sollte sich gleich melden."]
+                  - return: []
+            - call: [<.prov_overlay.set_text, "status_box", "Abgebrochen bei '${state_now.failed_step}' (${state_now.steps_done} Schritte liefen).\n${state_now.message}"]

@@ -1,0 +1,56 @@
+# ClusterView — Read-only-Schnappschuss des Clusters für den Browser-Client (Cluster-Ansicht).
+# Vom get_cluster-RPC (token-gesichert) gefüllt, über Mirror serialisiert, im Client gerendert.
+- import: "sources/shared/node.aiml"
+- import: "sources/shared/workload.aiml"
+- import: "sources/shared/pipeline_run.aiml"
+- import: "sources/shared/job_def.aiml"
+- import: "sources/shared/job_record.aiml"
+- import: "sources/shared/live_view.aiml"
+- import: "sources/shared/run_layers.aiml"
+- import: "sources/shared/job_params.aiml"
+- import: "sources/shared/job_policy.aiml"
+
+- model:
+    name: ClusterView
+    fields:
+      - [nodes,     list<Node>]
+      - [workloads, list<Workload>]
+      - [pipelines, list<PipelineRun>]
+      # doc/spec/106 §106.4: die Jobs reisen im GLEICHEN Schnappschuss — ein
+      # eigener Lese-Kanal waere die zweite Quelle, die §104.0 teuer bezahlt hat.
+      - [job_defs,  list<JobDef>]
+      - [jobs,      list<JobRecord>]   # Schritt 2: durable Jobs aus dem geteilten jobs-KV (Controller/Agent)
+      # doc/spec/106 §106.6 (F106-16): die Parameter der Jobs — gelesen aus dem
+      # Schnappschuss, geschrieben per RPC.  Je Eintrag ein Job
+      # (`JobParams.owner_id`), damit die Oberflaeche sie ohne zweiten Kanal
+      # anzeigen kann.
+      - [job_params, list<JobParams>]
+      # doc/spec/101 §101.9: der Vorrang je Job — im GLEICHEN Schnappschuss,
+      # damit die Oberflaeche ihn zeigen kann, ohne zu fragen.  Nur Jobs, die
+      # von 0 abweichen, stehen hier (F101-32).
+      - [job_policy, list<JobPolicy>]
+      # doc/spec/99: der Betriebszustand reist im GLEICHEN Schnappschuss.  Vier
+      # Sichten aus vier Augenblicken koennte niemand zusammenreimen (F99-9).
+      - [live,      LiveView]
+      # doc/spec/107 §107.1c: was die Stufen hinterlassen haben — im GLEICHEN
+      # Schnappschuss wie die Laeufe, aus demselben Grund wie alles andere hier.
+      # Jede Zeile traegt ihren Lauf (StageLayer.run_id), die Liste ist also
+      # ueber alle sichtbaren Laeufe hinweg eine.
+      - [layers,    list<StageLayer>]
+      # doc/spec/107 §107.1h: wie lange jede Stufe lief — im gleichen
+      # Schnappschuss wie die Schichten, es ist dieselbe Frage an dieselbe Stufe.
+      - [times,     list<StageTime>]
+      # doc/spec/107 §107.1b: die Speicher gehoeren ins Bild — sie stehen in
+      # `live.stores` (doc/spec/99) und NICHT zusaetzlich hier.  Bis 2026-10-18 gab
+      # es beides: ein `StoreInfo` neben dem `KvStoreInfo`, in snapshot() aus
+      # demselben `db.open_*` gefuellt.  Zwei Listen fuer EINEN Umstand sind die
+      # zweite Quelle, die doc/spec/104 §104.0 teuer bezahlt hat (F107-17).
+      # doc/spec/109: die Last des SERVERS selbst.  Im GLEICHEN Schnappschuss, aus
+      # demselben Grund wie alles andere hier — vier Sichten aus vier Augenblicken
+      # koennte niemand zusammenreimen (doc/spec/99 F99-9).
+      - [srv_cpu_permille, i32]
+      - [srv_rss_kb,       i64]
+      # Woran der Controller lauscht — aus COSMOS_BIND, nicht aus einer Zahl im
+      # Client.  Die stand dort fest auf 8765 und log, sobald der Stapel auf
+      # anderen Ports laeuft (etwa neben 9rooms, das 8765 belegt).
+      - [srv_bind,         string]

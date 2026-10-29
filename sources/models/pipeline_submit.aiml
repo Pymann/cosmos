@@ -1,0 +1,13 @@
+# Ergebnis der Pruefung einer eingereichten Pipeline (doc/spec/96 §96.13).
+#
+# `ok = 0` heisst: es entsteht KEIN Lauf (F96-30).  `message` ist die Meldung
+# an den Anfrager — sie nennt den Grund und, wo moeglich, den Schritt oder die
+# Achse, um die es geht; nur so ist sie im Editor brauchbar.
+- model:
+    name: SubmitCheck
+    fields:
+      - [accepted,   i32]
+      - [message,    string]
+      - [name,       string]   # der Pipeline-Name aus der Quelle
+      - [lane_count, i32]      # Kreuzprodukt der Achsen, exclude schon abgezogen
+      - [stage_count, i32]     # Stufen je Lane

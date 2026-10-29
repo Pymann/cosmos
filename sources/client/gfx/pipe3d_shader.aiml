@@ -1,0 +1,146 @@
+# Der Shader der raeumlichen Pipeline (doc/spec/107 §107.1b).
+#
+# EIN Programm fuer alle vier Formen: dieselbe Beleuchtung an zwei Orten waere
+# zweimal dieselbe Entscheidung.  `uKind` unterscheidet nur, was sich
+# unterscheiden MUSS — das Fluss-Band im Rohr (F107-14).
+#
+# Die Instanz-Lage kommt als Basis (uRight/uUp/uFwd + uOrigin) statt als
+# Matrix: aiml hat keine Matrix-Multiplikation, und ein Rohr von A nach B ist
+# ohnehin als Basis gedacht (uUp = B-A).  Ansicht und Projektion multipliziert
+# die GLSL-Seite.
+#
+# Zwei Koepfe, ein Rumpf: Desktop (330 core) und WebGL2/GLES (300 es).  Der
+# Aufrufer versucht den ersten und faellt auf den zweiten zurueck — eine
+# Abfrage „bin ich WASM?" gibt es nicht, ein fehlgeschlagenes Compile schon.
+
+- text: p3d_head_desktop
+  value: |
+    #version 330 core
+
+- text: p3d_head_gles
+  value: |
+    #version 300 es
+    precision highp float;
+    // Auch fuer INT, und das ist kein Schoenheitsfehler: in GLSL ES 3.00 ist
+    // die Vorgabe fuer `int` im VERTEX-Shader `highp`, im FRAGMENT-Shader
+    // `mediump`.  Ein Uniform, das in beiden Stufen steht (`uKind`), hat damit
+    // zwei verschiedene Genauigkeiten — und das LINKT nicht.  Im Browser blieb
+    // der Raum dadurch leer, waehrend die 2D-Beschriftung weiterzeichnete; auf
+    // dem Desktop (#version 330) faellt es nicht auf, weil es dort keine
+    // Genauigkeitsregel gibt (gemessen 22.10.2026, doc/spec/107 F107-40).
+    precision highp int;
+
+- text: p3d_vert_body
+  value: |
+    layout(location=0) in vec3 aPos;
+    layout(location=1) in vec2 aUV;
+    layout(location=2) in vec3 aNrm;
+    uniform mat4 uView;
+    uniform mat4 uProj;
+    uniform vec3 uOrigin;
+    uniform vec3 uRight;
+    uniform vec3 uUp;
+    uniform vec3 uFwd;
+    uniform int uKind;
+    uniform float uTime;
+    out vec3 vNrm;
+    out vec2 vUV;
+    out vec3 vView;
+    out vec3 vWorld;
+    void main() {
+      vec3 local = aPos;
+      // Das Tuch einer Haltepunkt-Flagge WEHT (doc/spec/107 F107-35).  Die
+      // Auslenkung waechst mit u — am Mast (u=0) ist sie null, an der Spitze
+      // voll; sonst loeste sich das Tuch vom Mast.  aUV.x ist genau diese
+      // Bahn, so ist das Modell entworfen.
+      if (uKind == 8 && aUV.x > 0.001) {
+        float wave = sin(aUV.x * 5.0 - uTime * 3.2) + 0.45 * sin(aUV.x * 9.5 - uTime * 5.4);
+        // Die Auslenkung waechst QUADRATISCH mit u: am Mast bleibt das Tuch
+        // sitzen, zur Spitze hin schlaegt es aus.  Linear sah aus, als haenge
+        // es schief, statt zu wehen.
+        local.z += wave * 0.19 * aUV.x * aUV.x;
+        local.y += sin(aUV.x * 3.6 - uTime * 3.2) * 0.05 * aUV.x * aUV.x;
+      }
+      vec3 world = uOrigin + uRight * local.x + uUp * local.y + uFwd * local.z;
+      // Die Basis ist orthogonal, aber NICHT normiert (sie traegt die Groesse).
+      // Fuer die Normale zaehlt nur die Richtung — also normieren statt der
+      // inversen Transponierten, die hier dasselbe ergaebe.
+      vNrm = normalize(normalize(uRight) * aNrm.x + normalize(uUp) * aNrm.y + normalize(uFwd) * aNrm.z);
+      vUV = aUV;
+      vWorld = world;
+      vec4 eye = uView * vec4(world, 1.0);
+      vView = -eye.xyz;
+      gl_Position = uProj * eye;
+    }
+
+- text: p3d_frag_body
+  value: |
+    in vec3 vNrm;
+    in vec2 vUV;
+    in vec3 vView;
+    in vec3 vWorld;
+    uniform vec4 uColor;
+    uniform int uKind;
+    uniform float uTime;
+    out vec4 fragColor;
+    void main() {
+      vec3 nrm = normalize(vNrm);
+      vec3 toEye = normalize(vView);
+      // Ein Schluessellicht von schraeg oben, ein schwaches Gegenlicht — mehr
+      // braucht eine Ablesefigur nicht, und mehr wuerde Farben verfaelschen,
+      // die einen ZUSTAND tragen (F107-13).
+      vec3 key = normalize(vec3(0.45, 0.82, 0.35));
+      vec3 fill = normalize(vec3(-0.5, 0.2, -0.6));
+      float lambert = max(dot(nrm, key), 0.0);
+      float back = max(dot(nrm, fill), 0.0) * 0.25;
+      float rim = pow(1.0 - max(dot(nrm, toEye), 0.0), 3.0);
+      vec3 base = uColor.rgb * (0.30 + 0.85 * lambert + back);
+      base += uColor.rgb * rim * 0.55;
+      // Fluss: helle Baender wandern entlang der Rohrachse (aUV.y laeuft von
+      // 0 nach 1 ueber die Laenge).  Nur wenn uFlow > 0 — eine Oberflaeche,
+      // die staendig animiert, sagt nichts mehr aus.
+      if (uKind == 5) {
+        float band = fract(vUV.y * 3.0 - uTime * 1.6);
+        float pulse = smoothstep(0.55, 0.95, band) * (1.0 - smoothstep(0.95, 1.0, band));
+        base += vec3(1.0, 0.86, 0.55) * pulse * 0.9;
+      }
+      // Die Trommel bekommt Rillen, damit sie auch unbeschriftet als Speicher
+      // gelesen wird.
+      if (uKind == 2) {
+        float ring = smoothstep(0.46, 0.5, fract(vUV.y * 6.0));
+        base *= 0.82 + 0.18 * ring;
+      }
+      // Die Schicht einer Stufe (doc/spec/107 §107.1c): eine Platte.  Ihre
+      // Kante wird betont, damit ein Stapel als Stapel liest und nicht als
+      // ein dicker Block — zwei Platten uebereinander muessen trennbar sein.
+      if (uKind == 6 || uKind == 7) {
+        float edge = smoothstep(0.42, 0.50, abs(vUV.y - 0.5));
+        base += uColor.rgb * edge * 0.45;
+      }
+      // Und die GERILLTE Platte: ihr Inhalt liegt bereits im Speicher, ist
+      // also beim naechsten Lauf fix (F107-31).  Dieselben Rillen wie an der
+      // Trommel — dort heiszen sie Speicher, hier auch.  Still, nicht bewegt
+      // (F107-33).
+      if (uKind == 7) {
+        float groove = smoothstep(0.46, 0.5, fract(vUV.x * 14.0));
+        base *= 0.80 + 0.30 * groove;
+      }
+      // Das Tuch eines Haltepunkts leuchtet, damit die Flagge von weitem
+      // auffaellt (doc/spec/107 §107.1d).  Der Mast bleibt stumpf — er ist
+      // Halterung, kein Zeichen.
+      if (uKind == 8 && vUV.x > 0.001) {
+        base = uColor.rgb * (0.40 + 0.55 * lambert) + uColor.rgb * rim * 0.55;
+      }
+      // Der Boden ist ein Gitter, kein Koerper: er traegt das Bild, ohne
+      // selbst gelesen zu werden.  Ohne ihn schweben die Kugeln im Nichts und
+      // man kann Hoehen nicht vergleichen.
+      if (uKind == 4) {
+        vec2 cell = abs(fract(vWorld.xz * 0.5 + 0.5) - 0.5) / fwidth(vWorld.xz * 0.5);
+        float line = 1.0 - min(min(cell.x, cell.y), 1.0);
+        float fade = 1.0 - smoothstep(6.0, 16.0, length(vWorld.xz - vec2(4.0, -1.5)));
+        base = uColor.rgb * (0.25 + 0.75 * line) * fade;
+        fragColor = vec4(base, uColor.a * (0.25 + 0.75 * line) * fade);
+        return;
+      }
+      fragColor = vec4(base, uColor.a);
+    }

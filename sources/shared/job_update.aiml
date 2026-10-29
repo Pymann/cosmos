@@ -1,0 +1,20 @@
+# Cosmos job progress ("job_update" request, agent-initiated).
+
+# log chunk starting at `offset` plus process state
+- model:
+    name: JobUpdate
+    fields:
+      - [agent_id,  string]
+      - [job_id,    string]
+      - [state,     i32]
+      - [pid,       i64]
+      - [exit_code, i32]
+      - [offset,    i32]
+      - [chunk,     string]
+
+# authoritative log length on the controller
+- model:
+    name: JobAck
+    fields:
+      - [job_id,  string]
+      - [log_len, i32]

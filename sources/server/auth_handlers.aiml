@@ -1,0 +1,106 @@
+# Mirror RPC-Handler für die drei Auth-Methods.
+#
+#   submit_login    (LoginReq    → AuthResult)
+#   submit_register (RegisterReq → AuthResult)
+#   validate_token  (TokenReq    → AuthResult)
+#
+# Jede Instanz trägt instance-level `implements: [mirror.RpcHandler]`.
+# Antwort geht targeted zurück an `rpc.peer_id` per `set_result`.
+#
+# Auth-Logik selbst lebt in der Gruppen-Instanz `auth` und ist hier nur
+# über die sees-Kante `<.auth` erreichbar.  Diese Handler sind reine
+# Adapter — was die Komposition von der Pure-Logik trennt.
+#
+# Decoding via lokalem Req-Slot (Spec 44_5 §7) — `<` als
+# decode_rpc-Target funktioniert nur bei free-function-Dispatch.
+
+- import: "sources/models/auth_reqs.aiml"
+- import: "sources/models/auth_result.aiml"
+# Stufe 2 (spec/58): diese Handler waren Klassen, die die Dienste über
+# Globals erreichten.  Jetzt sind sie Instanzen der CosmosRuntime und ihr
+# `run` steht hier als Gruppen-Methode — Zugriff nur über die deklarierten
+# sees-Kanten.  KEIN Import aus dem Server: die Gruppen-Datei importiert
+# diese Datei (§1.1), umgekehrt gäbe es einen Zyklus.
+
+- groupmethods:
+    group: CosmosRuntime
+    instances:
+      - instance: submit_login
+        methods:
+          - def:
+              name: run
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, LoginReq]
+                - decl: [rc_val, i32, { call: [session.decode_rpc, rpc, req] }]
+                - if:
+                    condition: { neq: [rc_val, 0] }
+                    then:
+                      - call: [log.warn, "[login] decode_rpc failed rc=${rc_val}"]
+                      - decl: [bad, AuthResult]
+                      - set: [bad.success, 0]
+                      - set: [bad.message, "malformed login payload"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, bad]
+                      - return: []
+                # Vertrauenswürdige Client-IP aus dem Mirror (nicht fälschbar) für den
+                # per-IP-Bann des Login-Throttles.
+                - decl: [client_ip, string, { call: [session.peer_ip, rpc.peer_id] }]
+                - decl: [res, AuthResult, { call: [<.auth.handle_login, req, client_ip] }]
+                # doc/spec/111 §111.5: ist LDAP erklaert, ist das Verzeichnis die
+                # zweite Quelle — fuer unbekannte Konten und fuer Konten, deren
+                # lokales Passwort nicht passt (ein LDAP-Konto hat nur ein
+                # Zufalls-Passwort).  Lokale Konten (Notfall-Admin) gehen vor.
+                - if:
+                    condition: { '&&': [{ neq: [res.success, 1] }, { eq: [{ call: [<.auth.ldap_enabled] }, 1] }] }
+                    then:
+                      - if:
+                          condition: { '||': [{ eq: [{ call: [res.message.starts_with, "unknown user"] }, 1] }, { eq: [{ call: [res.message.starts_with, "wrong password"] }, 1] }] }
+                          then: [{ set: [res, { call: [<.auth.ldap_login, req.email, req.password] }] }]
+                # Ein abgelehnter Login stand bisher NUR in der Antwort an den
+                # Browser.  Wer am Server sitzt und sucht, warum sich niemand
+                # anmelden kann, sah ein stilles Protokoll — und ein stilles
+                # Protokoll sieht aus wie „die Anfrage kommt gar nicht an".
+                # Die BEGRUENDUNG gehoert hierher, das Passwort nie.
+                - if:
+                    condition: { neq: [res.success, 1] }
+                    then: [{ call: [log.warn, "[login] abgelehnt fuer '${req.email}' von ${client_ip}: ${res.message}"] }]
+                - call: [session.reply_rpc, rpc, "set_result", 0, res]
+      - instance: submit_register
+        methods:
+          - def:
+              name: run
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, RegisterReq]
+                - decl: [rc_val, i32, { call: [session.decode_rpc, rpc, req] }]
+                - if:
+                    condition: { neq: [rc_val, 0] }
+                    then:
+                      - call: [log.warn, "[register] decode_rpc failed rc=${rc_val}"]
+                      - decl: [bad, AuthResult]
+                      - set: [bad.success, 0]
+                      - set: [bad.message, "malformed register payload"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, bad]
+                      - return: []
+                - decl: [reg_ip, string, { call: [session.peer_ip, rpc.peer_id] }]
+                - decl: [res, AuthResult, { call: [<.auth.handle_register, req, reg_ip] }]
+                - call: [session.reply_rpc, rpc, "set_result", 0, res]
+      - instance: validate_token
+        methods:
+          - def:
+              name: run
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, TokenReq]
+                - decl: [rc_val, i32, { call: [session.decode_rpc, rpc, req] }]
+                - if:
+                    condition: { neq: [rc_val, 0] }
+                    then:
+                      - call: [log.warn, "[validate] decode_rpc failed rc=${rc_val}"]
+                      - decl: [bad, AuthResult]
+                      - set: [bad.success, 0]
+                      - set: [bad.message, "malformed validate payload"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, bad]
+                      - return: []
+                - decl: [res, AuthResult, { call: [<.auth.handle_validate, req] }]
+                - call: [session.reply_rpc, rpc, "set_result", 0, res]

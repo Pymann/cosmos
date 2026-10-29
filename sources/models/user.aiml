@@ -1,0 +1,26 @@
+# User — registriertes Spielerkonto.
+#
+# Phase 0.2: Minimum für Auth (email+password_hash) und Profil (display_name).
+# `email` ist Primary Key (KV-Key in users-store).
+# `password_hash` ist "pbkdf2$<salt>$<derived>" (neu) bzw. legacy 64-hex sha256
+# (Alt-Konten, lazy migriert beim nächsten Login) — wir hashen NIE plain
+# passwords, auch nicht in Tests (Konsistenz mit DataCreatures).  Format self-
+# describing → kein extra Salt-Feld, KV-Schema unverändert (siehe auth_helpers).
+# Tokens und Session-State leben separat (tokens-KV + Mirror peer_id).
+
+- model:
+    name: User
+    fields:
+      - [email,         string]
+      - [password_hash, string]
+      # display_name (Nickname): case-insensitive eindeutig via Sekundär-Index
+      # (spec/45).  finding_by("display_name", nick) prüft Kollision O(1); im
+      # Spiel wird NUR dieser Name gezeigt (Datenschutz), nie die email.
+      - [display_name,  string, "", { db_indexed: "lower", unique: true }]
+      # player_id: zufällige, stabile Konten-ID.  ERSETZT die email als Identität
+      # in allen Match-/Wire-Strukturen (owner_player_id, ctrl_player_id, …) →
+      # der Gegner-Client sieht nie die email.  Indexed unique: pid→email Reverse-
+      # Lookup via finding_by für Migration/Debug.  Vergeben bei Register (bzw.
+      # lazy in pid_for für Alt-Accounts).
+      - [player_id,     string, "", { db_indexed: true, unique: true }]
+      - [created_at,    i64]

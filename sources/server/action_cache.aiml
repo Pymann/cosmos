@@ -1,0 +1,130 @@
+# ActionCache — `step_key → ActionResult` (doc/spec/92 §92.2, Schritt 4).
+#
+# Ein Treffer ERSETZT die Ausführung.  Damit ist die einzige wirklich
+# gefährliche Eigenschaft ein falscher Treffer: dann liefert der Cache
+# stillschweigend das Ergebnis eines anderen Schritts.  Der Schlüssel muss
+# deshalb jede Größe enthalten, die das Ergebnis beeinflussen kann, und die
+# Teile müssen voneinander getrennt sein.
+#
+#   step_key = sha256(laengencodiert: kind, body_hash, input_tree, cwd, env*,
+#                     cache_class, resolve_out, image_digest)
+#
+# Das `\n` nach jedem Feld ist nicht Kosmetik: ohne Trennzeichen wären
+# ("ab","c") und ("a","bc") derselbe Schlüssel.
+#
+# Env wird kanonisiert (nach Schlüssel sortiert), weil die Reihenfolge, in der
+# ein Aufrufer die Variablen einsammelt, nichts am Schritt ändert — derselbe
+# Schritt muss denselben Schlüssel geben.
+
+- import: "sources/models/cas_action.aiml"
+- import: "sources/models/step.aiml"
+
+- class:
+    name: ActionCache
+    members:
+      - [actions, Kv<string:ActionResult>]
+    methods:
+      - def:
+          name: init
+          access: public
+          args: [[db_dir, path]]
+          body:
+            - set: [<.actions, { call: [db.open_kv, "cas_actions", {persist: true, path: db_dir}] }]
+            - call: [log.info, "[action_cache] bereit (db=${db_dir})"]
+
+      # key: der Schlüssel eines Schritts.  `env` sind die BERÜCKSICHTIGTEN
+      # Variablen als "k=v"; welche das sind, entscheidet der Aufrufer (§AP2.D)
+      # — hier werden sie nur kanonisch eingerechnet.
+      - def:
+          name: key
+          access: public
+          # Der SCHRITT ist das Material, nicht sieben Einzelwerte: mit Klasse
+          # und Sondenausgabe (§92.2) waeren es sieben Argumente, und aimls
+          # Grenze von fuenf (spec/49 §15) hat da recht — sieben Skalare sind
+          # ein Modell, das sich versteckt.  `body_hash` bleibt getrennt, weil
+          # der Aufrufer den Rumpf hasht (er kann gross sein).
+          args: [[step, StepDef], [body_hash, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            # sort() ordnet bytweise (strcmp) — für "k=v"-Paare heisst das nach
+            # Schlüssel, und bei gleichem Schlüssel nach Wert.  Die Kopie ist
+            # nötig, damit die Liste des Aufrufers unberührt bleibt.
+            - decl: [env_sorted, list<string>, step.env]
+            - call: [env_sorted.sort]
+
+            # LÄNGENCODIERT, nicht trennzeichengetrennt (Befund 4, §92.2).
+            # Vorher wurden die Felder mit "\n" verkettet.  Damit ergaben EINE
+            # Variable A="x\nB=y" und ZWEI Variablen A=x, B=y dasselbe Material
+            # und denselben Schlüssel — zwei verschiedene Umgebungen, ein
+            # Cache-Eintrag, also ein falscher Treffer.  Dasselbe galt für ein
+            # "\n" in einem der skalaren Felder.
+            #
+            # Jedes Trennzeichen hat dieses Problem, weil es im Inhalt vorkommen
+            # darf; eine Längenangabe hat es nicht.  `.len` ist strlen, also
+            # byte-genau — damit stimmt die Angabe auch bei Mehrbyte-Zeichen.
+            - decl: [material, string, ""]
+            - decl: [kind_txt, string, step.kind]
+            - set: [material, "${material}${kind_txt.len}:${kind_txt}"]
+            - set: [material, "${material}${body_hash.len}:${body_hash}"]
+            - decl: [in_txt, string, step.input_tree]
+            - set: [material, "${material}${in_txt.len}:${in_txt}"]
+            - decl: [cwd_txt, string, step.cwd]
+            - set: [material, "${material}${cwd_txt.len}:${cwd_txt}"]
+            # Die ANZAHL geht mit ein, damit auch "eine Variable weniger" den
+            # Schlüssel ändert.
+            - decl: [env_count, i32, env_sorted.len]
+            - set: [material, "${material}${env_count}:"]
+            - decl: [eix, i32, 0]
+            - while:
+                condition: { lt: [eix, env_sorted.len] }
+                body:
+                  - decl: [entry, string, { at: [env_sorted, eix] }]
+                  - set: [material, "${material}${entry.len}:${entry}"]
+                  - set: [eix, { +: [eix, 1] }]
+            # Klasse und Sondenausgabe ZULETZT (§92.2).  Die Klasse ist Teil der
+            # Behauptung: derselbe Rumpf als `pure` und als `resolved` sind
+            # nicht derselbe Schritt.  Die Sondenausgabe ist die aufgeloeste
+            # Adresse — sie bewegt den Schluessel, wenn ein Branch sich bewegt.
+            - decl: [cls_txt, string, "${step.cache_class}"]
+            - set: [material, "${material}${cls_txt.len}:${cls_txt}"]
+            - decl: [res_txt, string, step.resolve_out]
+            - set: [material, "${material}${res_txt.len}:${res_txt}"]
+            # Die UMGEBUNG (aiml spec/62 §18, F62-66/67/130): derselbe Befehl in
+            # zwei Abbildern ist nicht derselbe Schritt.  Ohne dieses Feld traf
+            # ein Eintrag aus ubuntu-base auch in debian-base — gruen, falsch,
+            # und am Ergebnis nicht zu sehen.
+            - decl: [img_txt, string, step.image_digest]
+            - set: [material, "${material}${img_txt.len}:${img_txt}"]
+            # Und die FREIGABEN (aiml F62-139): derselbe Befehl, einmal mit
+            # /mnt/quellen und einmal ohne, sieht Verschiedenes.  Mit Name und
+            # Ziel, ohne Inhalt — der ist nicht messbar.
+            - decl: [sh_txt, string, step.shares]
+            - set: [material, "${material}${sh_txt.len}:${sh_txt}"]
+            - return: { call: [hash.sha256, material] }
+
+      # lookup: Treffer oder leeres Ergebnis.  "" als output_tree ist der
+      # Fehlschlag-Marker (jeder echte Baum hat 64 Hex, auch der leere).
+      - def:
+          name: lookup
+          access: public
+          args: [[step_key, string]]
+          return: { type: ActionResult, lifetime: producer }
+          body:
+            - decl: [out, ActionResult]
+            - if:
+                condition: { eq: [{ call: [<.actions.has, step_key] }, 0] }
+                then: [{ return: out }]
+            - set: [out, { call: [<.actions.get_copy, step_key] }]
+            - return: out
+
+      # record: Ergebnis festhalten — AUCH bei exit_code != 0 (§92.2).
+      - def:
+          name: record
+          access: public
+          args: [[step_key, string], [result, ActionResult]]
+          body:
+            - decl: [rec, ActionResult, result]
+            - if:
+                condition: { eq: [rec.created_ms, 0] }
+                then: [{ set: [rec.created_ms, { call: [time.now] }] }]
+            - call: [<.actions.set, step_key, rec]

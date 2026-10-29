@@ -1,0 +1,106 @@
+# ConsoleState — der Netz-Teil der Skript-Konsole (doc/spec/108).
+#
+# Zwei RPCs: `my_clearance` (einmal nach dem Anmelden, damit die Oberflaeche die
+# eigene Freigabe NENNEN kann statt zu raten) und `console_exec` (ein Lauf).
+#
+# Der Lauf laeuft serverseitig in einem eigenen Prozess (F108-5) und kann bis zum
+# Zeitlimit dauern; das Warten ist hier bewusst laenger als bei den anderen RPCs.
+
+- import: "sources/client/net/session_state.aiml"
+- import: "sources/models/console_reqs.aiml"
+- import: "sources/models/level_reqs.aiml"
+
+- class:
+    name: ConsoleState
+    members:
+      - [session,  ref<SessionState>]
+      # Die eigene Freigabe, vom SERVER.  255 bis er etwas anderes sagt — fail closed,
+      # und 0 waere nach spec/65 F65-22 ohnehin ungueltig.
+      - [my_level, i32, 255]
+      - [asked,    i32, 0]
+    methods:
+      # fetch_level: einmal je Sitzung.  Ohne sie zeigte die Oberflaeche „Freigabe —"
+      # und koennte eine Ablehnung nicht erklaeren.
+      - def:
+          name: fetch_level
+          access: public
+          return: i32
+          body:
+            - if: { condition: { eq: [<.session.connected, 0] }, then: [{ return: <.my_level }] }
+            - decl: [req, SetUserLevelReq]
+            - set: [req.token, <.session.token]
+            - decl: [out, ptr<UserLevelResult>, { new: UserLevelResult }]
+            - decl: [got, i32, { call: [<.session.conn.send_and_await, 0, "my_clearance", req, out, 4000] }]
+            - if: { condition: { neq: [got, 1] }, then: [{ return: <.my_level }] }
+            - set: [<.my_level, out.my_level]
+            - set: [<.asked, 1]
+            - return: <.my_level
+
+      # start: einen Lauf ANNEHMEN lassen (doc/spec/108 F108-18).  Der Server fuehrt ihn
+      # in einem eigenen Faden aus und antwortet sofort mit einer Kennung — er darf
+      # waehrend eines Skripts nicht stehen.  Rueckgabe: die Kennung, 0 = abgelehnt.
+      - def:
+          name: start
+          access: public
+          args: [[src, string]]
+          return: { type: ConsoleExecResult, lifetime: producer }
+          body:
+            - decl: [res, ConsoleExecResult]
+            - set: [res.my_level, <.my_level]
+            - set: [res.exit_code, -1]
+            - if:
+                condition: { eq: [<.session.connected, 0] }
+                then: [{ set: [res.message, "keine Verbindung"] }, { return: res }]
+            - decl: [req, ConsoleExecReq]
+            - set: [req.token,  <.session.token]
+            - set: [req.source, src]
+            - decl: [out, ptr<ConsoleExecResult>, { new: ConsoleExecResult }]
+            - decl: [got, i32, { call: [<.session.conn.send_and_await, 0, "console_exec", req, out, 6000] }]
+            - if:
+                condition: { neq: [got, 1] }
+                then: [{ set: [res.message, "Server antwortet nicht"] }, { return: res }]
+            - call: [<.copy_from, out, res]
+            - return: res
+
+      # poll: nach dem Stand eines angenommenen Laufs fragen.  `finished` sagt, ob das
+      # Ergebnis gilt — bis dahin bleibt die Oberflaeche auf „laeuft".
+      - def:
+          name: poll
+          access: public
+          args: [[run_no, i32]]
+          return: { type: ConsoleExecResult, lifetime: producer }
+          body:
+            - decl: [res, ConsoleExecResult]
+            - set: [res.my_level, <.my_level]
+            - set: [res.run_id, run_no]
+            - if:
+                condition: { eq: [<.session.connected, 0] }
+                then: [{ set: [res.message, "keine Verbindung"] }, { return: res }]
+            - decl: [req, ConsoleExecReq]
+            - set: [req.token,   <.session.token]
+            - set: [req.poll_id, run_no]
+            - decl: [out, ptr<ConsoleExecResult>, { new: ConsoleExecResult }]
+            - decl: [got, i32, { call: [<.session.conn.send_and_await, 0, "console_exec", req, out, 6000] }]
+            - if:
+                condition: { neq: [got, 1] }
+                then: [{ set: [res.message, "Server antwortet nicht"] }, { return: res }]
+            - call: [<.copy_from, out, res]
+            - return: res
+
+      # copy_from: die Felder an EINER Stelle uebernehmen — zweimal dieselbe Liste
+      # waere die Stelle, an der beim naechsten Feld eines vergessen wird.
+      - def:
+          name: copy_from
+          args: [[src_p, ptr<ConsoleExecResult>], [dst, ref<ConsoleExecResult>]]
+          body:
+            - set: [dst.success,     src_p.success]
+            - set: [dst.message,     src_p.message]
+            - set: [dst.exit_code,   src_p.exit_code]
+            - set: [dst.output,      src_p.output]
+            - set: [dst.diagnostics, src_p.diagnostics]
+            - set: [dst.duration_ms, src_p.duration_ms]
+            - set: [dst.error_line,  src_p.error_line]
+            - set: [dst.run_id,      src_p.run_id]
+            - set: [dst.finished,    src_p.finished]
+            - set: [dst.my_level,    src_p.my_level]
+            - set: [<.my_level,      src_p.my_level]

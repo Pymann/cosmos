@@ -1,0 +1,172 @@
+# rt_cgroup — Grenzen setzen (doc/spec/110 M4).
+#
+# cgroup v2 ist reines Dateischreiben, also gehört es nach aiml und nicht in die
+# C-Schicht.  Nur EINES muss das Kind selbst tun: sich in die Gruppe eintragen,
+# nach dem `fork` und vor dem `execve` — das macht `rt_shim.c`.
+#
+# Der Ort ist nicht beliebig.  Ein Prozess sitzt in irgendeiner Scope (hier:
+# unter der des Terminals), und dort lässt sich `cgroup.subtree_control` nicht
+# setzen, weil fremde Prozesse darin liegen.  Gesucht ist der nächsthöhere
+# DELEGIERTE Knoten, der die Steuerung schon an seine Kinder weiterreicht.
+
+- extern: "C"
+  defs:
+    - def: { name: rt_set_cgroup, args: [[dir, string]], return: i32 }
+
+- class:
+    name: RtCgroup
+    members:
+      - [home, string]     # delegierter Knoten, "" = keiner gefunden
+      - [mine, string]     # die Gruppe dieses Laufs
+    methods:
+      # find_home: von der eigenen Gruppe aufwärts, bis einer schreibbar ist
+      # UND `memory` an seine Kinder weiterreicht.  Der tiefste gewinnt — je
+      # näher an uns, desto weniger fremde Nachbarn.
+      - def:
+          name: find_home
+          access: public
+          static_off: ["str_cmp"]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [raw, string, { call: [io.read_file, "/proc/self/cgroup"] }]
+            - decl: [mark, i32, { call: [raw.index_of, "::"] }]
+            - if: { condition: { lt: [mark, 0] }, then: [{ set: [<.home, ""] }, { return: "" }] }
+            - decl: [rel, string, { call: [raw.substr, { +: [mark, 2] }] }]
+            - set: [rel, { call: [rel.trim] }]
+            - decl: [parts, list<string>, { call: [rel.split, "/"] }]
+            # Von unten nach oben: den Pfad stückweise wieder abbauen.
+            - decl: [depth, i32, parts.len]
+            - while:
+                condition: { gt: [depth, 0] }
+                body:
+                  - decl: [path, string, "/sys/fs/cgroup"]
+                  - decl: [pix, i32, 0]
+                  - while:
+                      condition: { lt: [pix, depth] }
+                      body:
+                        - decl: [piece, string, { at: [parts, pix] }]
+                        - if: { condition: { gt: [piece.len, 0] }, then: [{ set: [path, "${path}/${piece}"] }] }
+                        - set: [pix, { +: [pix, 1] }]
+                  - set: [depth, { -: [depth, 1] }]
+                  - if:
+                      condition: { eq: [{ call: [io.can_write, path] }, false] }
+                      then: [{ set: [pix, pix] }]
+                      else:
+                        - decl: [sub, string, { call: [io.read_file, "${path}/cgroup.subtree_control"] }]
+                        - if:
+                            condition: { ge: [{ call: [sub.index_of, "memory"] }, 0] }
+                            then:
+                              - set: [<.home, path]
+                              - return: path
+            - set: [<.home, ""]
+            - return: ""
+
+      # open_group: eine eigene Gruppe anlegen und die Grenzen hineinschreiben.
+      # `0` bei einer Grenze heißt: nicht setzen (der Kernel-Vorgabewert "max"
+      # bleibt stehen) — eine Grenze von null wäre sinnlos.
+      - def:
+          name: open_group
+          access: public
+          static_off: ["str_cmp"]
+          args: [[name, string], [mem_bytes, i64], [pids_max, i32], [cpu_cores, i32]]
+          return: i32
+          body:
+            - if: { condition: { eq: [<.home.len, 0] }, then: [{ call: [<.find_home] }] }
+            - if: { condition: { eq: [<.home.len, 0] }, then: [{ return: 0 }] }
+            - decl: [dir, string, "${<.home}/${name}"]
+            - call: [io.mkdir_all, dir]
+            - if: { condition: { eq: [{ call: [io.is_dir, dir] }, false] }, then: [{ return: 0 }] }
+            - set: [<.mine, dir]
+            - if:
+                condition: { gt: [mem_bytes, 0] }
+                then:
+                  - call: [<.put, "memory.max", "${mem_bytes}"]
+                  # Ohne diese Zeile ist die Grenze weich: der Kernel lagert aus,
+                  # statt einzugreifen.  Gemessen 18.10.2026: Spitzenbedarf genau
+                  # `memory.max`, Prozess lebt weiter, `oom_kill 0`.  Ein Container,
+                  # der seine Grenze ueberschreitet, soll aber ENDEN.
+                  - call: [<.put, "memory.swap.max", "0"]
+            - if: { condition: { gt: [pids_max, 0] }, then: [{ call: [<.put, "pids.max", "${pids_max}"] }] }
+            # cpu.max ist eine QUOTE je Periode, keine Anzahl (doc/spec/110
+            # F110-92): 4 Kerne sind „400000 100000".  Die Pipeline nennt Kerne,
+            # weil das die Einheit ist, in der Menschen rechnen — die Umrechnung
+            # gehoert hierher.
+            - if:
+                condition: { gt: [cpu_cores, 0] }
+                then:
+                  - decl: [quota, i64, { '*': [{ cast: [cpu_cores, i64] }, 100000] }]
+                  - call: [<.put, "cpu.max", "${quota} 100000"]
+            - call: [rt_set_cgroup, dir]
+            - return: 1
+
+      # put: eine Zahl in eine cgroup-Datei.  Kein `write_file` in aiml, also
+      # öffnen/schreiben/schließen — und still scheitern darf es nicht.
+      - def:
+          name: put
+          access: public
+          static_off: ["str_cmp"]
+          args: [[leaf, string], [value, string]]
+          return: i32
+          body:
+            - decl: [where, string, "${<.mine}/${leaf}"]
+            - decl: [handle, file_handle, { call: [io.open, where, "w"] }]
+            - if:
+                condition: { eq: [handle, null] }
+                then: [{ call: [log.warn, "[rt] ${leaf} nicht schreibbar (${where})"] }, { return: 0 }]
+            - call: [io.write, handle, value]
+            - call: [io.close, handle]
+            - return: 1
+
+      # read_back: was wirklich gilt — nicht, was wir geschrieben haben.
+      - def:
+          name: read_back
+          access: public
+          static_off: ["str_cmp"]
+          args: [[leaf, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - if: { condition: { eq: [<.mine.len, 0] }, then: [{ return: "—" }] }
+            - decl: [raw, string, { call: [io.read_file, "${<.mine}/${leaf}"] }]
+            - if: { condition: { eq: [raw.len, 0] }, then: [{ return: "—" }] }
+            - return: { call: [raw.trim] }
+
+      # event_count: eine Zahl aus `memory.events`.  Das ist das EIGENTLICHE
+      # Instrument für M4: ein fehlgeschlagener Befehl kann tausend Gründe
+      # haben, `oom_kill` zählt nur einen — den Eingriff wegen der Grenze.
+      - def:
+          name: event_count
+          access: public
+          static_off: ["str_cmp"]
+          args: [[key, string]]
+          return: i64
+          body:
+            - if: { condition: { eq: [<.mine.len, 0] }, then: [{ return: -1 }] }
+            - decl: [raw, string, { call: [io.read_file, "${<.mine}/memory.events"] }]
+            - decl: [rows, list<string>, { call: [raw.split, "\n"] }]
+            - decl: [rix, i32, 0]
+            - while:
+                condition: { lt: [rix, rows.len] }
+                body:
+                  - decl: [row, string, { at: [rows, rix] }]
+                  - set: [rix, { +: [rix, 1] }]
+                  - if:
+                      condition: { eq: [{ call: [row.starts_with, "${key} "] }, 1] }
+                      then:
+                        - decl: [tail_part, string, { call: [row.substr, { +: [key.len, 1] }] }]
+                        - decl: [clean, string, { call: [tail_part.trim] }]
+                        # `cast` kennt keinen String → Zahl; dafuer gibt es parse_i32.
+                        - return: { cast: [{ call: [clean.parse_i32] }, i64] }
+            - return: -1
+
+      # close_group: die Gruppe wieder abräumen.  Ein zurückgelassener Knoten
+      # ist kein Leck an Speicher, aber eines an Zustand — und beim nächsten
+      # Lauf steht er mit alten Grenzen im Weg.
+      - def:
+          name: close_group
+          access: public
+          static_off: ["str_cmp"]
+          body:
+            - if: { condition: { eq: [<.mine.len, 0] }, then: [{ return }] }
+            - call: [rt_set_cgroup, ""]
+            - call: [io.remove, <.mine]
+            - set: [<.mine, ""]

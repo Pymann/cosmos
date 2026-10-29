@@ -1,0 +1,9 @@
+# Cosmos browser/native client entry point.
+- import: "sources/client/cosmos_app.aiml"
+
+- def:
+    name: main
+    return: i32
+    body:
+      - decl: [app, ptr<CosmosApp>, { new: CosmosApp }]
+      - return: { call: [cosmos_run, app] }

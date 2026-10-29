@@ -1,0 +1,230 @@
+# RPC "provision_agent" (doc/spec/94 §94.5a) — der Knopfdruck aus der App.
+#
+# Zwei Strecken: der RPC bringt den Auftrag vom Browser zum Server, die
+# Installation selbst läuft von hier per SSH zum Knoten.  Der Browser kann kein
+# SSH sprechen (keine TCP-Sockets in WASM, aiml-spec/32_6 §8), und selbst wenn
+# er könnte, müsste das Enrollment-Token erst zu ihm und dann zum Knoten — es
+# wird hier erzeugt und verlässt den Server nur über den SSH-Kanal (§AP1.9).
+#
+# Zweiphasig: ohne erwarteten Fingerprint wird KEIN Schritt ausgeführt, sondern
+# der Fingerprint zum Anzeigen zurückgegeben (§94.3 S4).
+#
+# KEIN Logeintrag enthält das sudo-Passwort oder den Request (§94.3 S2).
+
+- import: "sources/models/provision_reqs.aiml"
+- import: "sources/models/agent_token_reqs.aiml"
+
+- groupmethods:
+    group: CosmosRuntime
+    instances:
+      - instance: provision_agent
+        methods:
+          - def:
+              name: run
+              static_off: ["str_cmp"]
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, ProvisionReq]
+                - decl: [res, ProvisionResp]
+                - if:
+                    condition: { neq: [{ call: [session.decode_rpc, rpc, req] }, 0] }
+                    then:
+                      - set: [res.message, "malformed provision request"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, res]
+                      - return: []
+
+                # Einrichten ist eine authentifizierte Aktion wie jede andere
+                # (§94.3 S5) — und zwar BEVOR irgendetwas verbunden wird.
+                - decl: [req_pid, string, { call: [<.auth.pid_for_token, req.token] }]
+                - if:
+                    condition: { eq: [req_pid.len, 0] }
+                    then:
+                      - set: [res.failed_step, "unauthorized"]
+                      - set: [res.message, "nicht angemeldet"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, res]
+                      - return: []
+                - if:
+                    condition: { eq: [req.host.len, 0] }
+                    then:
+                      - set: [res.failed_step, "host"]
+                      - set: [res.message, "kein Host angegeben"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, res]
+                      - return: []
+
+                - decl: [port, i32, req.port]
+                - if: { condition: { lt: [port, 1] }, then: [{ set: [port, 22] }] }
+                - decl: [cfg, ProvisionConfig, { call: [<.provisioner.defaults_from_env, req.host, port, req.login_user] }]
+
+                # ── Phase 1: Fingerprint holen, nichts ausführen ───────────
+                # Ohne bestätigten Fingerprint wird kein Token erzeugt und kein
+                # Schritt gefahren — sonst hätte ein Lauf gegen den falschen
+                # Knoten schon ein Token verbraucht.
+                - if:
+                    condition: { eq: [req.expected_fp.len, 0] }
+                    then:
+                      - decl: [empty_steps, list<ProvisionStep>]
+                      - decl: [probe, ProvisionResult, { call: [<.provisioner.run, cfg, empty_steps, "", req.login_password, ""] }]
+                      - set: [res.failed_step, probe.failed_step]
+                      - set: [res.message, probe.message]
+                      - set: [res.fingerprint, probe.fingerprint]
+                      - call: [log.info, "[provision] ${req.host}: Fingerprint zur Bestaetigung geliefert"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, res]
+                      - return: []
+
+                # ── Phase 2: einrichten ────────────────────────────────────
+                # Das Enrollment-Token entsteht hier; die Antwort nennt nur die
+                # Kennung, nie das Geheimnis (§AP1.9).
+                - decl: [label, string, req.label]
+                - if: { condition: { eq: [label.len, 0] }, then: [{ set: [label, req.host] }] }
+                # Name und Etiketten in die Einrichtung: sie landen in der
+                # Dienst-Einheit (`--agent-id`, `--labels`).  Ohne Namen hiess
+                # jeder eingerichtete Knoten gleich.
+                - set: [cfg.agent_id, req.agent_id]
+                - if: { condition: { eq: [cfg.agent_id.len, 0] }, then: [{ set: [cfg.agent_id, label] }] }
+                - set: [cfg.agent_labels, req.agent_labels]
+                - decl: [tok_new, AgentTokenNew, { call: [<.tokens.create, label, req_pid] }]
+                - if:
+                    condition: { eq: [tok_new.secret.len, 0] }
+                    then:
+                      - set: [res.failed_step, "token"]
+                      - set: [res.message, "Enrollment-Token liess sich nicht erzeugen"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, res]
+                      - return: []
+                - set: [res.token_id, tok_new.token_id]
+
+                - decl: [envm, map<string:string>, { call: [sys.env] }]
+                - decl: [bin_path, string, "./agent"]
+                - if: { condition: { gt: [{ call: [envm.contains, "COSMOS_AGENT_BINARY"] }, 0] }, then: [{ set: [bin_path, { call: [envm.get, "COSMOS_AGENT_BINARY"] }] }] }
+                - decl: [exec_url, string, "ws://127.0.0.1:8765"]
+                - if: { condition: { gt: [{ call: [envm.contains, "COSMOS_PROV_EXEC_URL"] }, 0] }, then: [{ set: [exec_url, { call: [envm.get, "COSMOS_PROV_EXEC_URL"] }] }] }
+
+                # Die Laufzeit neben dem Binary; COSMOS_AGENT_RUNTIME ueberschreibt.
+                - decl: [rt_path, string, "./deploy/runtime.tar.gz"]
+                - if: { condition: { gt: [{ call: [envm.contains, "COSMOS_AGENT_RUNTIME"] }, 0] }, then: [{ set: [rt_path, { call: [envm.get, "COSMOS_AGENT_RUNTIME"] }] }] }
+
+                - decl: [bin_p, path, bin_path]
+                - decl: [rt_p, path, rt_path]
+                - decl: [steps, list<ProvisionStep>, { call: [<.provisioner.plan, cfg, bin_p, rt_p, tok_new.secret, exec_url] }]
+                # Ab hier NEBENHER.  Die 18 Schritte dauern Sekunden bis Minuten;
+                # in der Server-Schleife ausgefuehrt legten sie die ganze
+                # Steuerebene still (gemessen 2026-10-15: neun Sekunden ohne
+                # Antwort, der Agent verlor sein Lehen).  Der Aufruf meldet
+                # jetzt nur „angenommen"; `provision_status` berichtet den Stand.
+                - if:
+                    condition: { eq: [{ call: [<.prov_job.is_running] }, 1] }
+                    then:
+                      - set: [res.failed_step, "busy"]
+                      - set: [res.message, "Es laeuft bereits eine Einrichtung — bitte abwarten."]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, res]
+                      - return: []
+                - call: [<.prov_job.prepare]
+                - call: [<.prov_job.set_job, cfg, steps, req.expected_fp, req.login_password, req.sudo_password]
+                - decl: [worker, thread_handle, { spawn: [provision_worker_main, <.prov_job] }]
+                - call: [worker.detach]
+                - set: [res.success, 0]
+                - set: [res.running, 1]
+                - set: [res.message, "Einrichtung laeuft — der Stand kommt ueber provision_status."]
+                - call: [log.info, "[provision] ${req.host}: Einrichtung im Hintergrund gestartet (${steps.len} Schritte)"]
+                - call: [session.reply_rpc, rpc, "set_result", 0, res]
+
+      # ── provision_status: wie weit ist die Einrichtung? ─────────────────
+      - instance: provision_status
+        methods:
+          - def:
+              name: run
+              static_off: ["str_cmp"]
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, ProvisionReq]
+                - decl: [res, ProvisionResp]
+                - if:
+                    condition: { neq: [{ call: [session.decode_rpc, rpc, req] }, 0] }
+                    then:
+                      - set: [res.message, "malformed status request"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, res]
+                      - return: []
+                - decl: [req_pid, string, { call: [<.auth.pid_for_token, req.token] }]
+                - if:
+                    condition: { eq: [req_pid.len, 0] }
+                    then:
+                      - set: [res.failed_step, "unauthorized"]
+                      - set: [res.message, "nicht angemeldet"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, res]
+                      - return: []
+                - decl: [snap, ProvisionResult, { call: [<.prov_job.snapshot] }]
+                - set: [res.running, { call: [<.prov_job.is_running] }]
+                - set: [res.success, snap.success]
+                - set: [res.failed_step, snap.failed_step]
+                - set: [res.message, snap.message]
+                - set: [res.steps_done, snap.steps_done]
+                - if: { condition: { eq: [res.running, 1] }, then: [{ set: [res.message, "Einrichtung laeuft…"] }] }
+                - call: [session.reply_rpc, rpc, "set_result", 0, res]
+
+      - instance: deprovision_agent
+        methods:
+          - def:
+              name: run
+              static_off: ["str_cmp"]
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, ProvisionReq]
+                - decl: [res, ProvisionResp]
+                - if:
+                    condition: { neq: [{ call: [session.decode_rpc, rpc, req] }, 0] }
+                    then:
+                      - set: [res.message, "malformed deprovision request"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, res]
+                      - return: []
+                - decl: [req_pid, string, { call: [<.auth.pid_for_token, req.token] }]
+                - if:
+                    condition: { eq: [req_pid.len, 0] }
+                    then:
+                      - set: [res.failed_step, "unauthorized"]
+                      - set: [res.message, "nicht angemeldet"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, res]
+                      - return: []
+
+                - decl: [port, i32, req.port]
+                - if: { condition: { lt: [port, 1] }, then: [{ set: [port, 22] }] }
+                - decl: [cfg, ProvisionConfig, { call: [<.provisioner.defaults_from_env, req.host, port, req.login_user] }]
+
+                # Phase 1 wie bei der Einrichtung: ohne bestaetigten Fingerprint
+                # wird NICHTS angefasst.
+                - if:
+                    condition: { eq: [req.expected_fp.len, 0] }
+                    then:
+                      - decl: [empty_steps, list<ProvisionStep>]
+                      - decl: [probe, ProvisionResult, { call: [<.provisioner.run_teardown, cfg, empty_steps, "", req.login_password, ""] }]
+                      - set: [res.failed_step, probe.failed_step]
+                      - set: [res.message, probe.message]
+                      - set: [res.fingerprint, probe.fingerprint]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, res]
+                      - return: []
+
+                # Das Token ZUERST widerrufen (§94.5b Schritt 1).  Das ist der
+                # eigentliche Ausschalter: eine geloeschte Datei auf dem Knoten
+                # macht das Token nicht ungueltig, und solange es gilt, kann
+                # sich dort jederzeit wieder ein Agent anmelden.  Darum auch
+                # VOR dem SSH-Teil — selbst wenn der Knoten unerreichbar ist,
+                # soll das Token weg sein.
+                - decl: [revoked, i32, 0]
+                - if:
+                    condition: { gt: [req.token_id.len, 0] }
+                    then:
+                      - set: [revoked, { call: [<.tokens.revoke, req.token_id] }]
+                      - call: [log.info, "[deprovision] Token ${req.token_id} widerrufen=${revoked}"]
+                - set: [res.token_id, req.token_id]
+
+                - decl: [steps, list<ProvisionStep>, { call: [<.provisioner.teardown_plan, cfg] }]
+                - decl: [out, ProvisionResult, { call: [<.provisioner.run_teardown, cfg, steps, req.expected_fp, req.login_password, req.sudo_password] }]
+                - set: [res.success, out.success]
+                - set: [res.failed_step, out.failed_step]
+                - set: [res.message, out.message]
+                - set: [res.fingerprint, out.fingerprint]
+                - set: [res.steps_done, out.steps_done]
+                - if:
+                    condition: { '&&': [{ gt: [req.token_id.len, 0] }, { neq: [revoked, 1] }] }
+                    then: [{ set: [res.message, "${out.message} (Hinweis: Token ${req.token_id} liess sich NICHT widerrufen)"] }]
+                - call: [log.info, "[deprovision] ${req.host}: success=${out.success} step='${out.failed_step}' steps=${out.steps_done}"]
+                - call: [session.reply_rpc, rpc, "set_result", 0, res]
+

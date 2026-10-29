@@ -1,0 +1,276 @@
+# rt_exec — einen Prozess in seinen Namespaces starten (doc/spec/110 M1).
+#
+# Die Unterkante (`rt_shim.c`) kann `unshare`, ID-Abbildung und `execve`; hier
+# steht, WAS sie tun soll — aus dem Bundle gerechnet, nicht geraten.
+#
+# Die Trennung ist nicht Geschmack: `CLONE_NEWUSER` verlangt einen EINFAEDIGEN
+# Prozess (F110-2), und die Argumentliste von `execve` ist ein `char* const[]`,
+# das die aiml-FFI nicht kennt (F110-1).  Beides loest die C-Schicht, ohne
+# Politik zu enthalten.
+
+- import: "sources/runtime/rt_bundle.aiml"
+
+- extern: "C"
+  defs:
+    - def: { name: rt_args_reset, args: [], return: void }
+    - def: { name: rt_args_push,  args: [[val, string]], return: i32 }
+    - def: { name: rt_env_reset,  args: [], return: void }
+    - def: { name: rt_env_push,   args: [[val, string]], return: i32 }
+    - def: { name: rt_ns_bit,     args: [[kind, string]], return: i32 }
+    - def: { name: rt_run,        args: [[exe, string], [cwd, string], [ns_flags, i32]], return: i32 }
+    - def: { name: rt_seccomp_reset, args: [], return: void }
+    - def: { name: rt_seccomp_deny,  args: [[name, string]], return: i32 }
+    - def: { name: rt_seccomp_count, args: [], return: i32 }
+    - def: { name: rt_set_subids, args: [[uid_start, i32], [uid_count, i32], [gid_start, i32], [gid_count, i32]], return: void }
+    - def: { name: rt_keep_caps,  args: [[keep, i32]], return: void }
+
+- class:
+    name: RtRunner
+    members:
+      # Was zuletzt zusammengestellt wurde — damit eine Probe es PRUEFEN kann,
+      # ohne den Prozess wirklich zu starten.
+      - [flags_now, i32]
+      - [argc_now,  i32]
+    methods:
+      # ns_flags: aus `linux.namespaces` die CLONE_NEW*-Bits.  Ein unbekannter
+      # Eintrag liefert 0 und wird damit still uebergangen — die OCI-Spec waechst,
+      # und ein Bundle mit einem neuen Namespace-Typ soll nicht am Leser scheitern.
+      - def:
+          name: ns_flags
+          access: public
+          static_off: ["str_cmp"]
+          args: [[conf, ref<RtConfig>]]
+          return: i32
+          body:
+            - decl: [bits, i32, 0]
+            - decl: [nix, i32, 0]
+            - while:
+                condition: { lt: [nix, conf.linux.namespaces.len] }
+                body:
+                  - decl: [one, RtNamespace, { at: [conf.linux.namespaces, nix] }]
+                  - set: [bits, { bor: [bits, { call: [rt_ns_bit, one.type] }] }]
+                  - set: [nix, { +: [nix, 1] }]
+            - set: [<.flags_now, bits]
+            - return: bits
+
+      # ── seccomp: die AUSWAHL ist Politik und steht hier ─────────────────
+      # Die Nummern kennt die C-Schicht aus den libc-Headern; welche Aufrufe
+      # verboten sind, entscheidet diese Liste.  Sie ist bewusst klein und
+      # benannt: ein Profil, das niemand lesen kann, prueft auch niemand.
+      - def:
+          name: deny_default
+          access: public
+          static_off: ["str_cmp"]
+          return: i32
+          body:
+            - call: [rt_seccomp_reset]
+            # Kernel-Verwaltung: nichts davon hat eine Nutzlast zu suchen.
+            - call: [rt_seccomp_deny, "mount"]
+            - call: [rt_seccomp_deny, "umount2"]
+            - call: [rt_seccomp_deny, "pivot_root"]
+            - call: [rt_seccomp_deny, "chroot"]
+            - call: [rt_seccomp_deny, "reboot"]
+            - call: [rt_seccomp_deny, "kexec_load"]
+            - call: [rt_seccomp_deny, "init_module"]
+            - call: [rt_seccomp_deny, "finit_module"]
+            - call: [rt_seccomp_deny, "delete_module"]
+            # Beobachten und Einklinken: Wege zu fremden Prozessen.
+            - call: [rt_seccomp_deny, "ptrace"]
+            - call: [rt_seccomp_deny, "process_vm_readv"]
+            - call: [rt_seccomp_deny, "process_vm_writev"]
+            - call: [rt_seccomp_deny, "perf_event_open"]
+            - call: [rt_seccomp_deny, "bpf"]
+            # Namespaces wechseln oder neu aufmachen.
+            - call: [rt_seccomp_deny, "setns"]
+            - call: [rt_seccomp_deny, "unshare"]
+            # Schluesselbund, Uhr, Auslagerung.
+            - call: [rt_seccomp_deny, "keyctl"]
+            - call: [rt_seccomp_deny, "add_key"]
+            - call: [rt_seccomp_deny, "request_key"]
+            - call: [rt_seccomp_deny, "settimeofday"]
+            - call: [rt_seccomp_deny, "clock_settime"]
+            - call: [rt_seccomp_deny, "swapon"]
+            - call: [rt_seccomp_deny, "swapoff"]
+            - return: { call: [rt_seccomp_count] }
+
+      # deny_nested: fuer einen Container, dessen NUTZLAST selbst einsperrt
+      # (der Agent sandboxt jeden Schritt mit bwrap, doc/spec/91).
+      #
+      # Derselbe Satz wie `deny_default`, ohne die vier Aufrufe, die das
+      # Einsperren AUSMACHEN: `mount`, `umount2`, `pivot_root`, `unshare`.  Ohne
+      # sie scheiterte der Sandkasten im Container an `unshare: Operation not
+      # permitted` — mit vollen Capabilities, denn das Verbot kam von uns selbst
+      # (gemessen 21.10.2026, doc/spec/110 F110-58).
+      #
+      # Die Grenze nach aussen bleibt dieselbe: der User-Namespace des
+      # Containers, seine cgroup und die schreibgeschuetzte Wurzel.  Was drinnen
+      # geschieht, bekommt eine ZWEITE Grenze — keine schwaechere erste.
+      - def:
+          name: deny_nested
+          access: public
+          static_off: ["str_cmp"]
+          return: i32
+          body:
+            - call: [rt_seccomp_reset]
+            - call: [rt_seccomp_deny, "chroot"]
+            - call: [rt_seccomp_deny, "reboot"]
+            - call: [rt_seccomp_deny, "kexec_load"]
+            - call: [rt_seccomp_deny, "init_module"]
+            - call: [rt_seccomp_deny, "finit_module"]
+            - call: [rt_seccomp_deny, "delete_module"]
+            - call: [rt_seccomp_deny, "ptrace"]
+            - call: [rt_seccomp_deny, "process_vm_readv"]
+            - call: [rt_seccomp_deny, "process_vm_writev"]
+            - call: [rt_seccomp_deny, "perf_event_open"]
+            - call: [rt_seccomp_deny, "bpf"]
+            - call: [rt_seccomp_deny, "setns"]
+            - call: [rt_seccomp_deny, "keyctl"]
+            - call: [rt_seccomp_deny, "add_key"]
+            - call: [rt_seccomp_deny, "request_key"]
+            - call: [rt_seccomp_deny, "settimeofday"]
+            - call: [rt_seccomp_deny, "clock_settime"]
+            - call: [rt_seccomp_deny, "swapon"]
+            - call: [rt_seccomp_deny, "swapoff"]
+            - return: { call: [rt_seccomp_count] }
+
+      - def:
+          name: deny_only
+          access: public
+          static_off: ["str_cmp"]
+          args: [[name, string]]
+          return: i32
+          body:
+            - call: [rt_seccomp_reset]
+            - return: { call: [rt_seccomp_deny, name] }
+
+      - def:
+          name: deny_none
+          access: public
+          body: [{ call: [rt_seccomp_reset] }]
+
+      # keep_caps: Capabilities IM NAMESPACE behalten (nur fuer Bau-Container).
+      # Sie gelten gegenueber den abgebildeten Kennungen, nicht gegenueber dem
+      # Host; `no_new_privs` bleibt gesetzt.
+      - def:
+          name: keep_caps
+          access: public
+          args: [[keep, i32]]
+          body: [{ call: [rt_keep_caps, keep] }]
+
+      # use_subids: den untergeordneten ID-Bereich aus /etc/subuid uebernehmen.
+      #
+      # Ohne ihn hat der Container GENAU eine Kennung — zum Laufen genug, zum
+      # BAUEN nicht: `dpkg` legt Dateien unter verschiedenen Benutzern an, und
+      # ein `chown` auf eine nicht abgebildete ID scheitert.  Mit Bereich stehen
+      # 65536 Kennungen zur Verfuegung.  Fehlt der Eintrag, bleibt es bei der
+      # einen — dann laeuft der Container, aber `apt` nicht.
+      - def:
+          name: use_subids
+          access: public
+          static_off: ["str_cmp"]
+          args: [[who, string]]
+          return: i32
+          body:
+            - decl: [uid_start, i32, 0]
+            - decl: [uid_count, i32, 0]
+            - decl: [raw, string, { call: [io.read_file, "/etc/subuid"] }]
+            - decl: [rows, list<string>, { call: [raw.split, "\n"] }]
+            - decl: [rix, i32, 0]
+            - while:
+                condition: { lt: [rix, rows.len] }
+                body:
+                  - decl: [row, string, { at: [rows, rix] }]
+                  - set: [rix, { +: [rix, 1] }]
+                  - if:
+                      condition: { eq: [{ call: [row.starts_with, "${who}:"] }, 1] }
+                      then:
+                        - decl: [cols, list<string>, { call: [row.split, ":"] }]
+                        - if:
+                            condition: { ge: [cols.len, 3] }
+                            then:
+                              - decl: [start_txt, string, { at: [cols, 1] }]
+                              - decl: [count_txt, string, { at: [cols, 2] }]
+                              - set: [uid_start, { call: [start_txt.parse_i32] }]
+                              - set: [uid_count, { call: [count_txt.parse_i32] }]
+            - if: { condition: { le: [uid_count, 0] }, then: [{ return: 0 }] }
+            # /etc/subgid wird hier gleich behandelt: unterschiedliche Bereiche
+            # fuer uid und gid sind moeglich, aber selten — und wenn, meldet
+            # `newgidmap` es laut.
+            - call: [rt_set_subids, uid_start, uid_count, uid_start, uid_count]
+            - return: uid_count
+
+      # bit_for: das CLONE_NEW*-Bit eines Namespace-Namens.  Die `extern`-Kante
+      # gilt nur in dieser Datei (aiml spec/21 §2.1) — und das ist gut so: die
+      # C-Schicht hat genau EINEN Anschluss, nicht einen je Aufrufer.
+      - def:
+          name: bit_for
+          access: public
+          static_off: ["str_cmp"]
+          args: [[kind, string]]
+          return: i32
+          body: [{ return: { call: [rt_ns_bit, kind] } }]
+
+      # prepare: Argumente und Umgebung in die C-Schicht schieben.
+      # Getrennt vom Start, damit eine Probe den Aufbau pruefen kann.
+      - def:
+          name: prepare
+          access: public
+          static_off: ["str_cmp"]
+          args: [[conf, ref<RtConfig>]]
+          return: i32
+          body:
+            - call: [rt_args_reset]
+            - call: [rt_env_reset]
+            - decl: [aix, i32, 0]
+            - while:
+                condition: { lt: [aix, conf.process.args.len] }
+                body:
+                  - decl: [arg, string, { at: [conf.process.args, aix] }]
+                  - if:
+                      condition: { neq: [{ call: [rt_args_push, arg] }, 0] }
+                      then: [{ call: [log.error, "[rt] zu viele Argumente"] }, { return: 0 }]
+                  - set: [aix, { +: [aix, 1] }]
+            - decl: [eix, i32, 0]
+            - while:
+                condition: { lt: [eix, conf.process.env.len] }
+                body:
+                  - decl: [one_env, string, { at: [conf.process.env, eix] }]
+                  - if:
+                      condition: { neq: [{ call: [rt_env_push, one_env] }, 0] }
+                      then: [{ call: [log.error, "[rt] zu viele Umgebungsvariablen"] }, { return: 0 }]
+                  - set: [eix, { +: [eix, 1] }]
+            - set: [<.argc_now, conf.process.args.len]
+            - return: 1
+
+      # start: ausfuehren und auf das Ende warten.  Rueckgabe ist der Exit-Code
+      # des Kindes; negative Werte sind Einrichtungsfehler der Unterkante.
+      - def:
+          name: start
+          access: public
+          static_off: ["str_cmp"]
+          args: [[conf, ref<RtConfig>]]
+          return: i32
+          body:
+            - if: { condition: { eq: [{ call: [<.prepare, conf] }, 0] }, then: [{ return: -1 }] }
+            - decl: [bits, i32, { call: [<.ns_flags, conf] }]
+            - decl: [exe, string, { at: [conf.process.args, 0] }]
+            - return: { call: [rt_run, exe, conf.process.cwd, bits] }
+
+      # run_once: ein einzelner Befehl ohne Bundle — fuer Proben und Messungen.
+      # Kein zweiter Ausfuehrungsweg: er baut dieselbe Argumentliste und ruft
+      # dieselbe Unterkante.
+      - def:
+          name: run_once
+          access: public
+          static_off: ["str_cmp"]
+          args: [[exe, string], [arg_one, string], [arg_two, string], [bits, i32]]
+          return: i32
+          body:
+            - call: [rt_args_reset]
+            - call: [rt_env_reset]
+            - call: [rt_args_push, exe]
+            - if: { condition: { gt: [arg_one.len, 0] }, then: [{ call: [rt_args_push, arg_one] }] }
+            - if: { condition: { gt: [arg_two.len, 0] }, then: [{ call: [rt_args_push, arg_two] }] }
+            - call: [rt_env_push, "PATH=/usr/bin:/bin"]
+            - set: [<.flags_now, bits]
+            - return: { call: [rt_run, exe, "/", bits] }

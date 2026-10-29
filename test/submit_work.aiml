@@ -1,0 +1,189 @@
+# submit_work — Arbeit einreichen, ohne auf einen Agenten zu warten.
+#
+# Gebraucht fuer den Nachweis der Kapazitaetsschleife (doc/spec/110 M7): die
+# vorhandene Abnahme `e2e_pipeline_run` wartet ERST auf einen Agenten und reicht
+# DANN ein — damit kann ein Controller, der Agenten erst bei Bedarf startet, sie
+# nie bedienen (er wartet auf Arbeit, sie wartet auf ihn).
+#
+# Dieses Werkzeug reicht ein und geht.  Was danach geschieht, steht im
+# Server-Log.
+#
+# Aufruf: COSMOS_E2E_URL=ws://127.0.0.1:8765 ./submit_work
+# Expected exit code: 0
+
+- import: "test/rpc_surface.aiml"
+
+- def:
+    name: plain_pipeline
+    static_off: ["str_cmp"]
+    return: { type: string, lifetime: producer }
+    body:
+      # `runs_on: container` — und genau DAS ist der Nachweis: der Schritt darf
+      # nur von einem Agenten mit diesem Etikett genommen werden.  Ohne Label
+      # koennte ihn jeder Anwesende nehmen, und der Controller haette zu Recht
+      # keinen Grund, etwas zu starten (gemessen 18.10.2026).
+      - decl: [src, string, "- pipeline:\n"]
+      - set: [src, "${src}    name: rt_autoscale_probe\n"]
+      - set: [src, "${src}    params:\n"]
+      - set: [src, "${src}      - [arch, string, [x86_64]]\n"]
+      - set: [src, "${src}    steps:\n"]
+      - set: [src, "${src}      - stage:\n"]
+      - set: [src, "${src}          name: sagen\n"]
+      - set: [src, "${src}          runs_on: container\n"]
+      - set: [src, "${src}          steps:\n"]
+      - set: [src, "${src}            - step:\n"]
+      - set: [src, "${src}                name: hallo\n"]
+      - set: [src, "${src}                cache: opaque\n"]
+      - set: [src, "${src}                args: [arch]\n"]
+      - set: [src, "${src}                return: i32\n"]
+      - set: [src, "${src}                body:\n"]
+      - set: [src, "${src}                  - return: 0\n"]
+      - return: src
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [envm, map<string:string>, { call: [sys.env] }]
+      - decl: [url, string, "ws://127.0.0.1:8765"]
+      - if: { condition: { gt: [{ call: [envm.contains, "COSMOS_E2E_URL"] }, 0] }, then: [{ set: [url, { call: [envm.get, "COSMOS_E2E_URL"] }] }] }
+
+      - decl: [cli, ptr<RpcSurface>, { new: RpcSurface }]
+      - if:
+          condition: { neq: [{ call: [cli.connect, url] }, 1] }
+          then: [{ call: [log.error, "[submit] keine Verbindung zu ${url}"] }, { return: 1 }]
+
+      # Ein vorhandenes Konto wiederverwenden, wenn eines genannt ist: cosmos
+      # bremst Registrierungen je IP (`reg_throttle`) — zu Recht, aber ein
+      # Werkzeug, das man mehrmals braucht, darf nicht daran scheitern.
+      - decl: [now_ms, i64, { call: [time.now] }]
+      - decl: [mail, string, "submit_${now_ms}@example.test"]
+      - decl: [pass, string, "pw-submit-1"]
+      - decl: [tok_len, i32, 0]
+      - if:
+          condition: { gt: [{ call: [envm.contains, "COSMOS_SUBMIT_MAIL"] }, 0] }
+          then:
+            - set: [mail, { call: [envm.get, "COSMOS_SUBMIT_MAIL"] }]
+            - if: { condition: { gt: [{ call: [envm.contains, "COSMOS_SUBMIT_PW"] }, 0] }, then: [{ set: [pass, { call: [envm.get, "COSMOS_SUBMIT_PW"] }] }] }
+            # register_and_login vertraegt ein VORHANDENES Konto (es meldet sich
+            # dann einfach an).  Damit braucht es keinen zweiten Weg — und ein
+            # genannter Zugang funktioniert beim ERSTEN Mal genauso wie beim
+            # zehnten.
+            - set: [tok_len, { call: [cli.register_and_login, mail, pass] }]
+          else: [{ set: [tok_len, { call: [cli.register_and_login, mail, pass] }] }]
+      - if:
+          condition: { eq: [tok_len, 0] }
+          then: [{ call: [log.error, "[submit] Anmeldung fehlgeschlagen"] }, { return: 1 }]
+
+      # Eine Pipeline aus einer DATEI, wenn eine genannt ist — sonst die
+      # eingebaute.  Fuer Proben, die etwas anderes einreichen wollen, ohne
+      # dafuer ein zweites Werkzeug zu bauen.
+      - decl: [src, string, ""]
+      - if:
+          condition: { gt: [{ call: [envm.contains, "COSMOS_SUBMIT_FILE"] }, 0] }
+          then:
+            - decl: [src_at, string, { call: [envm.get, "COSMOS_SUBMIT_FILE"] }]
+            - set: [src, { call: [io.read_file, src_at] }]
+            - if:
+                condition: { eq: [src.len, 0] }
+                then: [{ call: [log.error, "[submit] ${src_at} ist leer oder fehlt"] }, { return: 1 }]
+            - call: [log.info, "[submit] Pipeline aus ${src_at} (${src.len} Zeichen)"]
+          else: [{ set: [src, { call: [plain_pipeline] }] }]
+      # Anhalten, weiterlaufen, einen Schritt (doc/spec/101 §101.7).  Ein
+      # Werkzeug, nicht drei: die drei Worte unterscheiden sich nur im Namen.
+      #   COSMOS_PAUSE=<lauf> | COSMOS_RESUME=<lauf> | COSMOS_STEP=<lauf> [COSMOS_STEPS=n]
+      - decl: [ctl_verb, string, ""]
+      - decl: [ctl_run, string, ""]
+      - decl: [ctl_steps, i32, 1]
+      - if:
+          condition: { gt: [{ call: [envm.contains, "COSMOS_PAUSE"] }, 0] }
+          then: [{ set: [ctl_verb, "pause_run"] }, { set: [ctl_run, { call: [envm.get, "COSMOS_PAUSE"] }] }]
+      - if:
+          condition: { gt: [{ call: [envm.contains, "COSMOS_RESUME"] }, 0] }
+          then: [{ set: [ctl_verb, "resume_run"] }, { set: [ctl_run, { call: [envm.get, "COSMOS_RESUME"] }] }]
+      # Flaggen und „ab hier nochmal" (doc/spec/107 §107.1d, §101.8).  Form:
+      #   COSMOS_BREAK=<lauf>:<stufe>     Flagge setzen
+      #   COSMOS_UNBREAK=<lauf>:<stufe>   Flagge wegnehmen
+      #   COSMOS_REWIND=<lauf>:<stufe>    ab dieser Stufe wieder wartend
+      # <stufe> darf der NAME sein ("zwei") oder die Kennung.
+      - decl: [aim_txt, string, ""]
+      - if:
+          condition: { gt: [{ call: [envm.contains, "COSMOS_BREAK"] }, 0] }
+          then: [{ set: [ctl_verb, "set_break"] }, { set: [aim_txt, { call: [envm.get, "COSMOS_BREAK"] }] }]
+      - if:
+          condition: { gt: [{ call: [envm.contains, "COSMOS_UNBREAK"] }, 0] }
+          then: [{ set: [ctl_verb, "clear_break"] }, { set: [aim_txt, { call: [envm.get, "COSMOS_UNBREAK"] }] }]
+      - if:
+          condition: { gt: [{ call: [envm.contains, "COSMOS_REWIND"] }, 0] }
+          then: [{ set: [ctl_verb, "rewind_run"] }, { set: [aim_txt, { call: [envm.get, "COSMOS_REWIND"] }] }]
+      - if:
+          condition: { gt: [aim_txt.len, 0] }
+          then:
+            - decl: [sep, i32, { call: [aim_txt.index_of, ":"] }]
+            - if:
+                condition: { lt: [sep, 1] }
+                then:
+                  - call: [log.error, "[submit] erwartet <lauf>:<stufe>, bekommen: ${aim_txt}"]
+                  - return: 1
+            - set: [ctl_run, { call: [aim_txt.substr, 0, sep] }]
+            - call: [cli.aim_at, { call: [aim_txt.substr, { +: [sep, 1] }, { -: [aim_txt.len, { +: [sep, 1] }] }] }]
+
+      - if:
+          condition: { gt: [{ call: [envm.contains, "COSMOS_STEP"] }, 0] }
+          then:
+            - set: [ctl_verb, "step_run"]
+            - set: [ctl_run, { call: [envm.get, "COSMOS_STEP"] }]
+            - if:
+                condition: { gt: [{ call: [envm.contains, "COSMOS_STEPS"] }, 0] }
+                then:
+                  - decl: [steps_txt, string, { call: [envm.get, "COSMOS_STEPS"] }]
+                  - set: [ctl_steps, { call: [steps_txt.parse_i32] }]
+      - if:
+          condition: { gt: [ctl_verb.len, 0] }
+          then:
+            - decl: [ctl_ok, i32, { call: [cli.run_ctrl, ctl_verb, ctl_run, ctl_steps] }]
+            - if: { condition: { eq: [ctl_ok, 1] }, then: [{ return: 0 }] }
+            - call: [log.error, "[submit] ${ctl_verb} abgelehnt"]
+            - return: 1
+
+      # COSMOS_LOG=<stufen-kennung>: die Ausgabe dieser Stufe lesen wie die
+      # Oberflaeche es tut — beide Stroeme, fensterweise.
+      - if:
+          condition: { gt: [{ call: [envm.contains, "COSMOS_LOG"] }, 0] }
+          then:
+            - decl: [log_ref, string, { call: [envm.get, "COSMOS_LOG"] }]
+            - decl: [n_out, i64, { call: [cli.log_read, log_ref, 0] }]
+            - decl: [n_err, i64, { call: [cli.log_read, log_ref, 1] }]
+            - call: [log.info, "[submit] ${log_ref}: ${n_out} B stdout, ${n_err} B stderr"]
+            - call: [cli.close]
+            - return: 0
+
+      # COSMOS_LOOK=1: nur NACHSEHEN, nichts einreichen.  Der Schnappschuss
+      # sagt dann, wie viele Laeufe und wie viele Schichten (doc/spec/107
+      # §107.1c) der Controller gerade fuehrt — die billigste Gegenprobe
+      # dafuer, dass die Messung des Agenten auch ankommt.
+      - if:
+          condition: { gt: [{ call: [envm.contains, "COSMOS_LOOK"] }, 0] }
+          then:
+            - call: [cli.cluster_read, "get_cluster", { call: [cli.tok] }, 1]
+            - call: [cli.close]
+            - return: 0
+
+      # COSMOS_SAVE_JOB=<name>: als JOB ablegen, statt einmalig zu starten —
+      # dann steht die Pipeline in der Oberflaeche und laesst sich dort starten
+      # (doc/spec/106 G4: gestartet wird ein Job, nicht eine Quelle).
+      - if:
+          condition: { gt: [{ call: [envm.contains, "COSMOS_SAVE_JOB"] }, 0] }
+          then:
+            - decl: [job_name, string, { call: [envm.get, "COSMOS_SAVE_JOB"] }]
+            - decl: [made, string, { call: [cli.save_job, { call: [cli.tok] }, "", job_name, src] }]
+            - call: [log.info, "[submit] Job '${job_name}' gespeichert (${made}) — in der Oberflaeche unter Jobs"]
+          else: [{ call: [cli.submit_pipeline, { call: [cli.tok] }, src, 1] }]
+      - call: [cli.close]
+      - decl: [bad, i32, { call: [cli.fail_count] }]
+      - if:
+          condition: { neq: [bad, 0] }
+          then: [{ call: [log.error, "[submit] ${bad} Pruefung(en) fehlgeschlagen"] }, { return: 1 }]
+      - call: [log.info, "[submit] eingereicht — ab hier entscheidet der Controller"]
+      - return: 0

@@ -1,0 +1,258 @@
+# Der Katalog-Teil der erklaerten Konfiguration (doc/spec/111 §111.4, nach
+# doc/spec/100 §100.5 — das JobDSL-Stueck) und plan/apply ueber beide Teile.
+#
+# Ein Katalog-Eintrag IST ein Job (JobDef, doc/spec/106): es gibt keinen
+# zweiten Job-Begriff.  Kennung "cat-<name>"; Quelle, Schalter und Takt stehen
+# am Job, Projekt und Ausloeser in `catalog_meta` (CascStore).
+#
+#   add      — Job gibt es nicht              → anlegen
+#   change   — Quelle/Schalter/Takt/Projekt   → speichern (Nummer und Geschichte
+#              bleiben beim Job, save_job F106-1)
+#   disable  — Eintrag gehoert dem Katalog, steht aber nicht mehr in der
+#              Erklaerung → abschalten, nicht loeschen (F100-15, F106-6)
+#
+# Jobs, die in der Oberflaeche entstanden sind, fasst der Katalog nicht an.
+#
+# Als Gruppen-Methoden der Instanz `casc`, weil sie den Cluster brauchen.
+- import: "sources/models/catalog_entry.aiml"
+- import: "sources/models/api_token_reqs.aiml"
+- import: "sources/server/casc_reader.aiml"
+- import: "sources/shared/job_def.aiml"
+- import: "sources/shared/job_params.aiml"
+- import: "sources/models/pipeline_submit.aiml"
+- import: "sources/shared/pipeline_run.aiml"
+
+- groupmethods:
+    group: CosmosRuntime
+    instances:
+      - instance: casc
+        methods:
+          - def:
+              name: catalog_change
+              access: public
+              args: [[plan, ref<CascPlan>], [action, string], [target, string], [detail, string]]
+              body:
+                - decl: [row, PlanChange]
+                - set: [row.domain, "catalog"]
+                - set: [row.action, action]
+                - set: [row.target, target]
+                - set: [row.detail, detail]
+                - call: [plan.changes.push, row]
+
+          - def:
+              name: plan_catalog
+              access: public
+              static_off: ["str_cmp"]
+              args: [[doc, ref<CascDoc>], [plan, ref<CascPlan>]]
+              body:
+                - decl: [declared, list<string>]
+                - decl: [jix, i32, 0]
+                - while:
+                    condition: { lt: [jix, doc.jobs.len] }
+                    body:
+                      - decl: [ent, CatalogEntry, { at: [doc.jobs, jix] }]
+                      - decl: [src, string, { at: [doc.sources, jix] }]
+                      - set: [jix, { +: [jix, 1] }]
+                      - call: [declared.push, ent.job_id]
+                      - decl: [job, JobDef, { call: [<.cluster.job_of, ent.job_id] }]
+                      - if:
+                          condition: { eq: [job.job_id.len, 0] }
+                          then:
+                            - call: [<.catalog_change, plan, "add", "job ${ent.name}", "${ent.source_file}, Projekt '${ent.project}'"]
+                          else:
+                            - if: { condition: { neq: [job.source, src] }, then: [{ call: [<.catalog_change, plan, "change", "job ${ent.name}", "Quelle (${ent.source_file})"] }] }
+                            - if: { condition: { neq: [job.enabled, ent.enabled] }, then: [{ call: [<.catalog_change, plan, "change", "job ${ent.name}", "enabled ${job.enabled} -> ${ent.enabled}"] }] }
+                            - if: { condition: { neq: [job.interval_s, ent.interval_s] }, then: [{ call: [<.catalog_change, plan, "change", "job ${ent.name}", "interval_s ${job.interval_s} -> ${ent.interval_s}"] }] }
+                            - decl: [meta, CatalogEntry, { call: [<.entry_of, ent.job_id] }]
+                            - if: { condition: { neq: [meta.project, ent.project] }, then: [{ call: [<.catalog_change, plan, "change", "job ${ent.name}", "Projekt '${meta.project}' -> '${ent.project}'"] }] }
+                            - decl: [old_trig, string, { call: [<.joined, meta.triggers] }]
+                            - decl: [new_trig, string, { call: [<.joined, ent.triggers] }]
+                            - if: { condition: { neq: [old_trig, new_trig] }, then: [{ call: [<.catalog_change, plan, "change", "job ${ent.name}", "triggers [${old_trig}] -> [${new_trig}]"] }] }
+                # Was dem Katalog gehoert und nicht mehr erklaert ist: abschalten.
+                # Nur wenn die Erklaerung ueberhaupt einen Katalog hat — eine
+                # reine config-Datei raeumt keine Jobs ab.
+                - if: { condition: { eq: [doc.has_catalog, 0] }, then: [{ return: [] }] }
+                - decl: [owned, list<CatalogEntry>, { call: [<.all_entries] }]
+                - decl: [oix, i32, 0]
+                - while:
+                    condition: { lt: [oix, owned.len] }
+                    body:
+                      - decl: [old, CatalogEntry, { at: [owned, oix] }]
+                      - set: [oix, { +: [oix, 1] }]
+                      - if:
+                          condition: { '&&': [{ eq: [old.origin, "catalog"] }, { eq: [{ call: [declared.contains, old.job_id] }, 0] }] }
+                          then:
+                            - decl: [ojob, JobDef, { call: [<.cluster.job_of, old.job_id] }]
+                            - if: { condition: { neq: [ojob.enabled, 0] }, then: [{ call: [<.catalog_change, plan, "disable", "job ${old.name}", "nicht mehr im Katalog — abgeschaltet, Geschichte bleibt"] }] }
+
+          - def:
+              name: joined
+              access: public
+              args: [[items, list<string>]]
+              return: { type: string, lifetime: producer }
+              body:
+                - decl: [sorted, list<string>, items]
+                - call: [sorted.sort]
+                - decl: [out, string, ""]
+                - decl: [idx, i32, 0]
+                - while:
+                    condition: { lt: [idx, sorted.len] }
+                    body:
+                      - decl: [one, string, { at: [sorted, idx] }]
+                      - if: { condition: { gt: [idx, 0] }, then: [{ set: [out, "${out},"] }] }
+                      - set: [out, "${out}${one}"]
+                      - set: [idx, { +: [idx, 1] }]
+                - return: out
+
+          # doc_for: die Erklaerung aus der Anfrage — eine Datei auf dem Server
+          # (`path`, Quellen relativ zu ihrem Verzeichnis) oder der Text selbst
+          # (Quellen relativ zu `root`, Vorgabe COSMOS_CASC_ROOT oder ".").
+          - def:
+              name: doc_for
+              access: public
+              args: [[req, ref<CascReq>]]
+              return: { type: CascDoc, lifetime: producer }
+              body:
+                - decl: [reader, ptr<CascReader>, { new: CascReader }]
+                - if:
+                    condition: { gt: [req.path.len, 0] }
+                    then:
+                      - decl: [file_at, path, { call: [path.from_string, req.path] }]
+                      - decl: [dir_at, path, { call: [file_at.parent] }]
+                      - call: [reader.set_root, { call: [dir_at.to_string] }]
+                      - return: { call: [reader.read_file, req.path] }
+                - decl: [base, string, req.root]
+                - if:
+                    condition: { eq: [base.len, 0] }
+                    then:
+                      - decl: [envm, map<string:string>, { call: [sys.env] }]
+                      - set: [base, "."]
+                      - if: { condition: { gt: [{ call: [envm.contains, "COSMOS_CASC_ROOT"] }, 0] }, then: [{ set: [base, { call: [envm.get, "COSMOS_CASC_ROOT"] }] }] }
+                - call: [reader.set_root, base]
+                - return: { call: [reader.read_text, req.text] }
+
+          # plan: ueber beide Teile.  Fehler der Datei UND Gegenproben landen in
+          # `errors`; `success` = 1 nur ohne Fehler.  Aendert nichts (F100-3).
+          - def:
+              name: plan
+              access: public
+              args: [[doc, ref<CascDoc>]]
+              return: { type: CascPlan, lifetime: producer }
+              body:
+                - decl: [out, CascPlan]
+                - decl: [doc_errors, list<string>, doc.errors]
+                - call: [out.errors.extend, doc_errors]
+                - if:
+                    condition: { eq: [doc.has_config, 1] }
+                    then:
+                      - call: [<.check_config, doc.config, out]
+                      - call: [<.plan_config, doc.config, out]
+                - if:
+                    condition: { eq: [doc.has_catalog, 1] }
+                    then: [{ call: [<.plan_catalog, doc, out] }]
+                - if: { condition: { eq: [out.errors.len, 0] }, then: [{ set: [out.success, 1] }] }
+                - return: out
+
+          # apply: erst planen; mit Fehlern wird NICHTS geaendert (F100-5).
+          # Danach in Abhaengigkeitsreihenfolge: config vor catalog (die Rollen
+          # gelten, bevor Jobs entstehen, die sie betreffen).  Das Ergebnis ist
+          # der ausgefuehrte Plan.
+          - def:
+              name: apply
+              access: public
+              static_off: ["str_cmp"]
+              args: [[doc, ref<CascDoc>]]
+              return: { type: CascPlan, lifetime: producer }
+              body:
+                - decl: [out, CascPlan, { call: [<.plan, doc] }]
+                - if: { condition: { eq: [out.success, 0] }, then: [{ return: out }] }
+                - if: { condition: { eq: [doc.has_config, 1] }, then: [{ call: [<.apply_config, doc.config] }] }
+                - if: { condition: { eq: [doc.has_catalog, 0] }, then: [{ return: out }] }
+                - decl: [declared, list<string>]
+                - decl: [jix, i32, 0]
+                - while:
+                    condition: { lt: [jix, doc.jobs.len] }
+                    body:
+                      - decl: [ent, CatalogEntry, { at: [doc.jobs, jix] }]
+                      - decl: [src, string, { at: [doc.sources, jix] }]
+                      - set: [jix, { +: [jix, 1] }]
+                      - call: [declared.push, ent.job_id]
+                      - decl: [job, JobDef, { call: [<.cluster.job_of, ent.job_id] }]
+                      - set: [job.job_id, ent.job_id]
+                      - set: [job.name, ent.name]
+                      - set: [job.source, src]
+                      - set: [job.enabled, ent.enabled]
+                      - set: [job.interval_s, ent.interval_s]
+                      - if: { condition: { eq: [job.created_ms, 0] }, then: [{ set: [job.created_ms, { call: [time.now] }] }] }
+                      - decl: [saved, i32, { call: [<.cluster.save_job, job] }]
+                      - if:
+                          condition: { eq: [saved, 0] }
+                          then:
+                            - call: [out.errors.push, "job ${ent.name}: speichern scheiterte — Abbruch (F100-5)"]
+                            - set: [out.success, 0]
+                            - return: out
+                      - call: [<.set_entry, ent]
+                - decl: [owned, list<CatalogEntry>, { call: [<.all_entries] }]
+                - decl: [oix, i32, 0]
+                - while:
+                    condition: { lt: [oix, owned.len] }
+                    body:
+                      - decl: [old, CatalogEntry, { at: [owned, oix] }]
+                      - set: [oix, { +: [oix, 1] }]
+                      - if:
+                          condition: { '&&': [{ eq: [old.origin, "catalog"] }, { eq: [{ call: [declared.contains, old.job_id] }, 0] }] }
+                          then:
+                            - decl: [ojob, JobDef, { call: [<.cluster.job_of, old.job_id] }]
+                            - if:
+                                condition: { '&&': [{ gt: [ojob.job_id.len, 0] }, { neq: [ojob.enabled, 0] }] }
+                                then:
+                                  - set: [ojob.enabled, 0]
+                                  - call: [<.cluster.save_job, ojob]
+                - call: [log.info, "[casc] angewandt: ${out.changes.len} Aenderung(en)"]
+                - return: out
+
+      # ── start_job_now: einen Job sofort starten (Kampagnen, doc/spec/111 §111.6).
+      # Derselbe Weg wie run_job und der Zeitplan: erst pruefen, dann die
+      # Nummer ziehen (F106-13), Werte festschreiben (F106-14), Unterbau
+      # setzen (F110-117).  "" = nicht gestartet; der Grund steht im Log und in
+      # `why` des Ergebnisses.
+      - instance: cluster
+        methods:
+          - def:
+              name: start_job_now
+              access: public
+              static_off: ["str_cmp"]
+              args: [[job_id, string], [reason, string]]
+              return: { type: string, lifetime: producer }
+              body:
+                - decl: [job, JobDef, { call: [<.job_of, job_id] }]
+                - if:
+                    condition: { eq: [job.job_id.len, 0] }
+                    then: [{ call: [log.warn, "[start] ${job_id}: unbekannter Job (${reason})"] }, { return: "" }]
+                - if:
+                    condition: { eq: [job.enabled, 0] }
+                    then: [{ call: [log.warn, "[start] ${job.name}: abgeschaltet (${reason})"] }, { return: "" }]
+                - decl: [bag, JobParams, { call: [<.jobcfg.params_of_job, job_id] }]
+                - decl: [chk_prm, string, { call: [<.submitter.prm_bundle, bag, "${job_id}-vorschau"] }]
+                - decl: [chk, SubmitCheck, { call: [<.submitter.check, job.source, chk_prm] }]
+                - if:
+                    condition: { eq: [chk.accepted, 0] }
+                    then: [{ call: [log.warn, "[start] ${job.name}: Quelle abgelehnt: ${chk.message} (${reason})"] }, { return: "" }]
+                - decl: [build, i32, { call: [<.take_build_number, job_id] }]
+                - decl: [run_id, string, "${job_id}-${build}"]
+                - decl: [run_prm, string, { call: [<.submitter.prm_bundle, bag, run_id] }]
+                - call: [<.jobcfg.freeze_run_params, run_id, bag]
+                - call: [<.jobcfg.freeze_run_priority, run_id, { call: [<.jobcfg.priority_of_job, job_id] }]
+                - decl: [run, PipelineRun, { call: [<.submitter.expand, job.source, run_id, run_prm] }]
+                - if:
+                    condition: { eq: [run.run_id.len, 0] }
+                    then: [{ call: [log.error, "[start] ${job.name} #${build}: Ausfaltung scheiterte (${reason})"] }, { return: "" }]
+                - set: [run.job_id, job_id]
+                - set: [run.build_number, build]
+                - set: [run.pipeline_name, job.name]
+                - set: [run.started_ms, { call: [time.now] }]
+                - set: [run.status, "queued"]
+                - call: [<.add_pipeline, run]
+                - call: [<.set_base, run_id, { call: [<.submitter.base_in, job.source, run_prm] }]
+                - call: [log.info, "[start] ${job.name} #${build} als ${run_id} (${reason})"]
+                - return: run_id

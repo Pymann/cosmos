@@ -1,0 +1,28 @@
+# ServerEntry / ServerList — die vom Static-Host servierte Serverliste.
+#
+# Der Static-Host baut eine ServerList, sys.serialize't sie (yyjson) und liefert
+# sie unter GET /servers.json aus.  Der WASM-Client holt sie via http.fetch_text
+# und sys.deserialize't sie zurück in ein ServerList-Model → wählt einen Server.
+# Symmetrisch (beide Seiten AIML), echtes JSON, kein hand-gerolltes Parsen.
+#
+# status: "up" = verbindbar, "down" = in Wartung (Client zeigt/überspringt).
+
+- enum:
+    name: ServerStatus
+    wire: true          # steht in servers.json
+    values:
+      - down
+      - up
+
+- model:
+    name: ServerEntry
+    fields:
+      - [name,      string]
+      - [url,       string]        # game WS (match logic), e.g. ws://host:8765
+      - [media_url, string]        # media WS (card-artwork stream), e.g. ws://host:8766; "" = none
+      - [status,    ServerStatus]
+
+- model:
+    name: ServerList
+    fields:
+      - [servers, list<ServerEntry>]

@@ -1,0 +1,109 @@
+# UsersScreen (doc/spec/108 §2) — der Bereich der Rechtevergabe.
+#
+# BEREICH statt Overlay (doc/spec/107 §107.6, User 2026-10-18: „mache so wie bei den
+# anderen menues, wie agenten und jobs"): wer Freigaben setzt, arbeitet hier — voller
+# Platz, Rueckweg ueber den Kopf, kein Schleier und kein X.
+#
+# Der Bildschirm ruft nicht selbst — er merkt den Wunsch (`take_apply`), der Wirt fuehrt
+# ihn aus (doc/spec/105).
+
+- import: "sources/client/prefabs.aiml"
+- import: "sources/models/level_reqs.aiml"
+
+- class:
+    name: UsersScreen
+    members:
+      - [scene,       prefab_instance]
+      - [initialized, i32]
+      - [is_visible,  i32]
+      - [apply_req,   i32]
+      - [shown_rows,  i32]
+    methods:
+      - def:
+          name: init
+          body:
+            - if: { condition: { eq: [<.initialized, 1] }, then: [{ return }] }
+            - set: [<.scene, { call: [engine.instantiate, "UsersScene"] }]
+            - call: [<.scene.set_pos, 0.0, 0.0]
+            # Wie jeder Bereich auf Ebene 0 — der Kopf der Huelle liegt auf 100.
+            - call: [<.scene.set_z, 0]
+            - call: [<.scene.set_visible, 0]
+            - set: [<.initialized, 1]
+            - set: [<.is_visible, 0]
+            - set: [<.shown_rows, -1]
+
+      - def:
+          name: set_visible
+          args: [[vis, i32]]
+          body:
+            - if: { condition: { eq: [<.initialized, 0] }, then: [{ call: [<.init] }] }
+            - call: [<.scene.set_visible, vis]
+            - set: [<.is_visible, vis]
+            - if: { condition: { eq: [vis, 1] }, then: [{ set: [<.shown_rows, -1] }] }
+
+      - def:
+          name: take_apply
+          return: i32
+          body:
+            - if: { condition: { eq: [<.apply_req, 0] }, then: [{ return: 0 }] }
+            - set: [<.apply_req, 0]
+            - return: 1
+
+      - def:
+          name: target_email
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [val, string, { call: [<.scene.text_value, "tgt_input"] }]
+            - return: "${val}"
+
+      - def:
+          name: target_level
+          return: i32
+          body:
+            - decl: [val, string, { call: [<.scene.text_value, "lvl_input"] }]
+            - if: { condition: { eq: [val.len, 0] }, then: [{ return: 0 }] }
+            - return: { call: [val.to_int] }
+
+      - def:
+          name: set_note
+          args: [[txt, string]]
+          body:
+            - if: { condition: { eq: [<.initialized, 0] }, then: [{ return }] }
+            - call: [<.scene.set_text, "msg_lbl", txt]
+
+      # render: die Liste an das Modell binden und die Zeilen beschriften.
+      # Neu aufgebaut wird NUR bei geaenderter Zeilenzahl — ein Container, der jeden
+      # Rahmen neu aufspannt, verliert den Hover unter der Maus (doc/spec/107 §107.3).
+      - def:
+          name: render
+          args: [[rows, ref<UserLevelResult>]]
+          body:
+            - if: { condition: { eq: [<.initialized, 0] }, then: [{ call: [<.init] }] }
+            - if: { condition: { eq: [<.is_visible, 0] }, then: [{ return }] }
+            - if:
+                condition: { neq: [<.shown_rows, rows.users.len] }
+                then:
+                  - call: [<.scene.bind_list, "rows_box", rows.users]
+                  - set: [<.shown_rows, rows.users.len]
+            - decl: [uix, i32, 0]
+            - while:
+                condition: { lt: [uix, rows.users.len] }
+                body:
+                  - decl: [row, prefab_instance, { call: [<.scene.container_row, "rows_box", uix] }]
+                  - if:
+                      condition: { neq: [row, null] }
+                      then:
+                        - decl: [one, UserLevelRow, { at: [rows.users, uix] }]
+                        - call: [row.set_text, "mail_lbl", one.email]
+                        - call: [row.set_text, "nick_lbl", one.display_name]
+                        - call: [row.set_text, "lvl_cell", "${one.level}"]
+                        # Ein Klick fuellt das Eingabefeld — Tippfehler in einer
+                        # E-Mail sind die haeufigste Ursache fuer "unbekanntes Konto".
+                        - if:
+                            condition: { eq: [{ call: [row.child_clicked, "pick_area"] }, 1] }
+                            then: [{ call: [<.scene.set_text, "tgt_input", one.email] }]
+                  - set: [uix, { +: [uix, 1] }]
+            - if:
+                condition: { eq: [{ call: [<.scene.child_clicked, "apply_btn"] }, 1] }
+                then: [{ set: [<.apply_req, 1] }]
+

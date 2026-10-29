@@ -1,0 +1,7 @@
+2026-10-22 13:15:49 [INFO      ] [probe] Schichten statt Umgebung: 26 Koerper  (/media/nikolai/95a208ef-ffa2-478b-abdd-ff394baa6a76/projects/python/test/cosmos/test/pipe3d_shot.aiml:?)
+2026-10-22 13:15:49 [INFO      ] [probe] 26 Koerper, 8 Rohre, davon flieszend: 1  (/media/nikolai/95a208ef-ffa2-478b-abdd-ff394baa6a76/projects/python/test/cosmos/test/pipe3d_shot.aiml:?)
+2026-10-22 13:15:49 [INFO      ] [shapes] cosmos_rack: 3 Teil(e)  (client/gfx/mesh_shapes.aiml:?)
+2026-10-22 13:15:49 [INFO      ] [shapes] cosmos_drum: 2 Teil(e)  (client/gfx/mesh_shapes.aiml:?)
+2026-10-22 13:15:49 [INFO      ] [probe] Phase 0 ms → 0 s  (/media/nikolai/95a208ef-ffa2-478b-abdd-ff394baa6a76/projects/python/test/cosmos/test/pipe3d_shot.aiml:?)
+2026-10-22 13:15:51 [INFO      ] [probe] Pixelsumme: 272184  (/media/nikolai/95a208ef-ffa2-478b-abdd-ff394baa6a76/projects/python/test/cosmos/test/pipe3d_shot.aiml:?)
+pipe3d_shot done

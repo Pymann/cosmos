@@ -1,0 +1,151 @@
+# ProvisionWorker — die Einrichtung laeuft NEBENHER (doc/spec/94).
+#
+# Anlass (gemessen 2026-10-15): der Handler fuehrte die 18 Schritte in der
+# Schleife des Servers aus.  Neun Sekunden lang beantwortete cosmosd gar nichts:
+#
+#   18:02:57 … 18:03:06   Einrichtung laeuft
+#   18:03:03   [rpc] SLOW-NO-RESPONSE: renew_lease
+#   18:03:05   [rpc] TIMEOUT: renew_lease waited=4000ms
+#
+# Der Agent verlor sein Lehen, die Oberflaeche fror ein, Pushes blieben aus —
+# waehrend man einen Rechner HINZUFUEGT, stand die ganze Steuerebene.  Eine
+# Aufgabe, die Sekunden bis Minuten dauert, gehoert nicht in die Schleife.
+#
+# Der Faden fasst NUR diesen Datensatz an (SSH-Sitzung entsteht in ihm selbst);
+# geteilt sind allein Fortschritt und Ergebnis, und die unter einer Sperre
+# (spec/47: fuer koordiniertes Schreiben eine ausdrueckliche `lock`).
+
+- import: "sources/models/provision.aiml"
+- import: "sources/server/agent_provisioner.aiml"
+
+- class:
+    name: ProvisionWorker
+    members:
+      - [guard,       lock]
+      - [prov,        ptr<AgentProvisioner>]
+      - [cfg,         ProvisionConfig]
+      - [steps,       list<ProvisionStep>]
+      - [expect_fp,   string]
+      - [login_pw,    string]
+      - [sudo_pw,     string]
+      - [running,     i32]
+      - [done,        i32]
+      - [result,      ProvisionResult]
+      - [teardown,    i32]
+      # 1 = die Sperre steht.  Eine Klasse, deren Sperre erst spaeter entsteht,
+      # ist eine Falle: der erste Zugriff killt den Prozess (gemessen
+      # 2026-10-15, SIGSEGV in pthread_mutex_lock).  Darum sichert JEDER
+      # Einstieg sie ab — vor dem ersten Faden ist das gefahrlos.
+      - [armed,       i32]
+    methods:
+      # init: EINMAL beim Entstehen der Instanz.  Die Sperre gehoert hierher,
+      # nicht in `prepare`: die erste Frage an diesen Auftrag ist „laeuft schon
+      # einer?", und die kommt, BEVOR je ein Auftrag vorbereitet wurde.
+      - def:
+          name: init
+          access: public
+          body:
+            - call: [<.arm]
+            - set: [<.running, 0]
+            - set: [<.done, 0]
+
+      # arm: die Sperre EINMAL aufstellen.  Idempotent, damit weder ein
+      # vergessener noch ein doppelter Aufruf schadet.
+      - def:
+          name: arm
+          access: public
+          body:
+            - if: { condition: { eq: [<.armed, 1] }, then: [{ return }] }
+            - call: [<.guard.init]
+            - set: [<.armed, 1]
+
+      - def:
+          name: prepare
+          access: public
+          body:
+            - call: [<.arm]
+            - set: [<.prov, { new: AgentProvisioner }]
+            - call: [<.guard.acquire]
+            - set: [<.running, 1]
+            - set: [<.done, 0]
+            - call: [<.guard.release]
+
+      # execute: laeuft IM FADEN.  Danach stehen `done` und `result`.
+      # set_job: was dieser Lauf tun soll.  Getrennt von `prepare`, damit der
+      # Aufrufer den Auftrag vollstaendig setzt, BEVOR der Faden startet.
+      - def:
+          name: set_job
+          access: public
+          args: [[cfg, ProvisionConfig], [steps, list<ProvisionStep>],
+                 [expect_fp, string], [login_pw, string], [sudo_pw, string]]
+          body:
+            - set: [<.cfg, cfg]
+            - set: [<.steps, steps]
+            - set: [<.expect_fp, expect_fp]
+            - set: [<.login_pw, login_pw]
+            - set: [<.sudo_pw, sudo_pw]
+            - set: [<.teardown, 0]
+
+      - def:
+          name: is_running
+          access: public
+          return: i32
+          body:
+            - call: [<.arm]
+            - call: [<.guard.acquire]
+            - decl: [act, i32, <.running]
+            - call: [<.guard.release]
+            - return: act
+
+      - def:
+          name: execute
+          access: public
+          body:
+            - call: [<.arm]
+            - decl: [out, ProvisionResult]
+            - if:
+                condition: { eq: [<.teardown, 1] }
+                then: [{ set: [out, { call: [<.prov.run_teardown, <.cfg, <.steps, <.expect_fp, <.login_pw, <.sudo_pw] }] }]
+                else: [{ set: [out, { call: [<.prov.run, <.cfg, <.steps, <.expect_fp, <.login_pw, <.sudo_pw] }] }]
+            - call: [<.guard.acquire]
+            - set: [<.result, out]
+            - set: [<.done, 1]
+            - set: [<.running, 0]
+            # Passwoerter leben nur fuer den Lauf — danach sofort weg.
+            - set: [<.login_pw, ""]
+            - set: [<.sudo_pw, ""]
+            - call: [<.guard.release]
+
+      # snapshot: Stand abfragen, ohne dem Faden ins Wort zu fallen.
+      - def:
+          name: snapshot
+          access: public
+          return: { type: ProvisionResult, lifetime: producer }
+          body:
+            - call: [<.arm]
+            - call: [<.guard.acquire]
+            - decl: [out, ProvisionResult, <.result]
+            - call: [<.guard.release]
+            - return: out
+
+      - def:
+          name: is_done
+          access: public
+          return: i32
+          body:
+            - call: [<.arm]
+            - call: [<.guard.acquire]
+            - decl: [fin, i32, <.done]
+            - call: [<.guard.release]
+            - return: fin
+
+# Der Einstiegspunkt des Fadens: `spawn:` nimmt eine FUNKTION, keine Methode.
+- def:
+    name: provision_worker_main
+    # `ref<>`, nicht `ptr<>`: der Auftrag gehoert der Gruppe und ueberlebt den
+    # Faden — ein ptr<>-Parameter naehme ihr den Besitz ab (spec/61 §8).
+    args: [[work, ref<ProvisionWorker>]]
+    return: i32
+    body:
+      - call: [work.execute]
+      - return: 1

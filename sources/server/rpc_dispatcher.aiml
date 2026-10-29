@@ -1,0 +1,43 @@
+# RpcDispatcher — kleine Registry-Klasse die Method-Name auf einen
+# konkreten Handler (ptr<mirror.RpcHandler>) mappt.
+#
+# Pattern aus DataCreatures rpc_handlers.aiml übernommen:
+# - register(name, handler) wird beim Boot pro RPC einmal aufgerufen
+# - dispatch(rpc, sess) sucht per rpc.method und ruft handler.run(rpc, sess)
+# - upcast ptr<Concrete> → ptr<mirror.RpcHandler> passiert implicit
+#   beim register(), aber nur wenn dispatcher lokal in derselben
+#   Funktion liegt (nicht über ptr<RpcDispatcher>-Arg).
+#
+# Hinweis: ein RpcHandler-Method-Lookup-Miss loggt WARNING + drop,
+# kein Crash — robustes Verhalten bei Client mit alter Schema-Version.
+
+- import: "sources/server/conn_registry.aiml"   # g_current_peer_id (Disconnect-Cleanup, Befund 1)
+
+- class:
+    name: RpcDispatcher
+    members:
+      # ref<>, nicht ptr<>: die Handler gehören der CosmosRuntime, der
+      # Dispatcher borgt sie nur (spec/61 §8 — ptr<T> würde die Box übernehmen).
+      - [handlers, map<string:ref<mirror.RpcHandler>>]
+    methods:
+      - def:
+          name: register
+          args: [[name, string], [hnd, ref<mirror.RpcHandler>]]
+          body: [{ call: [<.handlers.put, name, hnd] }]
+      - def:
+          name: dispatch
+          args: [[rpc, rpc_event], [session, mirror_session]]
+          body:
+            - if:
+                condition: { eq: [{ call: [<.handlers.contains, rpc.method] }, 0] }
+                then:
+                  - call: [log.warn, "dispatcher: unknown rpc method='${rpc.method}' from peer_id=${rpc.peer_id}"]
+                  - return: []
+            - decl: [hnd, ref<mirror.RpcHandler>, { call: [<.handlers.get, rpc.method] }]
+            # Peer der laufenden RPC für die zentrale Token-Auflösung merken, damit
+            # resolve_token* die Verbindung ohne Handler-Änderung touchen kann (Befund 1).
+            - set: [g_current_peer_id, rpc.peer_id]
+            # … und welche RPC das ist: das Rollen-Tor in email_for_token fragt danach
+            # (doc/spec/111 §111.3).
+            - set: [g_current_method, rpc.method]
+            - call: [hnd.run, rpc, session]

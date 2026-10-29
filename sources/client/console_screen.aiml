@@ -1,0 +1,238 @@
+# ConsoleScreen (doc/spec/108 + 109) — der CONTROLLER-Reiter: was der Controller
+# gerade tut, und die Skript-Konsole.
+#
+# Der Editor ist KEIN neuer: `src_box` der ControllerScene traegt dieselbe Konfiguration
+# wie der der PipelineScene (`text_input`, `font: "mono"`, `gutter: true`, aiml
+# spec/44_6 §5g), und die Hervorhebung kommt aus demselben Weg — `yaml.tokens` plus
+# `set_color_runs`.  Zwei Code-Editoren mit zwei Verhalten waeren die eigentliche
+# Verschwendung.
+#
+# Der Bildschirm RUFT NICHT SELBST: er merkt den Wunsch (`take_run`, einmal abholbar),
+# der Wirt fuehrt ihn aus — dasselbe Muster wie `take_open`/`take_start` (doc/spec/105).
+
+- import: "sources/client/prefabs.aiml"
+- import: "sources/models/console_reqs.aiml"
+
+- class:
+    name: ConsoleScreen
+    members:
+      - [scene,       prefab_instance]
+      - [initialized, i32]
+      - [is_visible,  i32]
+      # 1 = der Nutzer will ausfuehren, einmal abholbar.
+      - [run_req,     i32]
+      # Die Freigabe dieser Sitzung, vom Wirt gesetzt.  255 = am staerksten
+      # eingeschraenkt, solange der Server nichts anderes gesagt hat (fail closed).
+      - [my_level,    i32]
+      - [busy,        i32]
+      # doc/spec/108 §6a: die beanstandete Zeile (1-basiert, 0 = keine).  Als Member,
+      # weil `highlight` jeden Rahmen neu faerbt — eine einmal gesetzte Markierung
+      # waere sonst beim naechsten Bild wieder weg.
+      - [err_line,    i32]
+      # doc/spec/108 F108-18: die Kennung des laufenden Skripts, 0 = keines.
+      - [pending,     i32]
+    methods:
+      - def:
+          name: init
+          body:
+            - if: { condition: { eq: [<.initialized, 1] }, then: [{ return }] }
+            - set: [<.scene, { call: [engine.instantiate, "ControllerScene"] }]
+            - call: [<.scene.set_pos, 0.0, 0.0]
+            - call: [<.scene.set_z, 0]
+            - call: [<.scene.set_visible, 0]
+            - set: [<.initialized, 1]
+            - set: [<.is_visible, 0]
+            - set: [<.my_level, 255]
+            - set: [<.busy, 0]
+            - call: [<.scene.set_text, "src_box", ""]
+            - call: [<.scene.set_text, "out_box", ""]
+            - call: [<.scene.set_text, "diag_box", ""]
+            - call: [<.scene.set_text, "status_lbl", "bereit"]
+
+      - def:
+          name: set_visible
+          args: [[vis, i32]]
+          body:
+            - if: { condition: { eq: [<.initialized, 0] }, then: [{ call: [<.init] }] }
+            - call: [<.scene.set_visible, vis]
+            - set: [<.is_visible, vis]
+
+      # set_level: die Freigabe kommt vom SERVER (my_clearance), nie vom Client.
+      # Angezeigt wird sie, damit eine Ablehnung nicht raetselhaft ist — Level sind
+      # nicht geheim (spec/65 F65-16).
+      - def:
+          name: set_level
+          args: [[lvl, i32]]
+          body:
+            - if: { condition: { eq: [<.initialized, 0] }, then: [{ call: [<.init] }] }
+            - set: [<.my_level, lvl]
+            - if:
+                condition: { eq: [lvl, 1] }
+                then: [{ call: [<.scene.set_text, "clear_lbl", "Freigabe: 1 (Admin) · Skripte laufen mit dieser Freigabe"] }]
+                # Eine Sperre OHNE Weg heraus ist eine Sackgasse: hier steht, was zu tun
+                # ist.  Die Vergabe ist eine Betriebshandlung am Server (doc/spec/108
+                # F108-3) und bewusst nicht ueber die Oberflaeche erreichbar.
+                else: [{ call: [<.scene.set_text, "clear_lbl", "Freigabe: ${lvl} · Skripte brauchen Freigabe 1.  Am Server:  ./cosmosd --grant-email <konto> --grant-level 1"] }]
+
+      - def:
+          name: source_text
+          return: { type: string, lifetime: producer }
+          body:
+            - if: { condition: { eq: [<.initialized, 0] }, then: [{ return: "" }] }
+            - decl: [src, string, { call: [<.scene.text_value, "src_box"] }]
+            - return: "${src}"
+
+      # take_run: der Wunsch, einmal abholbar.  Genau wie take_open/take_start.
+      - def:
+          name: take_run
+          return: i32
+          body:
+            - if: { condition: { eq: [<.run_req, 0] }, then: [{ return: 0 }] }
+            - set: [<.run_req, 0]
+            - return: 1
+
+      # Das GANZE Ergebnis statt sechs Einzelwerte: aiml laesst hoechstens fuenf
+      # Argumente zu, und eine Struktur, die ohnehin zusammengehoert, in Teile zu
+      # zerlegen waere die schlechtere Antwort auf diese Grenze.
+      - def:
+          name: apply_result
+          args: [[res, ref<ConsoleExecResult>]]
+          body:
+            - if: { condition: { eq: [<.initialized, 0] }, then: [{ call: [<.init] }] }
+            - set: [<.busy, 0]
+            - set: [<.err_line, res.error_line]
+            - call: [<.scene.set_text, "out_box", res.output]
+            - call: [<.scene.set_text, "diag_box", res.diagnostics]
+            - if:
+                condition: { eq: [res.success, 1] }
+                then: [{ call: [<.scene.set_text, "status_lbl", "${res.message} · ${res.duration_ms} ms"] }]
+                else: [{ call: [<.scene.set_text, "status_lbl", res.message] }]
+
+      # highlight: dieselbe Hervorhebung wie im Job-Editor — `yaml.tokens` liefert
+      # (start, len, art), `set_color_runs` faerbt.  Eine zweite Farbtabelle waere
+      # eine zweite Wahrheit ueber dieselbe Sprache.
+      - def:
+          name: highlight
+          body:
+            - decl: [src, string, { call: [<.scene.text_value, "src_box"] }]
+            - decl: [toks, list<i32>, { call: [yaml.tokens, src] }]
+            - decl: [runs, list<i32>]
+            - decl: [tix, i32, 0]
+            - while:
+                condition: { lt: [tix, toks.len] }
+                body:
+                  - call: [runs.push, { at: [toks, tix] }]
+                  - call: [runs.push, { at: [toks, { +: [tix, 1] }] }]
+                  - call: [runs.push, { call: [<.color_for, { at: [toks, { +: [tix, 2] }] }] }]
+                  - set: [tix, { +: [tix, 3] }]
+            # Die beanstandete Zeile ROT ueber die Syntaxfarben legen (doc/spec/108 §6a).
+            # Zuletzt angehaengt, damit sie gewinnt; ohne Fundstelle bleibt alles wie es
+            # ist — falsch markieren waere schlimmer als gar nicht markieren.
+            - if:
+                condition: { gt: [<.err_line, 0] }
+                then:
+                  - decl: [rows, list<string>, { call: [src.split, "\n"] }]
+                  - if:
+                      condition: { le: [<.err_line, rows.len] }
+                      then:
+                        - decl: [off, i32, 0]
+                        - decl: [rix, i32, 0]
+                        - while:
+                            condition: { lt: [rix, { -: [<.err_line, 1] }] }
+                            body:
+                              - decl: [one_row, string, { at: [rows, rix] }]
+                              # +1 fuer das Zeilenende, das `split` entfernt hat.
+                              - set: [off, { +: [off, { +: [one_row.len, 1] }] }]
+                              - set: [rix, { +: [rix, 1] }]
+                        - decl: [hit_row, string, { at: [rows, { -: [<.err_line, 1] }] }]
+                        - call: [runs.push, off]
+                        - call: [runs.push, hit_row.len]
+                        - call: [runs.push, 0xFF6655FF]
+            - call: [<.scene.set_color_runs, "src_box", runs]
+
+      - def:
+          name: color_for
+          args: [[kind, i32]]
+          return: i32
+          body:
+            - if: { condition: { eq: [kind, YamlTok.comment] },   then: [{ return: 0x6A7B8CFF }] }
+            - if: { condition: { eq: [kind, YamlTok.key] },       then: [{ return: 0x8FC7FFFF }] }
+            - if: { condition: { eq: [kind, YamlTok.string] },    then: [{ return: 0xC8E6A0FF }] }
+            - if: { condition: { eq: [kind, YamlTok.number] },    then: [{ return: 0xE6B98AFF }] }
+            - if: { condition: { eq: [kind, YamlTok.keyword] },   then: [{ return: 0xE09AD8FF }] }
+            - if: { condition: { eq: [kind, YamlTok.punct] },     then: [{ return: 0x7A8899FF }] }
+            - if: { condition: { eq: [kind, YamlTok.anchor] },    then: [{ return: 0xE0C97AFF }] }
+            - if: { condition: { eq: [kind, YamlTok.tag] },       then: [{ return: 0xE0C97AFF }] }
+            - if: { condition: { eq: [kind, YamlTok.directive] }, then: [{ return: 0xE09AD8FF }] }
+            - return: 0xDDE6F0FF
+
+      - def:
+          name: render
+          body:
+            - if: { condition: { eq: [<.initialized, 0] }, then: [{ call: [<.init] }] }
+            - if: { condition: { eq: [<.is_visible, 0] }, then: [{ return }] }
+            - call: [<.highlight]
+            - if:
+                condition: { eq: [{ call: [<.scene.child_clicked, "clear_btn"] }, 1] }
+                then:
+                  - call: [<.scene.set_text, "out_box", ""]
+                  - call: [<.scene.set_text, "diag_box", ""]
+                  - call: [<.scene.set_text, "status_lbl", "geleert"]
+            - if:
+                condition: { eq: [{ call: [<.scene.child_clicked, "run_btn"] }, 1] }
+                then:
+                  # Das Tor steht AUCH hier, obwohl der Server es ohnehin prueft:
+                  # Verbergen ist Komfort, keine Sicherheit (doc/spec/91 §AP2.C) —
+                  # aber eine Ablehnung, die man schon vor dem Netz erklaeren kann,
+                  # ist besser als eine, die nach einem Umweg zurueckkommt.
+                  - if:
+                      condition: { neq: [<.my_level, 1] }
+                      then:
+                        - call: [<.scene.set_text, "status_lbl", "Freigabe 1 (Admin) noetig — diese Sitzung hat ${<.my_level}"]
+                        - { return }
+                  - if: { condition: { eq: [<.busy, 1] }, then: [{ return }] }
+                  - set: [<.busy, 1]
+                  - set: [<.run_req, 1]
+                  - call: [<.scene.set_text, "status_lbl", "laeuft ..."]
+
+      - def:
+          name: set_pending
+          args: [[run_no, i32]]
+          body:
+            - set: [<.pending, run_no]
+            - if:
+                condition: { gt: [run_no, 0] }
+                then: [{ call: [<.scene.set_text, "status_lbl", "laeuft (#${run_no}) ..."] }]
+
+      - def:
+          name: pending_run
+          return: i32
+          body:
+            - return: <.pending
+
+      # set_resources: die Kennzahlen des Controllers (doc/spec/109).  Sie standen
+      # vorher in der Fusszeile zwischen den Agenten-Zahlen — dort las sie niemand als
+      # „der Controller", sondern als „noch eine Agenten-Angabe" (User 2026-10-18).
+      - def:
+          name: set_resources
+          args: [[cpu_pm, i32], [rss_kb, i64], [agents_on, i32], [agents_all, i32]]
+          body:
+            - if: { condition: { eq: [<.initialized, 0] }, then: [{ return }] }
+            - if:
+                condition: { le: [rss_kb, 0] }
+                then:
+                  - call: [<.scene.set_text, "cpu_val", "k. A."]
+                  - call: [<.scene.set_text, "ram_val", "k. A."]
+                else:
+                  - decl: [cpu_pct, i32, { /: [cpu_pm, 10] }]
+                  - decl: [rss_mb, i64, { /: [rss_kb, 1024] }]
+                  - call: [<.scene.set_text, "cpu_val", "${cpu_pct} %"]
+                  - call: [<.scene.set_text, "ram_val", "${rss_mb} MB"]
+            - call: [<.scene.set_text, "agt_val", "${agents_on} / ${agents_all}"]
+
+      - def:
+          name: set_runs_active
+          args: [[active, i32]]
+          body:
+            - if: { condition: { eq: [<.initialized, 0] }, then: [{ return }] }
+            - call: [<.scene.set_text, "run_val", "${active}"]

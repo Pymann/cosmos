@@ -1,0 +1,12 @@
+# Antwort von config_read (doc/spec/111 §111.2): das Ist.
+#
+# Static-Check (aiml spec/49 §14): 1 model.
+- import: "sources/models/catalog_entry.aiml"
+
+- model:
+    name: CascReadResp
+    fields:
+      - [success, i32]
+      - [message, string]
+      - [config,  CascConfig]
+      - [entries, list<CatalogEntry>]

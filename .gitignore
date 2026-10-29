@@ -1,0 +1,93 @@
+# ── Was git NICHT sehen soll ─────────────────────────────────────────────
+#
+# WICHTIG: Bau-Artefakte sind mit `/` an die WURZEL gebunden.  Ein
+# unverankertes `server` oder `agent` traf frueher JEDEN Pfadbestandteil
+# dieses Namens — also auch `sources/server/` und `sources/agent/`, die
+# damit komplett unsichtbar waren (gefunden 27.10.2026 nach `git init`).
+# Ein Muster ohne `/` ist in dieser Datei ein Fehler, kein Stil.
+
+# ── Grosse Erzeugnisse: NIE ins Repo ─────────────────────────────────────
+# `git add .` lief in diese beiden und meldete minutenlang Rechte-Warnungen
+# (root-eigene Container-Schichten).  Zusammen 11,4 GB.
+/alt_*/
+deploy/oci/
+deploy/rt_base/
+deploy/rt_cuts/
+deploy/rt_image/
+deploy/rt_template/
+deploy/runtime/
+deploy/*.tar.gz
+console_snapshot.txt
+
+# Vorbereitete Container-Wurzeln der Laufzeit (~280 MB Bibliotheken je Stueck)
+/runtime/.rt_*/
+
+# Arbeitsverzeichnisse der Tests und Proben (je Lauf neu angelegt)
+/.chk/
+/.e2e_chaos/
+/.e2e_pipe/
+/.e2e_api/
+/.e2e_identity/
+/.e2e_museum/
+/.e2e_prov/
+/.liveshape/
+/.lt/
+/.matrix/
+/.runpipe/
+/.sched/
+/.step_run/
+/.test_env/
+/.test_notes/
+/.wire/
+
+# Arbeits- und Laufverzeichnisse
+out/
+__aiml_cache/
+__exodus_cache/
+aiondb/
+# Sicherungen der Datenbank liegen gesammelt unter backups/ (27.10.2026),
+# nicht mehr als `aiondb.bak_<datum>` neben der laufenden DB.
+backups/
+logs/
+run_logs/
+runs/
+.test_run/
+.e2e_run/
+.mem_run/
+.probe_run/
+.tok_run/
+.cas_run/
+.e2e_console/
+console_runs/
+
+# ── Bau-Artefakte ────────────────────────────────────────────────────────
+# MUSTER statt Namensliste: jede `exodus-*.json` traegt `artifact_in_cwd:
+# true`, das Artefakt landet also in der Wurzel.  Die frueher hier gepflegte
+# Liste von ~40 Namen brauchte je neuer Config eine neue Zeile — sechs
+# fehlten (cosmos-oci, cosmos-rt, cosmosd_check, rt_probe, test_oci, test_rt).
+/test_*
+/e2e_*
+/probe_*
+!/probe_*.sh
+/rt_probe
+/cosmos-*
+/cosmosd*
+/*.so
+/agent
+/controller
+/server
+/client_native
+/static
+/static_server
+/show_state
+/submit_work
+/purge_demo
+/pipe3d_shot
+/ui_shot
+/t_res
+/client.html
+/client.js
+/client.wasm
+
+# Erzeugte Wortlisten (doc/spec/44_8): stehen im Quelltext, nicht als Datei.
+assets/

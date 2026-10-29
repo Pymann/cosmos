@@ -1,0 +1,212 @@
+# Abnahme P7 + Schritt 6/7 (doc/spec/94): der PLAN, ohne einen Knoten.
+#
+# Der Plan ist absichtlich nebenwirkungsfrei, damit genau die Zusagen prüfbar
+# sind, die man im Code am leichtesten verletzt:
+#   - das Token steht in KEINER Befehlszeile (es landet in der Prozessliste)
+#   - die Dienst-Einheit nimmt --agent-token-file, nicht --agent-token
+#   - der Anbindungspfad des AppArmor-Profils IST der Installationspfad
+#   - Passwort-Schritte und Inhalts-Schritte sind getrennte Schritte
+# Expected exit code: 0
+
+- import: "sources/server/agent_provisioner.aiml"
+
+- def:
+    name: expect
+    args: [[what, string], [cond, i32]]
+    return: i32
+    body:
+      - if:
+          condition: { eq: [cond, 1] }
+          then: [{ print: ["  ok   ${what}"] }, { return: 0 }]
+      - print: ["  FAIL ${what}"]
+      - return: 1
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      - decl: [prov, ptr<AgentProvisioner>, { new: AgentProvisioner }]
+
+      - decl: [cfg, ProvisionConfig]
+      - set: [cfg.host, "node.example.test"]
+      - set: [cfg.port, 22]
+      - set: [cfg.login_user, "deploy"]
+      - set: [cfg.service_user, "cosmos-agent"]
+      - set: [cfg.install_dir, "/opt/cosmos"]
+      - set: [cfg.stage_dir, "/tmp/cosmos-stage"]
+      - set: [cfg.apparmor_dir, "/etc/apparmor.d"]
+      - set: [cfg.systemd_dir, "/etc/systemd/system"]
+      - set: [cfg.subuid_file, "/etc/subuid"]
+      - set: [cfg.subgid_file, "/etc/subgid"]
+      - set: [cfg.sudo_prefix, "sudo -S -p '' "]
+      - set: [cfg.verify_prefix, "sudo -S -p '' -u cosmos-agent "]
+      - set: [cfg.apparmor_reload_cmd, "apparmor_parser -r"]
+      - set: [cfg.apparmor_unload_cmd, "apparmor_parser -R"]
+      - set: [cfg.pkg_install_cmd, "apt-get install -y uidmap"]
+      - set: [cfg.service_install_cmd, "systemctl daemon-reload && systemctl enable --now cosmos-agent"]
+      - set: [cfg.service_check_cmd, "systemctl is-active --quiet cosmos-agent"]
+      - set: [cfg.service_stop_cmd, "systemctl disable --now cosmos-agent"]
+      - set: [cfg.subuid_base, 100000]
+      - set: [cfg.subuid_count, 65536]
+      - set: [cfg.token_label, "node-1"]
+
+      # Ein Token, das sich unverwechselbar wiederfinden lässt.
+      - decl: [tok, string, "a1b2c3d4e5f6a7b8.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"]
+      - decl: [bin_src, path, "/does/not/matter/agent"]
+      - decl: [rt_src, path, "/does/not/matter/libaiml.so"]
+      - decl: [steps, list<ProvisionStep>, { call: [prov.plan, cfg, bin_src, rt_src, tok, "ws://controller:8799"] }]
+
+      - set: [fails, { +: [fails, { call: [expect, "Plan hat Schritte", { gt: [steps.len, 10] }] }] }]
+      # Der Plan MUSS das Arbeitsverzeichnis anlegen — sonst zeigt die Einheit
+      # auf ein Verzeichnis, das es nicht gibt, und der Dienst startet nicht.
+      - decl: [has_wd, i32, 0]
+      - decl: [wix, i32, 0]
+      - while:
+          condition: { lt: [wix, steps.len] }
+          body:
+            - decl: [wstep, ProvisionStep, { at: [steps, wix] }]
+            - if: { condition: { eq: [wstep.name, "work_dir"] }, then: [{ set: [has_wd, 1] }] }
+            - set: [wix, { +: [wix, 1] }]
+      - set: [fails, { +: [fails, { call: [expect, "Plan legt das Arbeitsverzeichnis an", { eq: [has_wd, 1] }] }] }]
+
+      # ── Das Token darf in KEINEM command stehen ─────────────────────────
+      - decl: [tok_in_cmd, i32, 0]
+      - decl: [tok_in_payload, i32, 0]
+      - decl: [six, i32, 0]
+      - while:
+          condition: { lt: [six, steps.len] }
+          body:
+            - decl: [step_a, ProvisionStep, { at: [steps, six] }]
+            - if:
+                condition: { gt: [{ call: [step_a.command.index_of, tok] }, -1] }
+                then: [{ set: [tok_in_cmd, 1] }, { print: ["     (in Schritt '${step_a.name}')"] }]
+            - if:
+                condition: { gt: [{ call: [step_a.payload.index_of, tok] }, -1] }
+                then: [{ set: [tok_in_payload, 1] }]
+            - set: [six, { +: [six, 1] }]
+      - set: [fails, { +: [fails, { call: [expect, "P7 Token in keiner Befehlszeile", { eq: [tok_in_cmd, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "P7 Token kommt als payload (ueber stdin)", { eq: [tok_in_payload, 1] }] }] }]
+
+      # ── Profil: Anbindungspfad == Installationspfad ─────────────────────
+      - decl: [prof, string, { call: [prov.profile_text, "/opt/cosmos/agent", "/opt/cosmos/bwrap"] }]
+      - set: [fails, { +: [fails, { call: [expect, "Profil bindet an den Installationspfad", { gt: [{ call: [prof.index_of, "profile cosmos-agent /opt/cosmos/agent "] }, -1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Profil erlaubt userns", { gt: [{ call: [prof.index_of, "userns,"] }, -1] }] }] }]
+      # Den Namespace erzeugt bwrap — ein Profil nur fuer den Agenten haette
+      # das falsche Programm berechtigt (doc/spec/94 Schritt 6).
+      - set: [fails, { +: [fails, { call: [expect, "Profil deckt die bwrap-Kopie ab", { gt: [{ call: [prof.index_of, "profile cosmos-agent-bwrap /opt/cosmos/bwrap "] }, -1] }] }] }]
+      # Geprueft wird die BINDUNG, nicht die Erwaehnung: der Profiltext nennt
+      # /usr/bin/bwrap in der Begruendung, berechtigen darf er es nicht.
+      - set: [fails, { +: [fails, { call: [expect, "systemweites /usr/bin/bwrap bleibt unberechtigt", { lt: [{ call: [prof.index_of, "profile cosmos-agent-bwrap /usr/bin/"] }, 0] }] }] }]
+      # Kein Entwickler-Muster im Betriebsprofil: {,*/} waere dort unnoetig weit.
+      - set: [fails, { +: [fails, { call: [expect, "Profil ohne Entwickler-Muster {,*/}", { lt: [{ call: [prof.index_of, "{,*/}"] }, 0] }] }] }]
+
+      # ── Einheit: Token als DATEI ────────────────────────────────────────
+      # Name und Etiketten gehoeren in die Einheit — ohne sie trug jeder
+      # eingerichtete Knoten denselben Standardnamen und fuehrte keine
+      # Etiketten, also traf ihn kein `label:` aus einem Job (2026-10-15).
+      - decl: [ucfg, ProvisionConfig]
+      - set: [ucfg.agent_id, "builder-7"]
+      - set: [ucfg.agent_labels, "linux,arm64"]
+      - decl: [unit, string, { call: [prov.unit_text, ucfg, "/opt/cosmos/agent", "/opt/cosmos/agent.token", "cosmos-agent", "ws://c:8799"] }]
+      - set: [fails, { +: [fails, { call: [expect, "Einheit traegt den Namen", { gt: [{ call: [unit.index_of, "--agent-id builder-7"] }, -1] }] }] }]
+      # OHNE WorkingDirectory startet systemd den Dienst in „/" — dort kann er
+      # seine Schritt-Verzeichnisse nicht anlegen, und ein Lauf bleibt ewig
+      # „running", weil niemand seinen Ausgang melden kann (2026-10-15).
+      - set: [fails, { +: [fails, { call: [expect, "Einheit hat ein Arbeitsverzeichnis", { gt: [{ call: [unit.index_of, "WorkingDirectory=/var/lib/cosmos-agent"] }, -1] }] }] }]
+      # Ohne KillMode=process nimmt systemd beim Neustart den laufenden SCHRITT
+      # mit — dann ist nach dem Neustart nichts mehr wiederaufzunehmen.
+      - set: [fails, { +: [fails, { call: [expect, "Einheit laesst laufende Schritte am Leben", { gt: [{ call: [unit.index_of, "KillMode=process"] }, -1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Einheit traegt die Etiketten", { gt: [{ call: [unit.index_of, "--labels linux,arm64"] }, -1] }] }] }]
+      - decl: [bare_cfg, ProvisionConfig]
+      - decl: [bare, string, { call: [prov.unit_text, bare_cfg, "/opt/cosmos/agent", "/opt/cosmos/agent.token", "cosmos-agent", "ws://c:8799"] }]
+      - set: [fails, { +: [fails, { call: [expect, "ohne Angabe KEIN leeres --agent-id", { lt: [{ call: [bare.index_of, "--agent-id"] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Einheit nutzt --agent-token-file", { gt: [{ call: [unit.index_of, "--agent-token-file /opt/cosmos/agent.token"] }, -1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Einheit laeuft als Dienstnutzer", { gt: [{ call: [unit.index_of, "User=cosmos-agent"] }, -1] }] }] }]
+
+      # ── Reihenfolge: Nachweis ist der LETZTE Schritt ────────────────────
+      # Befund 5a: der Nachweis MUSS vor dem Dienststart liegen, sonst laeuft
+      # der Agent, obwohl die Isolation nicht traegt.
+      - decl: [idx_verify, i32, -1]
+      - decl: [idx_start, i32, -1]
+      - decl: [pix, i32, 0]
+      - while:
+          condition: { lt: [pix, steps.len] }
+          body:
+            - decl: [stp, ProvisionStep, { at: [steps, pix] }]
+            - if: { condition: { eq: [stp.name, "verify_isolation"] }, then: [{ set: [idx_verify, pix] }] }
+            - if: { condition: { eq: [stp.name, "service_start"] }, then: [{ set: [idx_start, pix] }] }
+            - set: [pix, { +: [pix, 1] }]
+      - set: [fails, { +: [fails, { call: [expect, "Befund 5a Nachweis liegt VOR dem Dienststart", { '&&': [{ gt: [idx_verify, -1] }, { lt: [idx_verify, idx_start] }] }] }] }]
+      - decl: [last_step, ProvisionStep, { at: [steps, { -: [steps.len, 1] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "letzter Schritt prueft, dass der Dienst laeuft", { eq: [last_step.name, "service_active"] }] }] }]
+
+      # ── Inhalts-Schritte benutzen kein sudo ─────────────────────────────
+      # Sonst muesste stdin Passwort UND Inhalt tragen.
+      - decl: [mixed, i32, 0]
+      - set: [six, 0]
+      - while:
+          condition: { lt: [six, steps.len] }
+          body:
+            - decl: [st2, ProvisionStep, { at: [steps, six] }]
+            - if:
+                condition: { '&&': [{ gt: [st2.stdin_mode, 1] }, { gt: [{ call: [st2.command.index_of, "sudo"] }, -1] }] }
+                then: [{ set: [mixed, 1] }, { print: ["     (Schritt '${st2.name}' mischt sudo und payload)"] }]
+            - set: [six, { +: [six, 1] }]
+      - set: [fails, { +: [fails, { call: [expect, "kein Schritt mischt sudo-Passwort und payload", { eq: [mixed, 0] }] }] }]
+
+      # ── Das Binary geht binaer, nicht als Text ──────────────────────────
+      - decl: [bin_mode_ok, i32, 0]
+      - set: [six, 0]
+      - while:
+          condition: { lt: [six, steps.len] }
+          body:
+            - decl: [st3, ProvisionStep, { at: [steps, six] }]
+            - if:
+                condition: { eq: [st3.name, "stage_binary"] }
+                then:
+                  - if: { condition: { eq: [st3.stdin_mode, 3] }, then: [{ set: [bin_mode_ok, 1] }] }
+            - set: [six, { +: [six, 1] }]
+      - set: [fails, { +: [fails, { call: [expect, "Binary wird binaer uebertragen (Modus 3)", { eq: [bin_mode_ok, 1] }] }] }]
+
+      # ── Rückbau-Plan (§94.5b) ───────────────────────────────────────────
+      - decl: [down, list<ProvisionStep>, { call: [prov.teardown_plan, cfg] }]
+      - set: [fails, { +: [fails, { call: [expect, "Rueckbau hat Schritte", { gt: [down.len, 5] }] }] }]
+
+      - decl: [idx_stop, i32, -1]
+      - decl: [idx_bin, i32, -1]
+      - decl: [idx_prof, i32, -1]
+      - decl: [idx_user, i32, -1]
+      - decl: [has_pkg_removal, i32, 0]
+      - decl: [dix, i32, 0]
+      - while:
+          condition: { lt: [dix, down.len] }
+          body:
+            - decl: [dstep, ProvisionStep, { at: [down, dix] }]
+            - if: { condition: { eq: [dstep.name, "service_stop"] }, then: [{ set: [idx_stop, dix] }] }
+            - if: { condition: { eq: [dstep.name, "remove_binary"] }, then: [{ set: [idx_bin, dix] }] }
+            - if: { condition: { eq: [dstep.name, "remove_profile"] }, then: [{ set: [idx_prof, dix] }] }
+            - if: { condition: { eq: [dstep.name, "remove_service_user"] }, then: [{ set: [idx_user, dix] }] }
+            # uidmap darf NICHT entfernt werden — es kann anderswo gebraucht werden.
+            - if: { condition: { gt: [{ call: [dstep.command.index_of, "uidmap"] }, -1] }, then: [{ set: [has_pkg_removal, 1] }] }
+            - set: [dix, { +: [dix, 1] }]
+
+      # Der Dienst muss zuerst weg, sonst laeuft ein Agent ohne seine Dateien.
+      - set: [fails, { +: [fails, { call: [expect, "Dienst wird VOR dem Binary gestoppt", { '&&': [{ gt: [idx_stop, -1] }, { lt: [idx_stop, idx_bin] }] }] }] }]
+      # Der Nutzer zuletzt, damit die Dateien noch ihm gehoeren koennen.
+      - set: [fails, { +: [fails, { call: [expect, "Dienstnutzer wird nach den Dateien geloescht", { gt: [idx_user, idx_bin] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "uidmap wird NICHT deinstalliert", { eq: [has_pkg_removal, 0] }] }] }]
+
+      # Das Profil muss ENTLADEN werden, bevor die Datei geht — sonst bleibt es
+      # im Kernel stehen.
+      - decl: [prof_step, ProvisionStep, { at: [down, idx_prof] }]
+      - decl: [pos_unload, i32, { call: [prof_step.command.index_of, "apparmor_parser -R"] }]
+      - decl: [pos_rm, i32, { call: [prof_step.command.index_of, "rm -f"] }]
+      - set: [fails, { +: [fails, { call: [expect, "Profil wird entladen BEVOR die Datei geht", { '&&': [{ gt: [pos_unload, -1] }, { lt: [pos_unload, pos_rm] }] }] }] }]
+
+      - if:
+          condition: { neq: [fails, 0] }
+          then: [{ print: ["test_provision_plan FAIL (${fails})"] }, { return: 1 }]
+      - print: ["test_provision_plan PASS"]
+      - return: 0

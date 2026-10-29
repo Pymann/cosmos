@@ -1,0 +1,338 @@
+# cosmos-api — REST-Gateway vor cosmosd (doc/spec/111 §111.8).
+#
+#   cosmos-api                      (Umgebung: COSMOS_API_PORT=8090,
+#                                    COSMOS_API_UPSTREAM=ws://127.0.0.1:9100)
+#
+# Routen (alle JSON; Token per `Authorization: Bearer <token>`):
+#   GET    /api/v1/health
+#   POST   /api/v1/login
+#   POST   /api/v1/register
+#   POST   /api/v1/logout
+#   GET    /api/v1/whoami
+#   GET    /api/v1/cluster
+#   GET    /api/v1/jobs
+#   PUT    /api/v1/jobs/:id
+#   POST   /api/v1/jobs/:id/run
+#   GET    /api/v1/runs
+#   POST   /api/v1/pipelines/run
+#   POST   /api/v1/runs/:id/pause
+#   POST   /api/v1/runs/:id/resume
+#   POST   /api/v1/runs/:id/step
+#   POST   /api/v1/runs/:id/rewind
+#   POST   /api/v1/console
+#   GET    /api/v1/config
+#   POST   /api/v1/config/plan
+#   POST   /api/v1/config/apply
+#   POST   /api/v1/tokens
+#   GET    /api/v1/tokens
+#   DELETE /api/v1/tokens/:id
+#   GET    /api/v1/campaigns
+#   POST   /api/v1/hooks/museum
+#   GET    /api/v1/sso/saml/login?relay=/pfad   (302 zum IdP)
+#   POST   /api/v1/sso/saml/acs                 (SAML POST-Bindung)
+#
+# srv.route braucht freie Funktionen: jede Route verpackt die Anfrage in einen
+# ApiExchange und leiht ihn dem ApiGateway.
+
+- import: "sources/api/api_gateway.aiml"
+
+- decl: [g_api, ptr<ApiGateway>]
+
+- def:
+    name: wrap
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    return: ptr<ApiExchange>
+    body:
+      - decl: [xch, ptr<ApiExchange>, { new: ApiExchange }]
+      - set: [xch.req, req]
+      - set: [xch.resp, resp]
+      - return: [xch]
+
+- def:
+    name: on_health
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
+      - call: [g_api.health, xch]
+      - call: [g_api.serial.release]
+
+- def:
+    name: on_login
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
+      - call: [g_api.login, xch]
+      - call: [g_api.serial.release]
+
+- def:
+    name: on_register
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
+      - call: [g_api.register, xch]
+      - call: [g_api.serial.release]
+
+- def:
+    name: on_logout
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
+      - call: [g_api.logout, xch]
+      - call: [g_api.serial.release]
+
+- def:
+    name: on_whoami
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
+      - call: [g_api.whoami, xch]
+      - call: [g_api.serial.release]
+
+- def:
+    name: on_cluster
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
+      - call: [g_api.cluster, xch, "all"]
+      - call: [g_api.serial.release]
+
+- def:
+    name: on_jobs
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
+      - call: [g_api.cluster, xch, "jobs"]
+      - call: [g_api.serial.release]
+
+- def:
+    name: on_job_put
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
+      - call: [g_api.save_job, xch]
+      - call: [g_api.serial.release]
+
+- def:
+    name: on_job_run
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
+      - call: [g_api.run_job, xch]
+      - call: [g_api.serial.release]
+
+- def:
+    name: on_runs
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
+      - call: [g_api.cluster, xch, "runs"]
+      - call: [g_api.serial.release]
+
+- def:
+    name: on_pipeline
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
+      - call: [g_api.submit, xch]
+      - call: [g_api.serial.release]
+
+- def:
+    name: on_run_pause
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
+      - call: [g_api.run_ctrl, xch, "pause_run"]
+      - call: [g_api.serial.release]
+
+- def:
+    name: on_run_resume
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
+      - call: [g_api.run_ctrl, xch, "resume_run"]
+      - call: [g_api.serial.release]
+
+- def:
+    name: on_run_step
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
+      - call: [g_api.run_ctrl, xch, "step_run"]
+      - call: [g_api.serial.release]
+
+- def:
+    name: on_run_rewind
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
+      - call: [g_api.run_ctrl, xch, "rewind_run"]
+      - call: [g_api.serial.release]
+
+- def:
+    name: on_console
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
+      - call: [g_api.console, xch]
+      - call: [g_api.serial.release]
+
+- def:
+    name: on_config_get
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
+      - call: [g_api.casc, xch, "config_read"]
+      - call: [g_api.serial.release]
+
+- def:
+    name: on_config_plan
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
+      - call: [g_api.casc, xch, "config_plan"]
+      - call: [g_api.serial.release]
+
+- def:
+    name: on_config_apply
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
+      - call: [g_api.casc, xch, "config_apply"]
+      - call: [g_api.serial.release]
+
+- def:
+    name: on_token_new
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
+      - call: [g_api.token_create, xch]
+      - call: [g_api.serial.release]
+
+- def:
+    name: on_token_list
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
+      - call: [g_api.token_list, xch]
+      - call: [g_api.serial.release]
+
+- def:
+    name: on_token_del
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
+      - call: [g_api.token_revoke, xch]
+      - call: [g_api.serial.release]
+
+- def:
+    name: on_campaigns
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
+      - call: [g_api.campaigns, xch]
+      - call: [g_api.serial.release]
+
+- def:
+    name: on_museum_hook
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
+      - call: [g_api.museum_hook, xch]
+      - call: [g_api.serial.release]
+
+- def:
+    name: on_sso_login
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
+      - call: [g_api.sso_login, xch]
+      - call: [g_api.serial.release]
+
+- def:
+    name: on_sso_acs
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
+      - call: [g_api.sso_acs, xch]
+      - call: [g_api.serial.release]
+
+- def:
+    name: main
+    return: i32
+    body:
+      - decl: [envm, map<string:string>, { call: [sys.env] }]
+      - decl: [port, i32, 8090]
+      - if:
+          condition: { gt: [{ call: [envm.contains, "COSMOS_API_PORT"] }, 0] }
+          then:
+            - decl: [port_txt, string, { call: [envm.get, "COSMOS_API_PORT"] }]
+            - set: [port, { call: [port_txt.to_int] }]
+      - decl: [upstream, string, "ws://127.0.0.1:9100"]
+      - if: { condition: { gt: [{ call: [envm.contains, "COSMOS_API_UPSTREAM"] }, 0] }, then: [{ set: [upstream, { call: [envm.get, "COSMOS_API_UPSTREAM"] }] }] }
+      - set: [g_api, { new: ApiGateway }]
+      - call: [g_api.init, upstream]
+      - decl: [srv, http_server_handle]
+      - set: [srv, { call: [http.server, "0.0.0.0", port] }]
+      - if:
+          condition: { eq: [srv, null] }
+          then:
+            - call: [log.error, "cosmos-api: Port ${port} nicht bindbar"]
+            - return: 1
+      - call: [srv.set_max_body, 16777216]
+      - call: [srv.set_timeout, 120]
+      - call: [srv.route, "GET", "/api/v1/health", on_health]
+      - call: [srv.route, "POST", "/api/v1/login", on_login]
+      - call: [srv.route, "POST", "/api/v1/register", on_register]
+      - call: [srv.route, "POST", "/api/v1/logout", on_logout]
+      - call: [srv.route, "GET", "/api/v1/whoami", on_whoami]
+      - call: [srv.route, "GET", "/api/v1/cluster", on_cluster]
+      - call: [srv.route, "GET", "/api/v1/jobs", on_jobs]
+      - call: [srv.route, "PUT", "/api/v1/jobs/:id", on_job_put]
+      - call: [srv.route, "POST", "/api/v1/jobs/:id/run", on_job_run]
+      - call: [srv.route, "GET", "/api/v1/runs", on_runs]
+      - call: [srv.route, "POST", "/api/v1/pipelines/run", on_pipeline]
+      - call: [srv.route, "POST", "/api/v1/runs/:id/pause", on_run_pause]
+      - call: [srv.route, "POST", "/api/v1/runs/:id/resume", on_run_resume]
+      - call: [srv.route, "POST", "/api/v1/runs/:id/step", on_run_step]
+      - call: [srv.route, "POST", "/api/v1/runs/:id/rewind", on_run_rewind]
+      - call: [srv.route, "POST", "/api/v1/console", on_console]
+      - call: [srv.route, "GET", "/api/v1/config", on_config_get]
+      - call: [srv.route, "POST", "/api/v1/config/plan", on_config_plan]
+      - call: [srv.route, "POST", "/api/v1/config/apply", on_config_apply]
+      - call: [srv.route, "POST", "/api/v1/tokens", on_token_new]
+      - call: [srv.route, "GET", "/api/v1/tokens", on_token_list]
+      - call: [srv.route, "DELETE", "/api/v1/tokens/:id", on_token_del]
+      - call: [srv.route, "GET", "/api/v1/campaigns", on_campaigns]
+      - call: [srv.route, "POST", "/api/v1/hooks/museum", on_museum_hook]
+      - call: [srv.route, "GET", "/api/v1/sso/saml/login", on_sso_login]
+      - call: [srv.route, "POST", "/api/v1/sso/saml/acs", on_sso_acs]
+      - call: [log.info, "cosmos-api: http://0.0.0.0:${port}/api/v1 → ${upstream}"]
+      - call: [srv.start]
+      - call: [log.error, "cosmos-api: beendet"]
+      - return: 1

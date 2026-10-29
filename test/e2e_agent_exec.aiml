@@ -1,0 +1,96 @@
+# AP1-Abnahme end-to-end (doc/spec/90 §AP1.5): braucht einen laufenden cosmosd
+# und einen Agenten mit --exec-url (siehe run_e2e.sh).
+#
+# Prüft: Agent erscheint live (1), Kommando läuft auf dem Agenten (3),
+# Exit-Code (7), cwd wirkt (8), stderr getrennt (9) und die Ausgabe-Ablage
+# mit Fenster-Lesen bei grosser Ausgabe (10).
+#
+# Expected exit code: 0
+
+- import: "test/e2e_runner.aiml"
+
+- def:
+    name: expect
+    args: [[label, string], [cond, i32]]
+    return: i32
+    body:
+      - if: { condition: { eq: [cond, 1] }, then: [{ return: 0 }] }
+      - print: ["FAIL ${label}"]
+      - return: 1
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      - decl: [url, string, "ws://127.0.0.1:8765"]
+      - decl: [envm, map<string:string>, { call: [sys.env] }]
+      - if: { condition: { gt: [{ call: [envm.contains, "COSMOS_E2E_URL"] }, 0] }, then: [{ set: [url, { call: [envm.get, "COSMOS_E2E_URL"] }] }] }
+      - decl: [wait_ms, i64, 20000]
+      - decl: [run_ms, i64, 30000]
+      - decl: [off_zero, i64, 0]
+      - decl: [off_mid, i64, 50000]
+
+      - decl: [runner, ptr<E2eRunner>, { new: E2eRunner }]
+      - if: { condition: { neq: [{ call: [runner.connect, url] }, 1] }, then: [{ return: 1 }] }
+      - if: { condition: { neq: [{ call: [runner.login, "e2e@example.com", "hunter2pw"] }, 1] }, then: [{ return: 1 }] }
+
+      # (1) Agent erscheint live in der Übersicht
+      - decl: [seen, i32, { call: [runner.wait_agent, "agent-e2e", wait_ms] }]
+      - set: [fails, { +: [fails, { call: [expect, "agent erscheint live", { eq: [seen, 1] }] }] }]
+      - if: { condition: { neq: [seen, 1] }, then: [{ print: ["E2E abort: agent never showed up"] }, { return: 1 }] }
+
+      # (3,7,8,9) Kommando mit cwd, getrennten Strömen und Exit-Code
+      - decl: [started, i32, { call: [runner.start, "agent-e2e", "pwd; echo err-line 1>&2; exit 7", "/tmp"] }]
+      - set: [fails, { +: [fails, { call: [expect, "run_on_agent akzeptiert", { eq: [started, 1] }] }] }]
+      - if: { condition: { neq: [started, 1] }, then: [{ print: ["E2E abort: run not accepted"] }, { return: 1 }] }
+      - decl: [done, i32, { call: [runner.collect, run_ms] }]
+      - set: [fails, { +: [fails, { call: [expect, "command_result kommt an", { eq: [done, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "exit-code 7 (Kriterium 7)", { eq: [runner.exit_code, 7] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "cwd wirkt: pwd = /tmp (Kriterium 8)", { ge: [{ call: [runner.out_text.index_of, "/tmp"] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "stderr getrennt (Kriterium 9)", { ge: [{ call: [runner.err_text.index_of, "err-line"] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "stdout enthält kein stderr", { lt: [{ call: [runner.out_text.index_of, "err-line"] }, 0] }] }] }]
+
+      # Ausgabe liegt persistiert vor und ist fensterweise lesbar
+      - decl: [win_a, RunWindow, { call: [runner.read_window, OutStream.out, off_zero, 4096] }]
+      - set: [fails, { +: [fails, { call: [expect, "Fenster liefert stdout", { ge: [{ call: [win_a.data.index_of, "/tmp"] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Fenster meldet done", { eq: [win_a.done, 1] }] }] }]
+      - decl: [win_e, RunWindow, { call: [runner.read_window, OutStream.err, off_zero, 4096] }]
+      - set: [fails, { +: [fails, { call: [expect, "Fenster liefert stderr getrennt", { ge: [{ call: [win_e.data.index_of, "err-line"] }, 0] }] }] }]
+
+      - decl: [nfo_a, RunInfo, { call: [runner.read_info] }]
+      - set: [fails, { +: [fails, { call: [expect, "info: finished", { eq: [nfo_a.state, RunState.finished] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "info: exit 7", { eq: [nfo_a.exit_code, 7] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "info: out_bytes > 0", { gt: [nfo_a.out_bytes, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "info: err_bytes > 0", { gt: [nfo_a.err_bytes, 0] }] }] }]
+
+      # (10) Grosse Ausgabe: der Client hält nichts, gelesen wird nur ein Fenster
+      - set: [runner.keep_text, 0]
+      - decl: [big_cmd, string, "seq 1 20000"]
+      - if: { condition: { gt: [{ call: [envm.contains, "COSMOS_E2E_BIG"] }, 0] }, then: [{ set: [big_cmd, { call: [envm.get, "COSMOS_E2E_BIG"] }] }] }
+      # Endmarker: fehlt er am Dateiende, wurde die Ausgabe abgeschnitten.
+      - set: [big_cmd, "${big_cmd}; echo CMD-END-MARK"]
+      - decl: [big, i32, { call: [runner.start, "agent-e2e", big_cmd, ""] }]
+      - set: [fails, { +: [fails, { call: [expect, "grosser Lauf akzeptiert", { eq: [big, 1] }] }] }]
+      - decl: [big_done, i32, { call: [runner.collect, run_ms] }]
+      - set: [fails, { +: [fails, { call: [expect, "grosser Lauf endet", { eq: [big_done, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "grosser Lauf exit 0", { eq: [runner.exit_code, 0] }] }] }]
+      - decl: [nfo_b, RunInfo, { call: [runner.read_info] }]
+      - set: [fails, { +: [fails, { call: [expect, "grosse Ausgabe > 100 KB persistiert", { gt: [nfo_b.out_bytes, 100000] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "gestreamte Bytes = Dateigrösse", { eq: [nfo_b.out_bytes, runner.out_bytes] }] }] }]
+      - decl: [win_b, RunWindow, { call: [runner.read_window, OutStream.out, off_mid, 100] }]
+      - set: [fails, { +: [fails, { call: [expect, "Fenster liefert genau 100 B", { eq: [win_b.data.len, 100] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Fenster next_offset = 50100", { eq: [win_b.next_offset, 50100] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Fenster total = out_bytes", { eq: [win_b.total, nfo_b.out_bytes] }] }] }]
+
+      # Die Ausgabe ist VOLLSTÄNDIG: der Endmarker steht am Dateiende.
+      - decl: [tail_off, i64, { -: [nfo_b.out_bytes, 64] }]
+      - if: { condition: { lt: [tail_off, 0] }, then: [{ set: [tail_off, off_zero] }] }
+      - decl: [win_tail, RunWindow, { call: [runner.read_window, OutStream.out, tail_off, 64] }]
+      - set: [fails, { +: [fails, { call: [expect, "Ausgabe komplett (Endmarker am Ende)", { ge: [{ call: [win_tail.data.index_of, "CMD-END-MARK"] }, 0] }] }] }]
+
+      - call: [runner.close]
+      - if: { condition: { gt: [fails, 0] }, then: [{ print: ["e2e_agent_exec: ${fails} failed"] }, { return: 1 }] }
+      - print: ["e2e_agent_exec PASS"]
+      - return: 0

@@ -1,0 +1,58 @@
+# Was eine Stufe hinterlaesst (doc/spec/107 §107.1c).
+#
+# Eine Schicht ist der Dateisystem-Zuwachs EINER Stufe: was sie angelegt,
+# geaendert und geloescht hat.  Technisch ist das der overlayfs-`upper` der
+# Stufe (doc/spec/92, Scheibe 2) — inklusive Whiteouts, die der OCI-Export
+# schon versteht.
+#
+# Warum ein eigenes Modell und kein Feld an PipelineStage: ein neues Feld dort
+# aendert das Layout von PipelineRun und damit den Schema-Fingerprint — jeder
+# gespeicherte Lauf waere unlesbar (doc/spec/108 F108-2).  Die Schichtangaben
+# entstehen ausserdem NACH der Stufe und von jemand anderem (Laufzeit statt
+# Zuteilung).
+#
+# Static-Check (aiml spec/49 §14): 1 enum, 2 models.
+
+# Wiederverwendungsklasse, wie die Pipeline sie SAGT (aiml spec/62 §7).  Die
+# Vorgabe ist `opaque`: nichts wird wiederverwendet, bis jemand es behauptet.
+- enum:
+    name: ReuseClass
+    values:
+      - opaque
+      - resolved
+      - pure
+
+- model:
+    name: StageLayer
+    fields:
+      # Zu welchem LAUF — eine Schicht ohne ihren Lauf ist nicht zuzuordnen,
+      # und der Schnappschuss traegt alle Laeufe in einer Liste.
+      - [run_id,    string]
+      # Der NACKTE Stufenname — im Lauf heisst die Stufe "bauen [arch=x86_64]".
+      - [stage,     string]
+      - [bindings,  string]        # welche Lane
+      - [bytes,     i64]           # Groesse des Zuwachses
+      - [files,     i32]           # wie viele Dateien
+      - [digest,    string]        # "" = noch nicht geschrieben
+      - [reuse,     i32]           # ReuseClass
+      # Liegt dieser Inhalt BEREITS im Speicher (inhaltsadressiert)?  Dann ist
+      # er beim naechsten Lauf fix und muss nicht neu geschrieben werden.
+      - [stored,    i32]
+
+# Wie lange eine Stufe gelaufen ist (doc/spec/107 §107.1h).
+#
+# Aus demselben Grund NEBEN dem Lauf und nicht in ihm wie die Schicht: ein
+# neues Feld an `PipelineStage` aendert den Schema-Fingerabdruck von
+# `PipelineRun`, und jeder gespeicherte Lauf waere unlesbar (doc/spec/108
+# F108-2).  Gemessen wird am CONTROLLER (Zuteilung → Meldung), nicht am
+# Agenten: nur so sind zwei Stufen desselben Laufs ueberhaupt vergleichbar,
+# und die Uhr des Agenten geht woanders.
+- model:
+    name: StageTime
+    fields:
+      - [run_id,     string]
+      - [stage,      string]
+      - [bindings,   string]
+      - [started_ms, i64]
+      # 0 = laeuft noch.  Die Oberflaeche rechnet dann gegen JETZT.
+      - [ended_ms,   i64]

@@ -1,0 +1,333 @@
+# Rebuild-Kampagnen — der Ablauf (doc/spec/111 §111.6, museum doc/ecosystem.md §5).
+#
+#   1. `package.published` mit Plan (impact) und KEINE offene Kampagne fuehrt
+#      das Projekt → neue Kampagne, ein Posten je Projekt aus `rebuild_waves`.
+#   2. Ein Posten startet, sobald alle seine `needs` fertig sind (Ausloeser
+#      zaehlt als fertig).  Der Job kommt aus dem Katalog (`project:` und
+#      `triggers: [museum]`, §111.4).
+#   3. Veroeffentlicht ein Projekt einer offenen Kampagne, wird sein Posten
+#      erledigt — es entsteht KEINE zweite Kampagne, die dieselben Projekte
+#      noch einmal baute.
+#   4. Scheitert ein Lauf, werden seine Abhaengigen `blocked` (fail closed).
+#   5. Sind alle `needs` eines Postens byte-gleich geblieben (`unchanged`),
+#      wird er uebersprungen: nichts, was er verbraucht, hat sich geaendert.
+#
+# museum rechnet aus, WAS abhaengt; cosmos entscheidet, WANN es laeuft.
+#
+# Kein Static-Check-Zaehler: nur Gruppen-Methoden und zwei Handler.
+
+- import: "sources/server/campaign_store.aiml"
+- import: "sources/shared/pipe_status.aiml"
+
+- groupmethods:
+    group: CosmosRuntime
+    instances:
+      - instance: campaigns
+        methods:
+          # Zustand eines Projekts in der Kampagne.  Der Ausloeser selbst ist
+          # kein Posten und gilt als veroeffentlicht.
+          - def:
+              name: state_of
+              static_off: ["str_cmp"]
+              args: [[camp, ref<Campaign>], [project, string]]
+              return: { type: string, lifetime: producer }
+              body:
+                - if: { condition: { eq: [project, camp.trigger] }, then: [{ return: "published" }] }
+                - decl: [six, i32, 0]
+                - while:
+                    condition: { lt: [six, camp.items.len] }
+                    body:
+                      - decl: [one, CampaignItem, { at: [camp.items, six] }]
+                      - if: { condition: { eq: [one.project, project] }, then: [{ return: one.state }] }
+                      - set: [six, { +: [six, 1] }]
+                # Nicht in der Kampagne: nicht neu gebaut, also unveraendert.
+                - return: "unchanged"
+
+          - def:
+              name: is_done
+              static_off: ["str_cmp"]
+              args: [[state, string]]
+              return: i32
+              body:
+                - if: { condition: { eq: [state, "published"] }, then: [{ return: 1 }] }
+                - if: { condition: { eq: [state, "built"] }, then: [{ return: 1 }] }
+                - if: { condition: { eq: [state, "unchanged"] }, then: [{ return: 1 }] }
+                - if: { condition: { eq: [state, "skipped"] }, then: [{ return: 1 }] }
+                - return: 0
+
+          # advance: alles starten, was startbar ist; Zustand der Kampagne neu
+          # bestimmen.  Zustaende gehen nur vorwaerts, die Schleife endet also.
+          - def:
+              name: advance
+              static_off: ["str_cmp"]
+              args: [[camp, Campaign]]
+              return: { type: Campaign, lifetime: producer }
+              body:
+                - decl: [work, Campaign, camp]
+                - decl: [moved, i32, 1]
+                - while:
+                    condition: { eq: [moved, 1] }
+                    body:
+                      - set: [moved, 0]
+                      - decl: [iix, i32, 0]
+                      - while:
+                          condition: { lt: [iix, work.items.len] }
+                          body:
+                            - decl: [item, CampaignItem, { at: [work.items, iix] }]
+                            - if:
+                                condition: { '||': [{ eq: [item.state, "waiting"] }, { eq: [item.state, "no_job"] }] }
+                                then:
+                                  - decl: [bad, i32, 0]
+                                  - decl: [open, i32, 0]
+                                  - decl: [same, i32, 0]
+                                  - decl: [bad_dep, string, ""]
+                                  - decl: [nix, i32, 0]
+                                  - while:
+                                      condition: { lt: [nix, item.needs.len] }
+                                      body:
+                                        - decl: [dep, string, { call: [item.needs.get, nix] }]
+                                        - decl: [dst, string, { call: [<.state_of, work, dep] }]
+                                        - if:
+                                            condition: { '||': [{ eq: [dst, "failed"] }, { eq: [dst, "blocked"] }] }
+                                            then: [{ set: [bad, { +: [bad, 1] }] }, { set: [bad_dep, dep] }]
+                                            else:
+                                              - if: { condition: { eq: [{ call: [<.is_done, dst] }, 0] }, then: [{ set: [open, { +: [open, 1] }] }] }
+                                              - if: { condition: { '||': [{ eq: [dst, "unchanged"] }, { eq: [dst, "skipped"] }] }, then: [{ set: [same, { +: [same, 1] }] }] }
+                                        - set: [nix, { +: [nix, 1] }]
+                                  - if:
+                                      condition: { gt: [bad, 0] }
+                                      then:
+                                        - set: [item.state, "blocked"]
+                                        - set: [item.note, "${bad_dep} scheiterte"]
+                                        - set: [moved, 1]
+                                      else:
+                                        - if:
+                                            condition: { eq: [open, 0] }
+                                            then:
+                                              - if:
+                                                  condition: { '&&': [{ gt: [item.needs.len, 0] }, { eq: [same, item.needs.len] }] }
+                                                  then:
+                                                    - set: [item.state, "skipped"]
+                                                    - set: [item.note, "alle Abhaengigkeiten byte-gleich"]
+                                                    - set: [moved, 1]
+                                                  else:
+                                                    - if:
+                                                        condition: { eq: [item.job_id.len, 0] }
+                                                        then:
+                                                          - if:
+                                                              condition: { eq: [item.state, "waiting"] }
+                                                              then:
+                                                                - set: [item.state, "no_job"]
+                                                                - set: [item.note, "kein Katalog-Job mit project: ${item.project} und triggers: [museum]"]
+                                                        else:
+                                                          - decl: [run_id, string, { call: [<.cluster.start_job_now, item.job_id, "Kampagne ${work.campaign_id}"] }]
+                                                          - if:
+                                                              condition: { eq: [run_id.len, 0] }
+                                                              then:
+                                                                - set: [item.state, "failed"]
+                                                                - set: [item.note, "Start abgelehnt (siehe Log)"]
+                                                              else:
+                                                                - set: [item.state, "running"]
+                                                                - set: [item.run_id, run_id]
+                                                          - set: [moved, 1]
+                                  - idx: [work.items, iix, item]
+                            - set: [iix, { +: [iix, 1] }]
+                # Gesamtzustand
+                - decl: [live, i32, 0]
+                - decl: [lost, i32, 0]
+                - decl: [six, i32, 0]
+                - while:
+                    condition: { lt: [six, work.items.len] }
+                    body:
+                      - decl: [one, CampaignItem, { at: [work.items, six] }]
+                      - if: { condition: { '||': [{ eq: [one.state, "waiting"] }, { '||': [{ eq: [one.state, "running"] }, { eq: [one.state, "no_job"] }] }] }, then: [{ set: [live, { +: [live, 1] }] }] }
+                      - if: { condition: { '||': [{ eq: [one.state, "failed"] }, { eq: [one.state, "blocked"] }] }, then: [{ set: [lost, { +: [lost, 1] }] }] }
+                      - set: [six, { +: [six, 1] }]
+                - if:
+                    condition: { eq: [live, 0] }
+                    then:
+                      - set: [work.status, "done"]
+                      - if: { condition: { gt: [lost, 0] }, then: [{ set: [work.status, "failed"] }] }
+                      - call: [log.info, "[kampagne] ${work.campaign_id} (${work.trigger}@${work.version}) ${work.status}"]
+                - set: [work.updated_ms, { call: [time.now] }]
+                - return: work
+
+          # on_published: ein package.published einarbeiten.  Liefert, was
+          # daraus wurde (fuer die Antwort an museum und das Log).
+          - def:
+              name: on_published
+              static_off: ["str_cmp"]
+              args: [[event, ref<PublishedEvent>], [delivery, string]]
+              return: { type: string, lifetime: producer }
+              body:
+                - decl: [outcome, string, ""]
+                - decl: [ids, list<string>, { call: [<.open_ids] }]
+                - decl: [cix, i32, 0]
+                - while:
+                    condition: { lt: [cix, ids.len] }
+                    body:
+                      - decl: [camp, Campaign, { call: [<.get, { call: [ids.get, cix] }] }]
+                      - decl: [hit, i32, 0]
+                      - decl: [iix, i32, 0]
+                      - while:
+                          condition: { lt: [iix, camp.items.len] }
+                          body:
+                            - decl: [item, CampaignItem, { at: [camp.items, iix] }]
+                            - if:
+                                condition: { '&&': [{ eq: [item.project, event.name] }, { '||': [{ eq: [item.state, "waiting"] }, { '||': [{ eq: [item.state, "running"] }, { '||': [{ eq: [item.state, "no_job"] }, { eq: [item.state, "built"] }] }] }] }] }
+                                then:
+                                  - set: [item.state, "published"]
+                                  - if: { condition: { eq: [event.unchanged, 1] }, then: [{ set: [item.state, "unchanged"] }] }
+                                  - set: [item.note, "${event.name}@${event.version}"]
+                                  - idx: [camp.items, iix, item]
+                                  - set: [hit, 1]
+                            - set: [iix, { +: [iix, 1] }]
+                      - if:
+                          condition: { eq: [hit, 1] }
+                          then:
+                            - decl: [next, Campaign, { call: [<.advance, camp] }]
+                            - call: [<.save, next]
+                            - set: [outcome, "${outcome}${camp.campaign_id} fortgesetzt; "]
+                      - set: [cix, { +: [cix, 1] }]
+                - if: { condition: { gt: [outcome.len, 0] }, then: [{ return: outcome }] }
+                - if: { condition: { '||': [{ eq: [event.has_impact, 0] }, { eq: [event.items.len, 0] }] }, then: [{ return: "kein Neubau noetig" }] }
+                - decl: [fresh, Campaign]
+                - decl: [stamp, i64, { call: [time.now] }]
+                - decl: [tail, string, { call: [math.random_hex, 3] }]
+                - set: [fresh.campaign_id, "cmp-${stamp}-${tail}"]
+                - set: [fresh.trigger, event.name]
+                - set: [fresh.version, event.version]
+                - set: [fresh.delivery, delivery]
+                - set: [fresh.status, "running"]
+                - set: [fresh.created_ms, stamp]
+                - decl: [iix2, i32, 0]
+                - while:
+                    condition: { lt: [iix2, event.items.len] }
+                    body:
+                      - decl: [item2, CampaignItem, { at: [event.items, iix2] }]
+                      - set: [item2.job_id, { call: [<.casc.job_for_project, item2.project] }]
+                      - call: [fresh.items.push, item2]
+                      - set: [iix2, { +: [iix2, 1] }]
+                - call: [log.info, "[kampagne] ${fresh.campaign_id}: ${event.name}@${event.version} → ${fresh.items.len} Projekt(e)"]
+                - decl: [opened, Campaign, { call: [<.advance, fresh] }]
+                - call: [<.save, opened]
+                - return: "Kampagne ${opened.campaign_id} (${opened.items.len} Posten)"
+
+          # tick: laufende Posten nachsehen.  Vom Daemon-Takt gerufen.
+          - def:
+              name: tick
+              access: public
+              static_off: ["str_cmp"]
+              body:
+                - decl: [ids, list<string>, { call: [<.open_ids] }]
+                - decl: [cix, i32, 0]
+                - while:
+                    condition: { lt: [cix, ids.len] }
+                    body:
+                      - decl: [camp, Campaign, { call: [<.get, { call: [ids.get, cix] }] }]
+                      - decl: [hit, i32, 0]
+                      - decl: [iix, i32, 0]
+                      - while:
+                          condition: { lt: [iix, camp.items.len] }
+                          body:
+                            - decl: [item, CampaignItem, { at: [camp.items, iix] }]
+                            - if:
+                                condition: { eq: [item.state, "running"] }
+                                then:
+                                  - decl: [run_st, string, { call: [<.cluster.run_status, item.run_id] }]
+                                  - if:
+                                      condition: { eq: [run_st, { call: [pipe_status_name, PipeStatus.done] }] }
+                                      then: [{ set: [item.state, "built"] }, { set: [hit, 1] }]
+                                  - if:
+                                      condition: { eq: [run_st, { call: [pipe_status_name, PipeStatus.failed] }] }
+                                      then: [{ set: [item.state, "failed"] }, { set: [item.note, "Lauf ${item.run_id} scheiterte"] }, { set: [hit, 1] }]
+                                  - if:
+                                      condition: { eq: [run_st.len, 0] }
+                                      then: [{ set: [item.state, "failed"] }, { set: [item.note, "Lauf ${item.run_id} nicht mehr vorhanden"] }, { set: [hit, 1] }]
+                                  - idx: [camp.items, iix, item]
+                            - set: [iix, { +: [iix, 1] }]
+                      - if:
+                          condition: { eq: [hit, 1] }
+                          then:
+                            - decl: [next, Campaign, { call: [<.advance, camp] }]
+                            - call: [<.save, next]
+                      - set: [cix, { +: [cix, 1] }]
+
+          # on_event: Signatur, Zustellung, Ereignis (museum doc/ecosystem.md §4).
+          - def:
+              name: on_event
+              access: public
+              static_off: ["str_cmp"]
+              args: [[req, ref<MuseumEventReq>]]
+              return: { type: MuseumEventResp, lifetime: producer }
+              body:
+                - decl: [out, MuseumEventResp]
+                - decl: [cfg, CascConfig, { call: [<.casc.current] }]
+                - decl: [secret, string, { call: [<.casc.secret_value, cfg.museum.webhook_secret] }]
+                - if:
+                    condition: { eq: [secret.len, 0] }
+                    then:
+                      - set: [out.message, "kein Webhook-Geheimnis erklaert (config.museum.webhook_secret)"]
+                      - return: out
+                - if:
+                    condition: { eq: [{ call: [<.verify, secret, req.body, req.signature] }, 0] }
+                    then:
+                      - call: [log.warn, "[museum] Zustellung ${req.delivery}: Signatur ungueltig — verworfen"]
+                      - set: [out.message, "Signatur ungueltig"]
+                      - return: out
+                - set: [out.success, 1]
+                - if:
+                    condition: { eq: [{ call: [<.was_seen, req.delivery] }, 1] }
+                    then: [{ set: [out.outcome, "duplicate"] }, { set: [out.message, "schon verarbeitet"] }, { return: out }]
+                - decl: [inner, string, { call: [<.event_of, req.body] }]
+                - if:
+                    condition: { neq: [inner, req.event] }
+                    then:
+                      - set: [out.success, 0]
+                      - set: [out.message, "Ereignis im Kopf (${req.event}) und im Koerper (${inner}) verschieden"]
+                      - return: out
+                - call: [<.remember, req.delivery]
+                - set: [out.message, "ok"]
+                - if: { condition: { eq: [req.event, "ping"] }, then: [{ set: [out.outcome, "pong"] }, { return: out }] }
+                - if:
+                    condition: { eq: [req.event, "package.published"] }
+                    then:
+                      - decl: [pub_ev, PublishedEvent, { call: [<.parse_published, req.body] }]
+                      - if: { condition: { eq: [pub_ev.name.len, 0] }, then: [{ set: [out.success, 0] }, { set: [out.message, "package.published ohne data.name"] }, { return: out }] }
+                      - set: [out.outcome, { call: [<.on_published, pub_ev, req.delivery] }]
+                      - call: [log.info, "[museum] ${pub_ev.name}@${pub_ev.version}: ${out.outcome}"]
+                      - return: out
+                - set: [out.outcome, "ignored"]
+                - return: out
+
+      - instance: museum_event
+        methods:
+          - def:
+              name: run
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, MuseumEventReq]
+                - decl: [out, MuseumEventResp]
+                - if:
+                    condition: { neq: [{ call: [session.decode_rpc, rpc, req] }, 0] }
+                    then: [{ set: [out.message, "unlesbare Anfrage"] }, { call: [session.reply_rpc, rpc, "set_result", 0, out] }, { return: [] }]
+                - set: [out, { call: [<.campaigns.on_event, req] }]
+                - call: [session.reply_rpc, rpc, "set_result", 0, out]
+
+      - instance: list_campaigns
+        methods:
+          - def:
+              name: run
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, TokenReq]
+                - decl: [out, CampaignList]
+                - if:
+                    condition: { neq: [{ call: [session.decode_rpc, rpc, req] }, 0] }
+                    then: [{ set: [out.message, "unlesbare Anfrage"] }, { call: [session.reply_rpc, rpc, "set_result", 0, out] }, { return: [] }]
+                - decl: [eml, string, { call: [<.auth.email_for_token, req.token] }]
+                - if:
+                    condition: { eq: [eml.len, 0] }
+                    then: [{ set: [out.message, "nicht angemeldet"] }, { call: [session.reply_rpc, rpc, "set_result", 0, out] }, { return: [] }]
+                - set: [out, { call: [<.campaigns.list_all, 50] }]
+                - call: [session.reply_rpc, rpc, "set_result", 0, out]

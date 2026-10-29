@@ -1,0 +1,29 @@
+# Ein Agent als Rack (doc/spec/107 §107.1b, F107-13).
+#
+# Ein Quader sagt „Ding", ein Rack sagt „Maschine".  Das ist der Unterschied,
+# fuer den sich ein Modell gegenueber einer Formel lohnt: Einschuebe, eine
+# abgesetzte Front und Fuesse kann man beschreiben, aber nicht ausrechnen.
+#
+# EINHEITSGROSS gebaut: 1 breit, 1 hoch, 1 tief, Mittelpunkt im Ursprung —
+# die Instanz-Basis im Renderer traegt Lage und Groesse (§107.1b).
+shapeml: 1
+materials:
+  shell: { base_color: [0.72, 0.78, 0.88, 1], metallic: 0.6, roughness: 0.35 }
+  slot:  { base_color: [0.14, 0.17, 0.22, 1], metallic: 0.2, roughness: 0.6 }
+  foot:  { base_color: [0.30, 0.34, 0.40, 1], metallic: 0.5, roughness: 0.5 }
+model:
+  operation: group
+  children:
+    # Gehaeuse
+    - { type: box, size: [0.86, 0.92, 0.70], position: [0, 0.02, 0], material: shell }
+    # Vier Einschuebe als dunkle Blenden auf der Vorderseite (+Z)
+    - { type: box, size: [0.74, 0.13, 0.04], position: [0, 0.34, 0.345], material: slot }
+    - { type: box, size: [0.74, 0.13, 0.04], position: [0, 0.14, 0.345], material: slot }
+    - { type: box, size: [0.74, 0.13, 0.04], position: [0, -0.06, 0.345], material: slot }
+    - { type: box, size: [0.74, 0.13, 0.04], position: [0, -0.26, 0.345], material: slot }
+    # Fuesse
+    - { type: box, size: [0.10, 0.08, 0.10], position: [-0.33, -0.48, 0.25], material: foot }
+    - { type: box, size: [0.10, 0.08, 0.10], position: [0.33, -0.48, 0.25], material: foot }
+    - { type: box, size: [0.10, 0.08, 0.10], position: [-0.33, -0.48, -0.25], material: foot }
+    - { type: box, size: [0.10, 0.08, 0.10], position: [0.33, -0.48, -0.25], material: foot }
+output: { file: cosmos_rack.glb }

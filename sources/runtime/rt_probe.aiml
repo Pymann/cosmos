@@ -1,0 +1,373 @@
+# rt_probe — Fähigkeitsbericht eines Hosts (doc/spec/110 M0).
+#
+# Was kann DIESE Maschine?  Die Antwort darf nicht geraten werden: dieselbe
+# Binaerdatei laeuft auf x86 und auf dem Pi und druckt dieselbe Tabelle mit
+# anderen Werten.  Alles ohne root, ohne bleibende Spuren.
+#
+# Geprueft wird zweierlei:
+#   - was der Kernel SAGT (sysctl/proc-Dateien) und
+#   - was er TUT (ein Kind erzeugt wirklich einen Namespace).
+# Nur das zweite zaehlt am Ende — darum steht es in derselben Tabelle.
+
+- import: "sources/runtime/rt_exec.aiml"
+- import: "sources/runtime/rt_mounts.aiml"
+- import: "sources/runtime/rt_cgroup.aiml"
+
+- extern: "C"
+  defs:
+    - def: { name: rt_uid, args: [], return: i32 }
+    - def: { name: rt_audit_arch, args: [], return: i64 }
+    - def: { name: rt_seccomp_available, args: [], return: i32 }
+    # 0 = ok, sonst die Stufe, an der es scheiterte (siehe rt_shim.c).
+    - def: { name: rt_probe_userns, args: [[want_mount, i32]], return: i32 }
+
+- def:
+    name: say
+    static_off: ["str_cmp"]
+    args: [[label, string], [value, string]]
+    body:
+      - call: [log.info, "  ${label}  ${value}"]
+
+- def:
+    name: yes_no
+    args: [[flag, i32]]
+    return: { type: string, lifetime: producer }
+    body:
+      - if: { condition: { neq: [flag, 0] }, then: [{ return: "ja" }] }
+      - return: "nein"
+
+# Erste Zeile einer /proc- oder /sys-Datei.  "—" heisst: nicht vorhanden.
+- def:
+    name: first_line
+    static_off: ["str_cmp"]
+    args: [[where, string]]
+    return: { type: string, lifetime: producer }
+    body:
+      - if: { condition: { eq: [{ call: [io.is_file, where] }, false] }, then: [{ return: "—" }] }
+      - decl: [raw, string, { call: [io.read_file, where] }]
+      - if: { condition: { eq: [raw.len, 0] }, then: [{ return: "—" }] }
+      - decl: [rows, list<string>, { call: [raw.split, "\n"] }]
+      - decl: [one, string, { at: [rows, 0] }]
+      - return: { call: [one.trim] }
+
+- def:
+    name: path_there
+    static_off: ["str_cmp"]
+    args: [[where, string]]
+    return: i32
+    body:
+      - if: { condition: { neq: [{ call: [io.exists, where] }, false] }, then: [{ return: 1 }] }
+      - return: 0
+
+# Ein Werkzeug im ueblichen Suchpfad.  Kein `which`: ein Prozessstart je
+# Werkzeug waere teurer als drei Dateiabfragen.
+- def:
+    name: tool_there
+    static_off: ["str_cmp"]
+    args: [[name, string]]
+    return: i32
+    body:
+      - if: { condition: { eq: [{ call: [path_there, "/usr/bin/${name}"] }, 1] }, then: [{ return: 1 }] }
+      - if: { condition: { eq: [{ call: [path_there, "/usr/sbin/${name}"] }, 1] }, then: [{ return: 1 }] }
+      - if: { condition: { eq: [{ call: [path_there, "/usr/local/bin/${name}"] }, 1] }, then: [{ return: 1 }] }
+      - if: { condition: { eq: [{ call: [path_there, "/bin/${name}"] }, 1] }, then: [{ return: 1 }] }
+      - return: 0
+
+- def:
+    name: tool_line
+    static_off: ["str_cmp"]
+    args: [[name, string]]
+    body:
+      - call: [say, "${name}", { call: [yes_no, { call: [tool_there, name] }] }]
+
+# AUDIT_ARCH → Name.  Die Zahl entscheidet spaeter den seccomp-Bytecode
+# (doc/spec/110 §110.2), darum steht sie mit im Bericht.
+- def:
+    name: arch_name
+    args: [[code, i64]]
+    return: { type: string, lifetime: producer }
+    body:
+      # Dezimal, nicht hex: ein Hex-Literal wird als i32 gelesen und kippt ins
+      # Negative — der Vergleich gegen den i64-Wert schlaegt dann still fehl.
+      - if: { condition: { eq: [code, 3221225534] }, then: [{ return: "x86_64" }] }     # 0xC000003E
+      - if: { condition: { eq: [code, 3221225655] }, then: [{ return: "aarch64" }] }    # 0xC00000B7
+      - if: { condition: { eq: [code, 1073741864] }, then: [{ return: "arm (32 bit)" }] } # 0x40000028
+      - return: "unbekannt"
+
+# Die Stufe, an der der Namespace-Versuch gescheitert ist — als Satz, nicht
+# als Zahl: ein Bericht, den man nachschlagen muss, liest niemand zweimal.
+- def:
+    name: userns_verdict
+    args: [[code, i32]]
+    return: { type: string, lifetime: producer }
+    body:
+      - if: { condition: { eq: [code, 0] }, then: [{ return: "ja" }] }
+      - if: { condition: { eq: [code, 11] }, then: [{ return: "NEIN — unshare(CLONE_NEWUSER) verweigert (AppArmor/sysctl?)" }] }
+      - if: { condition: { eq: [code, 12] }, then: [{ return: "NEIN — setgroups=deny nicht schreibbar" }] }
+      - if: { condition: { eq: [code, 13] }, then: [{ return: "NEIN — uid_map nicht schreibbar" }] }
+      - if: { condition: { eq: [code, 14] }, then: [{ return: "NEIN — gid_map nicht schreibbar" }] }
+      - if: { condition: { eq: [code, 15] }, then: [{ return: "NEIN — Mount-Namespace im userns verweigert" }] }
+      - if: { condition: { eq: [code, 16] }, then: [{ return: "NEIN — mount(tmpfs) im userns verweigert" }] }
+      - return: "NEIN — Fehler ${code}"
+
+# Was das Kind im Wurzelwechsel gemeldet hat — als Satz, nicht als Zahl.
+# Nur der letzte Teil eines cgroup-Pfads — die vollen Pfade sind unlesbar lang.
+- def:
+    name: short_cg
+    static_off: ["str_cmp"]
+    args: [[path, string]]
+    return: { type: string, lifetime: producer }
+    body:
+      - if: { condition: { eq: [path.len, 0] }, then: [{ return: "keiner" }] }
+      - decl: [parts, list<string>, { call: [path.split, "/"] }]
+      - if: { condition: { eq: [parts.len, 0] }, then: [{ return: path }] }
+      - return: { at: [parts, { -: [parts.len, 1] }] }
+
+- def:
+    name: root_verdict
+    args: [[code, i32]]
+    return: { type: string, lifetime: producer }
+    body:
+      - if: { condition: { eq: [code, 0] }, then: [{ return: "ja — Wurzel, /proc, Maske; kein /proc/self/exe-Schreiben, keine geerbten fds" }] }
+      - if: { condition: { eq: [code, 11] }, then: [{ return: "NEIN — kein /proc im Container" }] }
+      - if: { condition: { eq: [code, 12] }, then: [{ return: "NEIN — die alte Wurzel ist noch erreichbar" }] }
+      - if: { condition: { eq: [code, 13] }, then: [{ return: "NEIN — die Wurzel ist beschreibbar" }] }
+      - if: { condition: { eq: [code, 14] }, then: [{ return: "NEIN — /proc ist leer, die Gegenprobe trägt nicht" }] }
+      - if: { condition: { eq: [code, 15] }, then: [{ return: "NEIN — der maskierte Pfad zeigt noch Inhalt" }] }
+      - if: { condition: { eq: [code, 16] }, then: [{ return: "AUSBRUCH — /proc/self/exe ist überschreibbar (CVE-2019-5736)" }] }
+      - if: { condition: { eq: [code, 17] }, then: [{ return: "AUSBRUCH — geerbte Dateideskriptoren im Container (CVE-2024-21626)" }] }
+      - if: { condition: { eq: [code, -119] }, then: [{ return: "NEIN — pivot_root scheiterte" }] }
+      - if: { condition: { eq: [code, -118] }, then: [{ return: "NEIN — ein Mount des Plans scheiterte" }] }
+      - if: { condition: { eq: [code, -122] }, then: [{ return: "NEIN — Rechte abgeben scheiterte" }] }
+      - return: "NEIN — Fehler ${code}"
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [uid, i32, { call: [rt_uid] }]
+      - decl: [arch, i64, { call: [rt_audit_arch] }]
+      - decl: [envm, map<string:string>, { call: [sys.env] }]
+
+      - call: [log.info, "cosmos-rt Fähigkeitsbericht (doc/spec/110 M0)"]
+      - call: [log.info, "── Maschine ──────────────────────────────────────────"]
+      - call: [say, "Architektur     ", "${arch} (${call: [arch_name, arch]})"]
+      - call: [say, "Kernel          ", { call: [first_line, "/proc/sys/kernel/osrelease"] }]
+      - call: [say, "UID             ", "${uid}"]
+
+      - call: [log.info, "── User-Namespaces (die Grundlage) ───────────────────"]
+      - call: [say, "max_user_namespaces", { call: [first_line, "/proc/sys/user/max_user_namespaces"] }]
+      - decl: [aa_lock, string, { call: [first_line, "/proc/sys/kernel/apparmor_restrict_unprivileged_userns"] }]
+      - call: [say, "apparmor_restrict  ", aa_lock]
+      # Das eigene Profil entscheidet mit: ein UNCONFINED Prozess wird beim
+      # Erzeugen des Namespace nach `unprivileged_userns` ueberfuehrt, und das
+      # verweigert die ID-Abbildung (deploy/apparmor/cosmos-agent erklaert es).
+      - call: [say, "mein AppArmor-Profil", { call: [first_line, "/proc/self/attr/current"] }]
+      # Der Versuch zaehlt, nicht die Datei.
+      - decl: [ns_plain, i32, { call: [rt_probe_userns, 0] }]
+      - call: [say, "userns erzeugbar   ", { call: [userns_verdict, ns_plain] }]
+      - decl: [ns_mount, i32, { call: [rt_probe_userns, 1] }]
+      - call: [say, "+ mount im userns  ", { call: [userns_verdict, ns_mount] }]
+
+      - call: [log.info, "── cgroup v2 (Grenzen) ───────────────────────────────"]
+      - call: [say, "Controller (root)  ", { call: [first_line, "/sys/fs/cgroup/cgroup.controllers"] }]
+      - call: [say, "delegiert an mich  ", { call: [first_line, "/sys/fs/cgroup/user.slice/user-${uid}.slice/user@${uid}.service/cgroup.controllers"] }]
+      # Raspberry Pi OS schaltet die memory-cgroup standardmaessig AB.
+      - call: [say, "Kernel-Kommandozeile", { call: [first_line, "/proc/cmdline"] }]
+
+      - call: [log.info, "── seccomp ───────────────────────────────────────────"]
+      - call: [say, "verfügbar          ", { call: [yes_no, { eq: [{ call: [rt_seccomp_available] }, 0] }] }]
+      - call: [say, "actions_avail      ", { call: [first_line, "/proc/sys/kernel/seccomp/actions_avail"] }]
+
+      - call: [log.info, "── Dateisysteme ──────────────────────────────────────"]
+      - decl: [fstypes, string, { call: [io.read_file, "/proc/filesystems"] }]
+      - call: [say, "overlay (geladen)  ", { call: [yes_no, { gt: [{ call: [fstypes.index_of, "overlay"] }, -1] }] }]
+      - call: [say, "fuse (geladen)     ", { call: [yes_no, { gt: [{ call: [fstypes.index_of, "fuse"] }, -1] }] }]
+
+      - call: [log.info, "── Bildschirm (doc/spec/110 §110.3) ──────────────────"]
+      - call: [say, "/dev/dri           ", { call: [yes_no, { call: [path_there, "/dev/dri"] }] }]
+      - call: [say, "GPU-Render-Knoten  ", { call: [yes_no, { call: [path_there, "/dev/dri/renderD128"] }] }]
+      - call: [say, "X11-Socket X0      ", { call: [yes_no, { call: [path_there, "/tmp/.X11-unix/X0"] }] }]
+      - decl: [disp, string, "—"]
+      - if: { condition: { gt: [{ call: [envm.contains, "DISPLAY"] }, 0] }, then: [{ set: [disp, { call: [envm.get, "DISPLAY"] }] }] }
+      - call: [say, "DISPLAY            ", disp]
+      - decl: [wayl, string, "—"]
+      - if: { condition: { gt: [{ call: [envm.contains, "WAYLAND_DISPLAY"] }, 0] }, then: [{ set: [wayl, { call: [envm.get, "WAYLAND_DISPLAY"] }] }] }
+      - call: [say, "WAYLAND_DISPLAY    ", wayl]
+
+      - call: [log.info, "── D-Bus ─────────────────────────────────────────────"]
+      - call: [say, "Sitzungsbus        ", { call: [yes_no, { call: [path_there, "/run/user/${uid}/bus"] }] }]
+      - call: [say, "Systembus          ", { call: [yes_no, { call: [path_there, "/run/dbus/system_bus_socket"] }] }]
+
+      - call: [log.info, "── Werkzeuge im Umfeld ───────────────────────────────"]
+      - call: [tool_line, "newuidmap"]
+      - call: [tool_line, "bwrap"]
+      - call: [tool_line, "pasta"]
+      - call: [tool_line, "slirp4netns"]
+      - call: [tool_line, "crun"]
+      - call: [tool_line, "runc"]
+
+      # ── M1: der lebende Nachweis ────────────────────────────────────────
+      # Nicht „kann der Kernel", sondern „laeuft ein Prozess wirklich als root
+      # IM Namespace und als ich daneben".  Der Gegenversuch ohne User-Namespace
+      # muss scheitern — sonst beweist der erste nichts.
+      - call: [log.info, "── M1: Prozess im Namespace ──────────────────────────"]
+      - decl: [runner, ptr<RtRunner>, { new: RtRunner }]
+      - decl: [bits_user, i32, { bor: [{ call: [runner.bit_for, "user"] }, { call: [runner.bit_for, "mount"] }] }]
+      - decl: [as_root, i32, { call: [runner.run_once, "/bin/sh", "-c", "test \"$(id -u)\" = \"0\"", bits_user] }]
+      - call: [say, "innen uid 0         ", { call: [yes_no, { eq: [as_root, 0] }] }]
+      - decl: [as_me, i32, { call: [runner.run_once, "/bin/sh", "-c", "test \"$(id -u)\" = \"0\"", 0] }]
+      - call: [say, "ohne userns NICHT   ", { call: [yes_no, { neq: [as_me, 0] }] }]
+      # Seit die Rechte vor dem `exec` abgegeben werden, darf die NUTZLAST
+      # nicht mehr mounten — das ist die Zusage, nicht ein Fehlschlag.  Die
+      # Mounts des Bundles macht die Runtime vorher (M2).
+      - decl: [own_ns, i32, { call: [runner.run_once, "/bin/sh", "-c", "mount -t tmpfs none /mnt 2>/dev/null", bits_user] }]
+      - call: [say, "Nutzlast darf NICHT mounten", { call: [yes_no, { neq: [own_ns, 0] }] }]
+
+      # ── M2: eigene Wurzel, Maske, Schreibschutz ─────────────────────────
+      # Ein Wurzelwechsel ohne Nachweis ist eine Behauptung.  Darum prueft das
+      # Kind SELBST und meldet die Stufe als Exit-Code zurueck:
+      #   11 kein /proc · 12 alte Wurzel noch da · 13 Wurzel beschreibbar
+      #   14 maskierter Pfad beschreibbar · 0 alles wie zugesagt
+      - call: [log.info, "── M2: eigene Wurzel ─────────────────────────────────"]
+      - decl: [here_at, string, { call: [path.cwd] }]
+      - decl: [root_at, string, "${here_at}/runtime/.rt_root"]
+      - call: [io.mkdir_all, "${root_at}/usr/bin"]
+      - call: [io.mkdir_all, "${root_at}/usr/lib"]
+      - call: [io.mkdir_all, "${root_at}/usr/lib64"]
+      - call: [io.mkdir_all, "${root_at}/bin"]
+      - call: [io.mkdir_all, "${root_at}/lib"]
+      - call: [io.mkdir_all, "${root_at}/lib64"]
+      - call: [io.mkdir_all, "${root_at}/proc"]
+      - call: [io.mkdir_all, "${root_at}/dev"]
+      # Ein Bind braucht ein vorhandenes ZIEL — auch fuer eine Datei.  `/dev/null`
+      # ist nicht Komfort: ohne es kann eine maskierte DATEI nicht ueberdeckt
+      # werden (gemessen: child_mask scheiterte an genau dem).
+      - decl: [dev_null_at, string, "${root_at}/dev/null"]
+      - if:
+          condition: { eq: [{ call: [io.is_file, dev_null_at] }, false] }
+          then:
+            - decl: [touch, file_handle, { call: [io.open, dev_null_at, "w"] }]
+            - if: { condition: { neq: [touch, null] }, then: [{ call: [io.close, touch] }] }
+
+      - decl: [plan, ptr<RtMounts>, { new: RtMounts }]
+      - call: [plan.reset]
+      - call: [plan.set_root, root_at, 1]
+      # Dieses System hat ein verschmolzenes /usr (/bin → usr/bin): die echten
+      # Verzeichnisse werden hineingebunden, damit der Loader seine Pfade findet.
+      - call: [plan.bind, "/usr/bin", "${root_at}/usr/bin"]
+      - call: [plan.bind, "/usr/lib", "${root_at}/usr/lib"]
+      - call: [plan.bind, "/usr/lib64", "${root_at}/usr/lib64"]
+      - call: [plan.bind, "/usr/bin", "${root_at}/bin"]
+      - call: [plan.bind, "/usr/lib", "${root_at}/lib"]
+      - call: [plan.bind, "/usr/lib64", "${root_at}/lib64"]
+      - call: [plan.filesystem, "proc", "${root_at}/proc", "proc", ""]
+      - call: [plan.bind, "/dev/null", "${root_at}/dev/null"]
+      - call: [plan.mask, "/proc/sysrq-trigger"]
+      # /proc/version traegt Inhalt — maskiert MUSS es leer sein.  An einer
+      # ohnehin leeren Datei waere die Maske nicht nachweisbar.
+      - call: [plan.mask, "/proc/version"]
+
+      # Eine Maske ist /dev/null: SCHREIBEN gelingt dorthin per Definition.
+      # Nachweisbar ist sie am LESEN — und nur mit Gegenprobe an einer Datei,
+      # die nicht maskiert ist.
+      # `test -s` taugt in /proc NICHT: procfs meldet Groesse 0 und erzeugt den
+      # Inhalt erst beim Lesen (dieselbe Falle wie bei io.read_file, aiml
+      # e6f9eb4).  Also wird gelesen.
+      # Dazu die Ausbruchsproben (doc/spec/110 §110.6): jede MUSS scheitern.
+      #   16 eigenes /proc/self/exe ueberschreibbar (CVE-2019-5736)
+      #   17 geerbte Dateideskriptoren im Container (CVE-2024-21626)
+      - decl: [script, string, "test -e /proc/self || exit 11; test ! -e /.oldroot || exit 12; touch /nope 2>/dev/null && exit 13; test -n \"$(cat /proc/uptime 2>/dev/null)\" || exit 14; test -z \"$(cat /proc/version 2>/dev/null)\" || exit 15; cp /bin/true /proc/self/exe 2>/dev/null && exit 16; test \"$(ls /proc/self/fd | wc -l)\" -le 4 || exit 17; exit 0"]
+      # Mit PID-Namespace: ohne ihn verweigert der Kernel ein frisches `proc`.
+      - decl: [bits_full, i32, { bor: [bits_user, { call: [runner.bit_for, "pid"] }] }]
+      - decl: [rooted, i32, { call: [runner.run_once, "/bin/sh", "-c", script, bits_full] }]
+      - call: [say, "eigene Wurzel       ", { call: [root_verdict, rooted] }]
+      - call: [io.remove_all, root_at]
+
+      # ── seccomp (doc/spec/110 M2) ───────────────────────────────────────
+      # Gemessen wird an einem Aufruf, der sonst GELINGT — sonst beweist das
+      # Verbot nichts.  `uname` ist dafuer harmlos und sicher vorhanden.
+      - call: [log.info, "── seccomp ───────────────────────────────────────────"]
+      # Den Plan abraeumen: die Wurzel von M2 ist geloescht, ein geerbter Plan
+      # liesse JEDEN Lauf schon am Mount scheitern — und ein Lauf, der aus dem
+      # falschen Grund scheitert, sieht aus wie ein greifender Filter.
+      - call: [plan.reset]
+      - call: [runner.deny_none]
+      - decl: [free_run, i32, { call: [runner.run_once, "/bin/sh", "-c", "uname -r >/dev/null", bits_user] }]
+      - call: [say, "ohne Filter gelingt uname", { call: [yes_no, { eq: [free_run, 0] }] }]
+      - decl: [rules_n, i32, { call: [runner.deny_only, "uname"] }]
+      - decl: [blocked, i32, { call: [runner.run_once, "/bin/sh", "-c", "uname -r >/dev/null 2>&1", bits_user] }]
+      - call: [say, "mit Filter scheitert es  ", { call: [yes_no, { neq: [blocked, 0] }] }]
+      # Das Vorgabeprofil: die Liste, die im Betrieb gilt.
+      - decl: [policy_n, i32, { call: [runner.deny_default] }]
+      - call: [say, "Vorgabeprofil, Regeln    ", "${policy_n}"]
+      - decl: [still_ok, i32, { call: [runner.run_once, "/bin/sh", "-c", "echo bereit >/dev/null", bits_user] }]
+      - call: [say, "Nutzlast laeuft weiter   ", { call: [yes_no, { eq: [still_ok, 0] }] }]
+      - decl: [no_mount, i32, { call: [runner.run_once, "/bin/sh", "-c", "mount -t tmpfs none /mnt 2>/dev/null", bits_user] }]
+      - call: [say, "und mount bleibt verwehrt", { call: [yes_no, { neq: [no_mount, 0] }] }]
+      - call: [runner.deny_none]
+
+      # ── M4: Grenzen (doc/spec/110) ──────────────────────────────────────
+      # Der Nachweis ist nicht „die Datei trägt 64M", sondern „der Container
+      # wird beendet, wenn er darüber hinaus will" — und die Gegenprobe, dass
+      # dieselbe Anforderung UNTER der Grenze durchgeht.
+      - call: [log.info, "── M4: Grenzen ───────────────────────────────────────"]
+      - decl: [cgrp, ptr<RtCgroup>, { new: RtCgroup }]
+      - decl: [cg_home, string, { call: [cgrp.find_home] }]
+      - call: [say, "delegierter Knoten  ", { call: [short_cg, cg_home] }]
+      - if:
+          condition: { gt: [cg_home.len, 0] }
+          then:
+            # 64 MiB und 64 Prozesse.
+            - decl: [opened, i32, { call: [cgrp.open_group, "cosmos-rt-probe", 67108864, 64, 0] }]
+            - call: [say, "Gruppe angelegt     ", { call: [yes_no, opened] }]
+            - call: [say, "memory.max gilt     ", { call: [cgrp.read_back, "memory.max"] }]
+            - call: [say, "pids.max gilt       ", { call: [cgrp.read_back, "pids.max"] }]
+            # 16 MiB anfordern — muss gelingen.
+            # Drei Anläufe, bis die Messung wirklich maß:
+            #   `head | tail -c 1`        — schiebt durch, belegt nichts
+            #   `tail -c N /dev/zero`     — /dev/zero ist SEEKBAR, tail springt
+            #                               ans Ende und belegt nichts
+            #   `cat /dev/zero | tail`    — kein Ende, läuft ewig (Hänger)
+            # Richtig ist eine BEGRENZTE Quelle durch eine Pipe: head endet,
+            # tail muss die letzten N Bytes puffern.
+            - decl: [small, i32, { call: [runner.run_once, "/bin/sh", "-c", "head -c 16000000 /dev/zero | tail -c 16000000 >/dev/null 2>&1", 0] }]
+            - call: [say, "16 MB gehen durch   ", { call: [yes_no, { eq: [small, 0] }] }]
+            # 256 MiB anfordern — der Kernel muss eingreifen.
+            - decl: [huge, i32, { call: [runner.run_once, "/bin/sh", "-c", "head -c 256000000 /dev/zero | tail -c 256000000 >/dev/null 2>&1", 0] }]
+            # Nicht „der Befehl schlug fehl" (das kann alles heißen), sondern:
+            # hat der Kernel wegen der GRENZE eingegriffen?
+            - decl: [killed, i64, { call: [cgrp.event_count, "oom_kill"] }]
+            - decl: [hits, i64, { call: [cgrp.event_count, "max"] }]
+            - call: [say, "256 MB: vom Kernel beendet", { call: [yes_no, { gt: [killed, 0] }] }]
+            - call: [say, "  Grenze berührt (Treffer)", "${hits}"]
+            - call: [say, "  Exit des Containers     ", "${huge}"]
+            - call: [say, "Spitzenbedarf gemessen", { call: [cgrp.read_back, "memory.peak"] }]
+            - call: [cgrp.close_group]
+          else: [{ call: [say, "Grenzen            ", "nicht setzbar — kein delegierter Knoten über uns"] }]
+
+      # Das Fazit ist die einzige Zeile, die jemand lesen MUSS.
+      - call: [log.info, "── Fazit ─────────────────────────────────────────────"]
+      - if:
+          condition: { eq: [ns_mount, 0] }
+          then: [{ call: [log.info, "  Dieser Host trägt M1 und M2: Namespaces und Mounts ohne root."] }]
+          else:
+            - if:
+                condition: { eq: [ns_plain, 0] }
+                then: [{ call: [log.info, "  Namespaces ja, Mounts nein — M1 trägt, M2 braucht Nacharbeit."] }]
+                else:
+                  # Der haeufigste Fall auf Ubuntu ist KEIN fehlendes Koennen,
+                  # sondern ein fehlendes Profil — das zu verwechseln kostet
+                  # einen Abend (doc/spec/91 §AP2.A).
+                  - if:
+                      condition: { '&&': [{ eq: [aa_lock, "1"] }, { ge: [ns_plain, 12] }] }
+                      then:
+                        - call: [log.info, "  Der Host KANN es — dieses Binary darf nur nicht:"]
+                        - call: [log.info, "  apparmor_restrict_unprivileged_userns=1 überführt unconfined Prozesse"]
+                        - call: [log.info, "  nach `unprivileged_userns`, das die ID-Abbildung verweigert."]
+                        - call: [log.info, "  Abhilfe: eigenes AppArmor-Profil für die Binärdatei"]
+                        - call: [log.info, "  (Vorlage deploy/apparmor/cosmos-agent).  NIEMALS den sysctl umlegen —"]
+                        - call: [log.info, "  der gilt für den ganzen Rechner."]
+                      else: [{ call: [log.info, "  Dieser Host trägt M1 NICHT — ohne userns kein Container ohne root."] }]
+      - return: 0

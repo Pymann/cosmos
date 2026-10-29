@@ -1,0 +1,60 @@
+# Abnahme des ADMIN-Pfads von doc/spec/108 ueber den echten RPC-Weg.
+#
+# Zwei Phasen, weil die erste Freigabe eine BETRIEBSHANDLUNG ist (F108-3): sie kommt
+# nicht ueber eine RPC, sondern ueber `cosmosd --grant-email` bei gestopptem Dienst.
+# run_e2e.sh faehrt deshalb dazwischen den Server herunter.
+#
+#   COSMOS_E2E_PHASE=1  Konto anlegen, Freigabe 255 pruefen, Konsole MUSS ablehnen
+#   COSMOS_E2E_PHASE=2  anmelden, Freigabe 1 pruefen, Konsole MUSS laufen
+#
+# Exit 0 = alle Pruefungen bestanden.
+- import: "test/rpc_surface.aiml"
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [envm, map<string:string>, { call: [sys.env] }]
+      - decl: [phase, i32, 1]
+      - if:
+          condition: { gt: [{ call: [envm.contains, "COSMOS_E2E_PHASE"] }, 0] }
+          then:
+            - decl: [praw, string, { call: [envm.get, "COSMOS_E2E_PHASE"] }]
+            - set: [phase, { call: [praw.to_int] }]
+      - decl: [url, string, "ws://127.0.0.1:8765"]
+      - if:
+          condition: { gt: [{ call: [envm.contains, "COSMOS_E2E_URL"] }, 0] }
+          then:
+            - decl: [uraw, string, { call: [envm.get, "COSMOS_E2E_URL"] }]
+            - set: [url, "${uraw}"]
+
+      - decl: [cli, ptr<RpcSurface>, { new: RpcSurface }]
+      - if:
+          condition: { neq: [{ call: [cli.connect, url] }, 1] }
+          then: [{ print: ["e2e_console_admin FAIL — keine Verbindung zu ${url}"] }, { return: 1 }]
+
+      - if:
+          condition: { eq: [phase, 1] }
+          then:
+            - print: ["[admin] Phase 1: Konto anlegen, noch KEIN Admin"]
+            - decl: [tok_len, i32, { call: [cli.register_and_login, "admin-e2e@example.com", "hunter2pw"] }]
+            - call: [cli.clearance_is, 255]
+            - call: [cli.list_users_denied]
+            - call: [cli.console_denied]
+          else:
+            - print: ["[admin] Phase 2: nach der Betriebshandlung MUSS es gehen"]
+            - decl: [tok2, i32, { call: [cli.login_only, "admin-e2e@example.com", "hunter2pw"] }]
+            - call: [cli.clearance_is, 1]
+            - call: [cli.list_users_ok]
+            - call: [cli.console_runs]
+            # doc/spec/108 F108-18: die eigentliche Behauptung des Umbaus.
+            - call: [cli.server_stays_responsive]
+
+      - call: [cli.close]
+      - decl: [bad, i32, { call: [cli.fail_count] }]
+      - if:
+          condition: { neq: [bad, 0] }
+          then: [{ print: ["e2e_console_admin FAIL — ${bad} Pruefung(en) fehlgeschlagen"] }, { return: 1 }]
+      - print: ["e2e_console_admin PASS (Phase ${phase})"]
+      - return: 0

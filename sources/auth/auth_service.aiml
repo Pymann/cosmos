@@ -1,0 +1,707 @@
+# AuthService — kapselt User-Registry, Token-Map und alle Auth-Operationen.
+# Eine Klasse pro File (≤3 Cap), Models per Import.
+#
+# init(path) öffnet zwei persistente KVs unter path:
+#   users:  email   → User
+#   tokens: token   → email
+#
+# Alle drei handle_*-Methoden returnen AuthResult.  Sie modifizieren KV
+# nur bei Erfolg — kein partieller State bei Validierungsfehler.
+
+- import: "sources/models/user.aiml"
+- import: "sources/models/auth_result.aiml"
+- import: "sources/models/auth_reqs.aiml"
+- import: "sources/models/login_throttle.aiml"
+- import: "sources/models/session_token.aiml"
+- import: "sources/models/user_level.aiml"
+- import: "sources/models/user_index.aiml"
+- import: "sources/auth/auth_helpers.aiml"
+
+- class:
+    name: AuthService
+    members:
+      - [users,    Kv<string:User>]          # email → User; owner=this
+      - [tokens,   Kv<string:string>]        # token → email; owner=this
+      - [throttle, Kv<string:LoginThrottle>] # email → Fehlversuchs-Zustand (Bruteforce-Schutz)
+      - [ip_bans,  Kv<string:string>]        # ip → "1": dauerhaft gesperrte Client-IPs (ab 6 Fehlversuchen)
+      - [token_meta, Kv<string:SessionToken>] # token → SessionToken (Ablauf, ms): serverseitiges Token-Expiry (Lücke 3)
+      - [reg_throttle, Kv<string:LoginThrottle>] # ip → Registrierungs-Ratelimit (Lücke: Register-Flood)
+      # email → UserLevel: die Freigabe je Konto (doc/spec/108 §2).  EIGENES KV, damit das
+      # users-KV seinen Schema-Fingerprint behaelt — ein Feld an `User` haette jedes
+      # bestehende Konto unlesbar gemacht (F108-2).
+      - [levels,  Kv<string:UserLevel>]
+      # Die Liste aller Konten unter EINEM Schluessel ("all") — aiondb kann ein KV nicht
+      # aufzaehlen (aiml spec/31 §11.2), also wird mitgeschrieben statt gesucht.
+      - [uindex,  Kv<string:UserIndex>]
+      # doc/spec/111 §111.5: offene SAML-Anfragen (request_id → Ablauf in ms).
+      # Nur im Speicher: eine Anmeldung, die einen Neustart ueberspannt, faengt
+      # neu an — und eine Kennung, die nach dem Neustart noch gaelte, waere eine
+      # Wiederholungsluecke.
+      - [saml_pending, map<string:i64>]
+    methods:
+      - def:
+          name: init
+          args: [[db_dir, path]]
+          body:
+            - set: [<.users,    { call: [db.open_kv, "users",    {persist: true, path: db_dir}] }]
+            - set: [<.tokens,   { call: [db.open_kv, "tokens",   {persist: true, path: db_dir}] }]
+            - set: [<.throttle, { call: [db.open_kv, "throttle", {persist: true, path: db_dir}] }]
+            - set: [<.ip_bans,  { call: [db.open_kv, "ip_bans",  {persist: true, path: db_dir}] }]
+            - set: [<.token_meta, { call: [db.open_kv, "token_meta", {persist: true, path: db_dir}] }]
+            - set: [<.reg_throttle, { call: [db.open_kv, "reg_throttle", {persist: true, path: db_dir}] }]
+            - set: [<.levels, { call: [db.open_kv, "levels", {persist: true, path: db_dir}] }]
+            - set: [<.uindex, { call: [db.open_kv, "user_index", {persist: true, path: db_dir}] }]
+
+      # invalidate_email: entfernt alle bestehenden Tokens dieses Accounts —
+      # Single-Session (neuer Login/Register kickt alte Sessions).  Verhindert,
+      # dass derselbe Account mehrfach gleichzeitig eingeloggt ist (Identität =
+      # email; doppelte Emails brächen die Match-Spielerzuordnung).
+      - def:
+          name: invalidate_email
+          args: [[eml, string]]
+          body:
+            - decl: [stale, list<string>]
+            - decl: [tit, iterator<string>, { call: [<.tokens.iter] }]
+            - while:
+                condition: { gt: [{ call: [tit.has_next] }, 0] }
+                body:
+                  - decl: [tky, string, { call: [tit.next] }]
+                  - decl: [tev, string, { call: [<.tokens.get_copy, tky] }]
+                  - if: { condition: { eq: [tev, eml] }, then: [{ call: [stale.push, tky] }] }
+            - decl: [sdx, i32, 0]
+            - while:
+                condition: { lt: [sdx, stale.len] }
+                body:
+                  - decl: [dky, string, { at: [stale, sdx] }]
+                  - call: [<.tokens.delete, dky]
+                  - if: { condition: { gt: [{ call: [<.token_meta.has, dky] }, 0] }, then: [{ call: [<.token_meta.delete, dky] }] }
+                  - set: [sdx, { +: [sdx, 1] }]
+
+      # Token = 256-bit CSPRNG (math.random_hex, OpenSSL RAND_bytes → 64 Hex-Zeichen).
+      # UNratbar — anders als das frühere sha256(email:timestamp), das bei bekanntem
+      # Account + Zeitfenster erratbar war.  Token ist reiner KV-Key (kein Schema-
+      # Change); bestehende Alt-Tokens bleiben gültig.  Definiert vor handle_register/
+      # login weil diese es aufrufen (AIML resolved method-Calls in Declaration-Order).
+      # Token-Lebensdauer (Lücke 3): 24h.  Zentralisiert für ein späteres Hochsetzen.
+      - def:
+          name: token_ttl_ms
+          return: i64
+          body: [{ return: 86400000 }]
+
+      - def:
+          name: issue_token
+          args: [[eml, string]]
+          return: string
+          body:
+            # Single-Session: alte Tokens dieses Accounts zuerst invalidieren.
+            - call: [<.invalidate_email, eml]
+            - decl: [tok, string, { call: [math.random_hex, 32] }]
+            - call: [<.tokens.set, tok, eml]
+            - decl: [meta, SessionToken]
+            - set: [meta.expires_at, { +: [{ call: [time.now] }, { call: [<.token_ttl_ms] }] }]
+            - call: [<.token_meta.set, tok, meta]
+            - return: tok
+
+      # gen_player_id: opake, stabile Konten-ID.  sha256(email:now:salt) → nicht
+      # aus der email rekonstruierbar; als "u_"-Präfix-Hex gespeichert.  now sorgt
+      # für Eindeutigkeit auch bei gleicher email (kann nicht kollidieren).
+      - def:
+          name: gen_player_id
+          args: [[eml, string], [now, i64]]
+          # spec/61 §4/§8: returns a fresh string ("u_${raw}") → producer so the caller adopts it.
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [raw, string, { call: [hash.sha256, "pid:${eml}:${now}"] }]
+            - return: "u_${raw}"
+
+      # pid_for: email → player_id.  Lazy-Migration: hat ein (Alt-)Account noch
+      # keine pid, wird hier EINE erzeugt, persistiert und zurückgegeben.  Damit
+      # bekommen bestehende Konten beim ersten Login/Zugriff automatisch eine pid.
+      - def:
+          name: pid_for
+          args: [[eml, string]]
+          # spec/61 §6.2 (T1): returns a STRING FIELD of the owned value-model local `pusr`
+          # (User from get_copy). Must be `producer` so callers ADOPT the returned string and the
+          # compiler deep-frees pusr's SIBLING fields on the early return — else every authenticated
+          # request (handle_validate → pid_for) leaked User.email/password_hash/display_name/salt/roles.
+          return: { type: string, lifetime: producer }
+          body:
+            - if: { condition: { eq: [{ call: [<.users.has, eml] }, 0] }, then: [{ return: "" }] }
+            - decl: [pusr, User, { call: [<.users.get_copy, eml] }]
+            - if: { condition: { gt: [pusr.player_id.len, 0] }, then: [{ return: pusr.player_id }] }
+            - decl: [pnow, i64, { call: [time.now] }]
+            - set: [pusr.player_id, { call: [<.gen_player_id, eml, pnow] }]
+            - call: [<.users.set, eml, pusr]
+            - return: pusr.player_id
+
+      # ── Register-Ratelimit per Client-IP (Lücke: Register-Flood) ───────────
+      # Zählt Registrierungen je IP; ab der 4. innerhalb des Fensters 60s Sperre,
+      # ab der 7. eine Stunde.  reg_throttle (ip → LoginThrottle, wiederverwendet).
+      - def:
+          name: reg_block_remaining_ms
+          args: [[client_ip, string], [now_ms, i64]]
+          return: i64
+          body:
+            - if: { condition: { eq: [{ call: [<.reg_throttle.has, client_ip] }, 0] }, then: [{ return: 0 }] }
+            - decl: [rst, LoginThrottle, { call: [<.reg_throttle.get_copy, client_ip] }]
+            - if: { condition: { gt: [rst.blocked_until, now_ms] }, then: [{ return: { '-': [rst.blocked_until, now_ms] } }] }
+            - return: 0
+      - def:
+          name: record_register
+          args: [[client_ip, string], [now_ms, i64]]
+          body:
+            - decl: [rst, LoginThrottle]
+            - if: { condition: { gt: [{ call: [<.reg_throttle.has, client_ip] }, 0] }, then: [{ set: [rst, { call: [<.reg_throttle.get_copy, client_ip] }] }] }
+            - set: [rst.fails, { +: [rst.fails, 1] }]
+            - if:
+                condition: { gt: [rst.fails, 6] }
+                then: [{ set: [rst.blocked_until, { +: [now_ms, 3600000] }] }]
+                else:
+                  - if: { condition: { gt: [rst.fails, 3] }, then: [{ set: [rst.blocked_until, { +: [now_ms, 60000] }] }] }
+            - call: [<.reg_throttle.set, client_ip, rst]
+
+      - def:
+          name: handle_register
+          args: [[req, RegisterReq], [client_ip, string]]
+          return: { type: AuthResult, lifetime: producer }
+          body:
+            - decl: [out, AuthResult]
+            - set: [out.success, 0]
+            # IP-Bann + Register-Ratelimit (Lücke: Register-Flood) — wie Login, per Client-IP.
+            - if:
+                condition: { '&&': [{ gt: [client_ip.len, 0] }, { gt: [{ call: [<.ip_bans.has, client_ip] }, 0] }] }
+                then:
+                  - set: [out.message, "IP gesperrt (zu viele Versuche)"]
+                  - return: out
+            - decl: [reg_now_ms, i64, { call: [time.now] }]
+            - if:
+                condition: { '&&': [{ gt: [client_ip.len, 0] }, { gt: [{ call: [<.reg_block_remaining_ms, client_ip, reg_now_ms] }, 0] }] }
+                then:
+                  - set: [out.message, "zu viele Registrierungen — bitte kurz warten"]
+                  - return: out
+            - if:
+                condition: { eq: [{ call: [validate_email, req.email] }, 0] }
+                then:
+                  - set: [out.message, "invalid email"]
+                  - return: out
+            - if:
+                condition: { lt: [req.password.len, 6] }
+                then:
+                  - set: [out.message, "password needs at least 6 characters"]
+                  - return: out
+            # Nickname: Pflicht, min. 3 Zeichen, serverweit eindeutig (case-
+            # insensitive via db_indexed "lower").  finding_by liefert "" wenn frei.
+            - if:
+                condition: { lt: [req.display_name.len, 3] }
+                then:
+                  - set: [out.message, "nickname needs at least 3 characters"]
+                  - return: out
+            - decl: [nick_owner, string, { call: [<.users.finding_by, "display_name", req.display_name] }]
+            - if:
+                condition: { neq: [nick_owner.len, 0] }
+                then:
+                  - set: [out.message, "nickname already taken"]
+                  - return: out
+            - if:
+                condition: { neq: [{ call: [<.users.has, req.email] }, 0] }
+                then:
+                  - set: [out.message, "email already registered"]
+                  - return: out
+            - decl: [now, i64, { call: [time.now] }]
+            - decl: [usr, User]
+            - set: [usr.email,         req.email]
+            - set: [usr.password_hash, { call: [hash_password_new, req.password] }]
+            - set: [usr.display_name,  req.display_name]
+            # Zufällige, stabile Konten-ID (opak; ersetzt email als Wire-Identität).
+            - set: [usr.player_id,     { call: [<.gen_player_id, req.email, now] }]
+            - set: [usr.created_at,    now]
+            - call: [<.users.set, req.email, usr]
+            - call: [<.index_user, req.email]
+            - if: { condition: { gt: [client_ip.len, 0] }, then: [{ call: [<.record_register, client_ip, reg_now_ms] }] }
+            - decl: [tok, string, { call: [<.issue_token, req.email] }]
+            - set: [out.success, 1]
+            - set: [out.message, "registered"]
+            - set: [out.token,   tok]
+            - set: [out.email,   req.email]
+            - set: [out.display_name, req.display_name]
+            - set: [out.player_id,    usr.player_id]
+            - return: out
+
+      # ── Login-Throttle (Online-Bruteforce-Schutz, spec/…) ──────────────────
+      # Nach 5 aufeinanderfolgenden Fehlversuchen eines Accounts wird der Login
+      # 60s gesperrt (danach fails=0, frisches Fenster).  Ein erfolgreicher Login
+      # löscht den Zustand.  Verlangsamt Raten von ~tausenden/s auf ~5/Minute.
+      # Per-IP-Throttle bräuchte die Peer-IP aus dem Mirror (Handler bekommt nur
+      # LoginReq) → separates Plumbing; hier per-Account (das gezielte Angriffsziel).
+      - def:
+          name: login_block_remaining_ms
+          args: [[eml, string], [now_ms, i64]]
+          return: i64
+          body:
+            - decl: [none, i64, 0]
+            - if: { condition: { eq: [{ call: [<.throttle.has, eml] }, 0] }, then: [{ return: none }] }
+            - decl: [tst, LoginThrottle, { call: [<.throttle.get_copy, eml] }]
+            - if: { condition: { gt: [tst.blocked_until, now_ms] }, then: [{ return: { '-': [tst.blocked_until, now_ms] } }] }
+            - return: none
+
+      # record_login_fail: Fehlversuch zählen + eskalierend sperren.  Der Zähler
+      # wird NICHT zurückgesetzt (nur ein Erfolg löscht ihn) → die Sperren steigern
+      # sich: 1–2 frei, ab 3 kurzer Cooldown (60s), ab 5 eine Stunde.  Der 6.
+      # Fehlversuch sperrt zusätzlich die Client-IP dauerhaft (siehe handle_login).
+      - def:
+          name: record_login_fail
+          args: [[eml, string], [client_ip, string], [now_ms, i64]]
+          body:
+            - decl: [tst, LoginThrottle]
+            - if: { condition: { gt: [{ call: [<.throttle.has, eml] }, 0] }, then: [{ set: [tst, { call: [<.throttle.get_copy, eml] }] }] }
+            - set: [tst.fails, { +: [tst.fails, 1] }]
+            - if:
+                condition: { gt: [tst.fails, 5] }
+                then:
+                  # ab dem 6. Fehlversuch: Client-IP DAUERHAFT sperren.
+                  - set: [tst.blocked_until, { +: [now_ms, 3600000] }]
+                  - if: { condition: { gt: [client_ip.len, 0] }, then: [{ call: [<.ip_bans.set, client_ip, "1"] }] }
+                else:
+                  - if:
+                      condition: { gt: [tst.fails, 4] }
+                      then:
+                        # 5. Fehlversuch: 1 Stunde Sperre.
+                        - set: [tst.blocked_until, { +: [now_ms, 3600000] }]
+                      else:
+                        - if:
+                            condition: { gt: [tst.fails, 2] }
+                            then:
+                              # 3.–4. Fehlversuch: 60s Cooldown.
+                              - set: [tst.blocked_until, { +: [now_ms, 60000] }]
+            - call: [<.throttle.set, eml, tst]
+
+      - def:
+          name: clear_login_fails
+          args: [[eml, string]]
+          body:
+            - if: { condition: { gt: [{ call: [<.throttle.has, eml] }, 0] }, then: [{ call: [<.throttle.delete, eml] }] }
+
+      - def:
+          name: handle_login
+          args: [[req, LoginReq], [client_ip, string]]
+          return: { type: AuthResult, lifetime: producer }
+          body:
+            - decl: [out, AuthResult]
+            - set: [out.success, 0]
+            # IP-Bann zuerst: eine dauerhaft gesperrte Client-IP wird sofort abgelehnt.
+            - if:
+                condition: { '&&': [{ gt: [client_ip.len, 0] }, { gt: [{ call: [<.ip_bans.has, client_ip] }, 0] }] }
+                then:
+                  - set: [out.message, "IP gesperrt (zu viele Fehlversuche)"]
+                  - return: out
+            # Login-Identifier darf E-Mail ODER Nickname sein.  Ist req.email keine
+            # bekannte E-Mail, als display_name (Nickname) auflösen und req.email auf
+            # die kanonische E-Mail setzen — danach läuft der gesamte Flow (Throttle/
+            # verify/Token/pid) unverändert über die echte E-Mail.  finding_by liefert
+            # den KV-Key (= E-Mail) des Nutzers mit diesem Nickname, sonst "".
+            - if:
+                condition: { eq: [{ call: [<.users.has, req.email] }, 0] }
+                then:
+                  - decl: [nick_eml, string, { call: [<.users.finding_by, "display_name", req.email] }]
+                  - if: { condition: { gt: [nick_eml.len, 0] }, then: [{ set: [req.email, nick_eml] }] }
+            # Dann der per-Account-Throttle: ein gesperrter Account wird abgelehnt.
+            - decl: [now_ms, i64, { call: [time.now] }]
+            - decl: [wait_ms, i64, { call: [<.login_block_remaining_ms, req.email, now_ms] }]
+            - if:
+                condition: { gt: [wait_ms, 0] }
+                then:
+                  - decl: [wait_s, i64, { +: [{ '/': [wait_ms, 1000] }, 1] }]
+                  - set: [out.message, "zu viele Fehlversuche — bitte ${wait_s}s warten"]
+                  - return: out
+            - if:
+                condition: { eq: [{ call: [<.users.has, req.email] }, 0] }
+                then:
+                  - set: [out.message, "unknown user"]
+                  - return: out
+            - decl: [usr, User, { call: [<.users.get_copy, req.email] }]
+            # verify_password akzeptiert pbkdf2- UND Legacy-sha256-Hashes und
+            # vergleicht immer constant-time (hash.const_time_eq / CRYPTO_memcmp):
+            # ein normaler neq short-circuited beim ersten abweichenden Byte und
+            # wäre per Timing angreifbar, um den Hash byteweise zu erraten.
+            - if:
+                condition: { neq: [{ call: [verify_password, usr.password_hash, req.email, req.password] }, 1] }
+                then:
+                  - call: [<.record_login_fail, req.email, client_ip, now_ms]
+                  - set: [out.message, "wrong password"]
+                  - return: out
+            # Erfolg → Throttle-Zustand dieses Accounts löschen (frischer Start).
+            - call: [<.clear_login_fails, req.email]
+            # Lazy-Migration: ein Legacy-sha256-Konto wird beim ersten korrekten
+            # Login transparent auf pbkdf2 hochgezogen und persistiert.
+            - if:
+                condition: { eq: [{ call: [needs_rehash, usr.password_hash] }, 1] }
+                then:
+                  - set: [usr.password_hash, { call: [hash_password_new, req.password] }]
+                  - call: [<.users.set, req.email, usr]
+            # Lazy-Migration, wie der Rehash darueber: Konten, die es VOR dem Index gab,
+            # tragen sich beim naechsten Login nach.  Ohne das waere die Verwaltung leer,
+            # bis sich jeder einmal neu registriert — also nie.
+            - call: [<.index_user, req.email]
+            - decl: [tok, string, { call: [<.issue_token, req.email] }]
+            - set: [out.success, 1]
+            - set: [out.message, "logged in"]
+            - set: [out.token,   tok]
+            - set: [out.email,   req.email]
+            - set: [out.display_name, usr.display_name]
+            - set: [out.player_id,    { call: [<.pid_for, req.email] }]
+            - return: out
+
+      # login_external: Anmeldung, die eine FREMDE Quelle (LDAP, SAML) schon
+      # geprueft hat (doc/spec/111 §111.5).  Fehlt das Konto, wird es angelegt —
+      # mit einem Zufalls-Passwort, das niemand kennt: ein solches Konto meldet
+      # sich nur ueber seine Quelle an.  Der Anzeigename wird eindeutig gemacht.
+      - def:
+          name: login_external
+          access: public
+          args: [[eml, string], [nick_hint, string]]
+          return: { type: AuthResult, lifetime: producer }
+          body:
+            - decl: [out, AuthResult]
+            - if:
+                condition: { eq: [{ call: [validate_email, eml] }, 0] }
+                then: [{ set: [out.message, "die Quelle liefert keine gueltige E-Mail ('${eml}')"] }, { return: out }]
+            - if:
+                condition: { eq: [{ call: [<.users.has, eml] }, 0] }
+                then:
+                  - decl: [nick, string, nick_hint]
+                  - if: { condition: { lt: [nick.len, 3] }, then: [{ set: [nick, "user"] }] }
+                  - decl: [taken, string, { call: [<.users.finding_by, "display_name", nick] }]
+                  - if:
+                      condition: { gt: [taken.len, 0] }
+                      then:
+                        - decl: [tail, string, { call: [math.random_hex, 2] }]
+                        - set: [nick, "${nick}-${tail}"]
+                  - decl: [now, i64, { call: [time.now] }]
+                  - decl: [usr, User]
+                  - set: [usr.email, eml]
+                  - set: [usr.password_hash, { call: [hash_password_new, { call: [math.random_hex, 32] }] }]
+                  - set: [usr.display_name, nick]
+                  - set: [usr.player_id, { call: [<.gen_player_id, eml, now] }]
+                  - set: [usr.created_at, now]
+                  - call: [<.users.set, eml, usr]
+                  - call: [log.info, "[identitaet] Konto ${eml} (${nick}) angelegt"]
+            - call: [<.clear_login_fails, eml]
+            - call: [<.index_user, eml]
+            - decl: [known, User, { call: [<.users.get_copy, eml] }]
+            - decl: [tok, string, { call: [<.issue_token, eml] }]
+            - set: [out.success, 1]
+            - set: [out.message, "logged in"]
+            - set: [out.token, tok]
+            - set: [out.email, eml]
+            - set: [out.display_name, known.display_name]
+            - set: [out.player_id, { call: [<.pid_for, eml] }]
+            - return: out
+
+      # saml_remember / saml_consume: eine Anfrage-Kennung gilt EINMAL und
+      # hoechstens zehn Minuten.
+      - def:
+          name: saml_remember
+          access: public
+          args: [[request_id, string]]
+          body:
+            - call: [<.saml_pending.put, request_id, { +: [{ call: [time.now] }, 600000] }]
+
+      - def:
+          name: saml_consume
+          access: public
+          args: [[request_id, string]]
+          return: i32
+          body:
+            - if: { condition: { eq: [request_id.len, 0] }, then: [{ return: 0 }] }
+            - if: { condition: { eq: [{ call: [<.saml_pending.contains, request_id] }, 0] }, then: [{ return: 0 }] }
+            - decl: [until, i64, { call: [<.saml_pending.get, request_id] }]
+            - call: [<.saml_pending.remove, request_id]
+            - if: { condition: { lt: [until, { call: [time.now] }] }, then: [{ return: 0 }] }
+            - return: 1
+
+      - def:
+          name: handle_validate
+          args: [[req, TokenReq]]
+          return: { type: AuthResult, lifetime: producer }
+          body:
+            - decl: [out, AuthResult]
+            - set: [out.success, 0]
+            - if:
+                condition: { eq: [{ call: [<.tokens.has, req.token] }, 0] }
+                then:
+                  - set: [out.message, "unknown token"]
+                  - return: out
+            # Token-Ablauf (Lücke 3): abgelaufene Tokens serverseitig verwerfen.
+            - if:
+                condition: { gt: [{ call: [<.token_meta.has, req.token] }, 0] }
+                then:
+                  - decl: [tmeta, SessionToken, { call: [<.token_meta.get_copy, req.token] }]
+                  - if:
+                      condition: { '&&': [{ gt: [tmeta.expires_at, 0] }, { gt: [{ call: [time.now] }, tmeta.expires_at] }] }
+                      then:
+                        - call: [<.tokens.delete, req.token]
+                        - call: [<.token_meta.delete, req.token]
+                        - set: [out.message, "token expired"]
+                        - return: out
+            - decl: [eml, string, { call: [<.tokens.get_copy, req.token] }]
+            - decl: [vusr, User, { call: [<.users.get_copy, eml] }]
+            - set: [out.success, 1]
+            - set: [out.message, "valid"]
+            - set: [out.token,   req.token]
+            - set: [out.email,   eml]
+            - set: [out.display_name, vusr.display_name]
+            - set: [out.player_id,    { call: [<.pid_for, eml] }]
+            - return: out
+
+      # handle_logout (Lücke: serverseitiges Logout): Token + Meta serverseitig
+      # invalidieren, sodass ein gestohlenes/geteiltes Token nach dem Logout tot ist.
+      - def:
+          name: handle_logout
+          args: [[tok, string]]
+          return: { type: AuthResult, lifetime: producer }
+          body:
+            - decl: [out, AuthResult]
+            - set: [out.success, 1]
+            - set: [out.message, "logged out"]
+            - if: { condition: { gt: [{ call: [<.tokens.has, tok] }, 0] }, then: [{ call: [<.tokens.delete, tok] }] }
+            - if: { condition: { gt: [{ call: [<.token_meta.has, tok] }, 0] }, then: [{ call: [<.token_meta.delete, tok] }] }
+            - return: out
+
+      # nick_for: email → Anzeigename (Nickname).  Fallback "Spieler" wenn der
+      # Account keinen (Alt-Accounts) hat.  Von den Lobby-Handlern genutzt, um
+      # display_name in LobbySlot/MatchLobby zu stempeln (Server-autoritativ, der
+      # Client kann seinen Anzeigenamen nicht fälschen).
+      - def:
+          name: nick_for
+          args: [[eml, string]]
+          # spec/61 §6.2 (T1): returns the STRING FIELD `display_name` of the owned value-model local
+          # `nusr` (User from get_copy) → `producer` so callers adopt + the sibling User fields are
+          # deep-freed on this return (same per-call leak class as pid_for).
+          return: { type: string, lifetime: producer }
+          body:
+            - if: { condition: { eq: [{ call: [<.users.has, eml] }, 0] }, then: [{ return: "Spieler" }] }
+            - decl: [nusr, User, { call: [<.users.get_copy, eml] }]
+            - if: { condition: { eq: [nusr.display_name.len, 0] }, then: [{ return: "Spieler" }] }
+            - return: nusr.display_name
+
+      # nick_for_pid: player_id → Nickname (via unique-Index player_id→email).
+      # Für Aufrufer, die nur die pid haben (Presence/Chat-Handler).
+      - def:
+          name: nick_for_pid
+          args: [[pid, string]]
+          # Returns nick_for's owned result (now a producer) or an immortal literal → `producer` so
+          # callers adopt the owned string (no incref) instead of leaking it.
+          return: { type: string, lifetime: producer }
+          body:
+            - if: { condition: { eq: [pid.len, 0] }, then: [{ return: "Spieler" }] }
+            - decl: [eml, string, { call: [<.users.finding_by, "player_id", pid] }]
+            - if: { condition: { eq: [eml.len, 0] }, then: [{ return: "Spieler" }] }
+            - return: { call: [<.nick_for, eml] }
+
+      # set_nickname: Anzeigenamen eines eingeloggten Accounts ändern/setzen.
+      # min. 3 Zeichen, serverweit eindeutig (der eigene aktuelle Name zählt
+      # nicht als Kollision → idempotentes Setzen erlaubt).  Nutzt den Sekundär-
+      # Index; users.set aktualisiert ihn automatisch (spec/45).
+      - def:
+          name: set_nickname
+          args: [[eml, string], [new_nick, string]]
+          return: { type: AuthResult, lifetime: producer }
+          body:
+            - decl: [out, AuthResult]
+            - set: [out.success, 0]
+            - if: { condition: { eq: [{ call: [<.users.has, eml] }, 0] }, then: [{ set: [out.message, "unknown user"] }, { return: out }] }
+            - if: { condition: { lt: [new_nick.len, 3] }, then: [{ set: [out.message, "nickname needs at least 3 characters"] }, { return: out }] }
+            - decl: [holder, string, { call: [<.users.finding_by, "display_name", new_nick] }]
+            - if:
+                condition: { '&&': [{ neq: [holder.len, 0] }, { neq: [holder, eml] }] }
+                then: [{ set: [out.message, "nickname already taken"] }, { return: out }]
+            - decl: [susr, User, { call: [<.users.get_copy, eml] }]
+            - set: [susr.display_name, new_nick]
+            - call: [<.users.set, eml, susr]
+            - set: [out.success, 1]
+            - set: [out.message, "nickname updated"]
+            - set: [out.email,   eml]
+            - set: [out.display_name, new_nick]
+            - return: out
+
+      # change_password: altes Passwort verifizieren, neues (pbkdf2) speichern.
+      # Aktuelle Session bleibt gültig (Token unangetastet).  min. 6 Zeichen.
+      - def:
+          name: change_password
+          args: [[eml, string], [old_plain, string], [new_plain, string]]
+          return: { type: AuthResult, lifetime: producer }
+          body:
+            - decl: [out, AuthResult]
+            - set: [out.success, 0]
+            - if: { condition: { eq: [{ call: [<.users.has, eml] }, 0] }, then: [{ set: [out.message, "unknown user"] }, { return: out }] }
+            - if: { condition: { lt: [new_plain.len, 6] }, then: [{ set: [out.message, "new password needs at least 6 characters"] }, { return: out }] }
+            - decl: [cusr, User, { call: [<.users.get_copy, eml] }]
+            - if:
+                condition: { neq: [{ call: [verify_password, cusr.password_hash, eml, old_plain] }, 1] }
+                then: [{ set: [out.message, "current password incorrect"] }, { return: out }]
+            - set: [cusr.password_hash, { call: [hash_password_new, new_plain] }]
+            - call: [<.users.set, eml, cusr]
+            - set: [out.success, 1]
+            - set: [out.message, "password updated"]
+            - set: [out.email,   eml]
+            - set: [out.display_name, cusr.display_name]
+            - return: out
+
+      # change_email: Email umschlüsseln.  email ist der KV-Key (users: email→User,
+      # tokens: token→email) → beide re-keyen; player_id bleibt stabil.  Passwort
+      # bestätigt die Aktion; ein Legacy-Hash (email-abhängig) wird dabei gleich auf
+      # pbkdf2 (email-unabhängig) migriert, sonst bräche er nach dem Email-Wechsel.
+      - def:
+          name: change_email
+          args: [[old_eml, string], [new_eml, string], [plain, string]]
+          return: { type: AuthResult, lifetime: producer }
+          body:
+            - decl: [out, AuthResult]
+            - set: [out.success, 0]
+            - if: { condition: { eq: [{ call: [<.users.has, old_eml] }, 0] }, then: [{ set: [out.message, "unknown user"] }, { return: out }] }
+            - if: { condition: { eq: [{ call: [validate_email, new_eml] }, 0] }, then: [{ set: [out.message, "invalid email"] }, { return: out }] }
+            - if: { condition: { eq: [new_eml, old_eml] }, then: [{ set: [out.message, "email unchanged"] }, { return: out }] }
+            - if: { condition: { neq: [{ call: [<.users.has, new_eml] }, 0] }, then: [{ set: [out.message, "email already registered"] }, { return: out }] }
+            - decl: [eusr, User, { call: [<.users.get_copy, old_eml] }]
+            - if:
+                condition: { neq: [{ call: [verify_password, eusr.password_hash, old_eml, plain] }, 1] }
+                then: [{ set: [out.message, "password incorrect"] }, { return: out }]
+            # Legacy-Hash (sha256(email:plain)) hängt an der alten Email → jetzt auf
+            # pbkdf2 migrieren (plain ist gerade verifiziert), sonst kein Login mehr.
+            - if: { condition: { eq: [{ call: [needs_rehash, eusr.password_hash] }, 1] }, then: [{ set: [eusr.password_hash, { call: [hash_password_new, plain] }] }] }
+            - set: [eusr.email, new_eml]
+            # users neu schlüsseln: alten Key löschen, unter neuem setzen (Sekundär-
+            # Indizes display_name/player_id werden von set/delete gepflegt, spec/45).
+            - call: [<.users.delete, old_eml]
+            - call: [<.users.set, new_eml, eusr]
+            # tokens neu schlüsseln (aktuelle Session behalten): jeden Token, dessen
+            # Wert die alte Email ist, auf die neue umbiegen.
+            - decl: [tkeys, list<string>]
+            - decl: [cet, iterator<string>, { call: [<.tokens.iter] }]
+            - while:
+                condition: { gt: [{ call: [cet.has_next] }, 0] }
+                body:
+                  - decl: [ctk, string, { call: [cet.next] }]
+                  - if: { condition: { eq: [{ call: [<.tokens.get_copy, ctk] }, old_eml] }, then: [{ call: [tkeys.push, ctk] }] }
+            - decl: [tki, i32, 0]
+            - while:
+                condition: { lt: [tki, tkeys.len] }
+                body:
+                  - decl: [rtk, string, { at: [tkeys, tki] }]
+                  - call: [<.tokens.set, rtk, new_eml]
+                  - set: [tki, { +: [tki, 1] }]
+            # Throttle-Eintrag der alten Email verwerfen (keine Kollision auf neu).
+            - if: { condition: { gt: [{ call: [<.throttle.has, old_eml] }, 0] }, then: [{ call: [<.throttle.delete, old_eml] }] }
+            - set: [out.success, 1]
+            - set: [out.message, "email updated"]
+            - set: [out.email,   new_eml]
+            - set: [out.display_name, eusr.display_name]
+            - set: [out.player_id,    eusr.player_id]
+            - return: out
+
+      # ── Freigaben (doc/spec/108 §2) ────────────────────────────────────────
+      # Lesen geht IMMER ueber `clearance_of`: fehlender Eintrag, vergessenes Feld und
+      # unsinniger Wert werden dort zu 255 = am stärksten eingeschränkt (F108-2a).
+      - def:
+          name: clearance_for_email
+          args: [[eml, string]]
+          return: i32
+          body:
+            - if:
+                condition: { eq: [{ call: [<.levels.has, eml] }, 0] }
+                then: [{ return: 255 }]
+            - decl: [lrow, UserLevel, { call: [<.levels.get_copy, eml] }]
+            - return: { call: [clearance_of, lrow.level] }
+
+      # Der Weg eines RPC-Handlers: er hat die pid aus dem Token, nicht die email.
+      # Eine unbekannte pid ist 255 und kein Fehler — fail closed, und der Aufrufer
+      # muss nicht zwei Rueckgabewege unterscheiden.
+      - def:
+          name: clearance_for_pid
+          args: [[pid, string]]
+          return: i32
+          body:
+            - decl: [peml, string, { call: [<.users.finding_by, "player_id", pid] }]
+            - if: { condition: { eq: [peml.len, 0] }, then: [{ return: 255 }] }
+            - return: { call: [<.clearance_for_email, peml] }
+
+      # grant_level — die BETRIEBSHANDLUNG (F108-3): kein Aufrufer-Konto, also keine
+      # Schranke nach oben.  Erreichbar nur ueber `cosmosd --grant-level`, nie ueber eine
+      # RPC — eine Selbstvergabe von Rechten ist Selbstbeglaubigung (spec/65 F65-6).
+      # 0 = ok, 1 = Konto unbekannt, 2 = Level ungueltig.
+      - def:
+          name: grant_level
+          args: [[eml, string], [lvl, i32]]
+          return: i32
+          body:
+            - if: { condition: { eq: [{ call: [<.users.has, eml] }, 0] }, then: [{ return: 1 }] }
+            - if: { condition: { eq: [{ call: [valid_level, lvl] }, 0] }, then: [{ return: 2 }] }
+            - decl: [grow, UserLevel]
+            - set: [grow.level, lvl]
+            - call: [<.levels.set, eml, grow]
+            - return: 0
+
+      # set_level — der Weg eines BERECHTIGTEN NUTZERS (F108-4).  Niemand vergibt eine
+      # Freigabe, die STÄRKER ist als die eigene: `lvl >= eigene`, weil die kleinere Zahl
+      # das groessere Recht ist.  Gleichstand ist erlaubt, wie bei spec/65 F65-4.
+      # Damit kann sich auch niemand selbst heben — der haeufigste Angriff auf so eine
+      # Oberflaeche ist der eigene Datensatz.
+      # 0 = ok, 1 = Ziel unbekannt, 2 = Level ungueltig, 3 = stärker als die eigene.
+      - def:
+          name: set_level
+          args: [[actor_eml, string], [target_eml, string], [lvl, i32]]
+          return: i32
+          body:
+            - if: { condition: { eq: [{ call: [<.users.has, target_eml] }, 0] }, then: [{ return: 1 }] }
+            - if: { condition: { eq: [{ call: [valid_level, lvl] }, 0] }, then: [{ return: 2 }] }
+            - decl: [own, i32, { call: [<.clearance_for_email, actor_eml] }]
+            - if: { condition: { lt: [lvl, own] }, then: [{ return: 3 }] }
+            - return: { call: [<.grant_level, target_eml, lvl] }
+
+      # ── Nutzerliste (doc/spec/108 §2) ──────────────────────────────────────
+      # index_user: ein Konto in die Uebersicht aufnehmen.  Idempotent — eine doppelte
+      # Zeile in der Verwaltung saehe aus wie zwei Konten.
+      - def:
+          name: index_user
+          args: [[eml, string]]
+          body:
+            - decl: [idx, UserIndex]
+            - if:
+                condition: { neq: [{ call: [<.uindex.has, "all"] }, 0] }
+                then: [{ set: [idx, { call: [<.uindex.get_copy, "all"] }] }]
+            - decl: [seen, i32, 0]
+            - decl: [uii, i32, 0]
+            - while:
+                condition: { lt: [uii, idx.emails.len] }
+                body:
+                  - if:
+                      condition: { eq: [{ at: [idx.emails, uii] }, eml] }
+                      then: [{ set: [seen, 1] }]
+                  - set: [uii, { +: [uii, 1] }]
+            - if:
+                condition: { eq: [seen, 0] }
+                then:
+                  - call: [idx.emails.push, eml]
+                  - call: [<.uindex.set, "all", idx]
+
+      - def:
+          name: user_count
+          return: i32
+          body:
+            - if: { condition: { eq: [{ call: [<.uindex.has, "all"] }, 0] }, then: [{ return: 0 }] }
+            - decl: [idx, UserIndex, { call: [<.uindex.get_copy, "all"] }]
+            - return: idx.emails.len
+
+      - def:
+          name: user_at
+          args: [[pos, i32]]
+          return: { type: string, lifetime: producer }
+          body:
+            - if: { condition: { eq: [{ call: [<.uindex.has, "all"] }, 0] }, then: [{ return: "" }] }
+            - if: { condition: { lt: [pos, 0] }, then: [{ return: "" }] }
+            - decl: [idx, UserIndex, { call: [<.uindex.get_copy, "all"] }]
+            - if: { condition: { ge: [pos, idx.emails.len] }, then: [{ return: "" }] }
+            - decl: [eml, string, { at: [idx.emails, pos] }]
+            # Kopieren: `eml` borgt aus der Liste des lokalen `idx`, die beim Verlassen
+            # stirbt (spec/61 Container-Lesezugriff) — dieselbe Falle wie bei sys.env.
+            - return: "${eml}"

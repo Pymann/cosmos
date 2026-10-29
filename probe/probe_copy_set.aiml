@@ -1,0 +1,55 @@
+# Probe: wird ein Wertmodell mit ZWEI Stringfeldern korrekt kopiert?
+#
+# Gefunden beim Cache-Schluessel (doc/spec/92 Befund 5): eine unberuehrte Kopie
+# las ihr zweites Feld als "1" statt als ihren Inhalt.
+- model:
+    name: Tragbar
+    fields:
+      - [ers, string]
+      - [zwe, string]
+
+- def:
+    name: liest
+    args: [[tra, Tragbar]]
+    return: { type: string, lifetime: producer }
+    body:
+      - return: "${tra.ers.len}:${tra.ers}|${tra.zwe.len}:${tra.zwe}"
+
+- def:
+    name: zeigt
+    static_off: ["str_cmp"]
+    args: [[was, string], [ist, string], [soll, string]]
+    return: i32
+    body:
+      - if: { condition: { eq: [ist, soll] }, then: [{ print: ["  ok   ${was}: ${ist}"] }, { return: 0 }] }
+      - print: ["  FAIL ${was}: ${ist} (erwartet ${soll})"]
+      - return: 1
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [fehler, i32, 0]
+      - decl: [erst, Tragbar]
+      - set: [erst.ers, "aaa"]
+      - set: [erst.zwe, "bbb"]
+      - set: [fehler, { +: [fehler, { call: [zeigt, "Original, direkt gelesen", "${erst.ers}|${erst.zwe}", "aaa|bbb"] }] }]
+      - set: [fehler, { +: [fehler, { call: [zeigt, "Original, by value", { call: [liest, erst] }, "3:aaa|3:bbb"] }] }]
+
+      # Eine Kopie, nichts geaendert.
+      - decl: [unberuehrt, Tragbar, erst]
+      - set: [fehler, { +: [fehler, { call: [zeigt, "Kopie, direkt gelesen", "${unberuehrt.ers}|${unberuehrt.zwe}", "aaa|bbb"] }] }]
+      - set: [fehler, { +: [fehler, { call: [zeigt, "Kopie, by value", { call: [liest, unberuehrt] }, "3:aaa|3:bbb"] }] }]
+
+      # Eine Kopie, ein Feld neu gesetzt.
+      - decl: [geaendert, Tragbar, erst]
+      - set: [geaendert.zwe, "ccc"]
+      - set: [fehler, { +: [fehler, { call: [zeigt, "Kopie+set, direkt gelesen", "${geaendert.ers}|${geaendert.zwe}", "aaa|ccc"] }] }]
+      - set: [fehler, { +: [fehler, { call: [zeigt, "Kopie+set, by value", { call: [liest, geaendert] }, "3:aaa|3:ccc"] }] }]
+      # Und das Original darf sich davon nicht bewegt haben.
+      - set: [fehler, { +: [fehler, { call: [zeigt, "Original danach", "${erst.ers}|${erst.zwe}", "aaa|bbb"] }] }]
+
+      - if: { condition: { eq: [fehler, 0] }, then: [{ print: ["probe_copy_set PASS"] }, { return: 0 }] }
+      - print: ["probe_copy_set FAIL (${fehler})"]
+      - return: 1

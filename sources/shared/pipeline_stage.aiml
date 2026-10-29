@@ -1,0 +1,59 @@
+# Cosmos pipeline stage model.
+
+- model:
+    name: PipelineStage
+    fields:
+      - [stage_id,        string]
+      - [name,            string]
+      - [stage_kind,      string]
+      - [status,          string]
+      - [required_label,  string]
+      # Die UMGEBUNG, in der diese Stufe laeuft (aiml spec/62 §18, F62-66/67).
+      # Ein NAME, kein Pfad — die Zuordnung kennt der Wirt (doc/spec/110 F110-72).
+      # Leer heisst: auf dem Dateisystem des Knotens, wie bisher (F62-125).
+      #
+      # NICHT dasselbe wie `required_label`: das Etikett sagt WO (Knoten), das
+      # Abbild sagt WORIN (Wurzel).  Ein Etikett, das heimlich eine Umgebung
+      # meint, ist kein Schluesselmaterial und faellt beim ersten Betreiber um,
+      # der anders etikettiert (doc/spec/110 §110.29).
+      - [image,           string]
+      # Was die Umgebung mitbringen muss (aiml spec/62 §18.2, F62-126):
+      # "git,gcc>=13,lib:yaml-cpp".  Geprueft VOR dem ersten Schritt, einmal,
+      # und die Meldung nennt ALLES Fehlende — nicht das erste, ueber das man
+      # stolpert.  Kein Schluesselmaterial (F62-127).
+      - [requires,        string]
+      # Grenzen der Maschine (aiml spec/62 §18.1a, doc/spec/110 §110.34).
+      # 0 heisst: die Vorgabe des Wirts — nicht „unbegrenzt".
+      - [cpu_cores,       i32]
+      - [mem_mb,          i32]
+      - [pids_max,        i32]
+      # Freigaben (aiml spec/62 §18.1b): "name:/ziel:modus,…".  Ein NAME, nie
+      # ein Pfad des Wirts — sonst holte sich eine eingereichte Pipeline jedes
+      # Verzeichnis in ihren Container (doc/spec/110 F110-101).
+      - [shares,          string]
+      - [script_ref,      string]
+      # doc/spec/103 §103.3: was der Agent AUSFUEHRT.  Scheibe 1 ist ein
+      # Shell-Befehl (`run:` am Schritt); aiml-Rumpf-Schritte (spec/62) folgen
+      # ueber sys.bundle.  Leer heisst: nicht ausfuehrbar — und das sagt der
+      # Lauf dann auch (F103-1), statt ewig `pending` zu bleiben.
+      - [command,         string]
+      # Welche Lane dieser Eintrag ist, maschinenlesbar: "arch=x86_64,mode=debug"
+      # (doc/spec/96 F96-34).  NICHT aus der Beschriftung zurueckzulesen —
+      # die ist fuer Menschen (doc/spec/97 F97-14).
+      - [bindings,        string]
+      # Zuteilung (doc/spec/101 F101-13): ohne den Agenten kann niemand eine
+      # Stoerung einem Knoten zuordnen; ohne die Frist sieht ein haengender
+      # Schritt aus wie ein laufender.
+      - [agent,           string]
+      - [lease_until,     i64]
+      # Nummer des AUSFUEHRUNGSVERSUCHS (doc/spec/101 F101-7).  Jede Zuteilung
+      # erhoeht sie; jede Rueckmeldung muss sie mitbringen.  Ohne sie war eine
+      # Nachricht nur „von diesem Agenten zu diesem Schritt" — und ein
+      # verspaeteter Bericht aus Versuch 1 war von einem aus Versuch 2 nicht zu
+      # unterscheiden, auch wenn derselbe Agent beide gefahren hat.
+      - [attempt,         i32]
+      # Ausfuehrungsgrenze in MILLISEKUNDEN (doc/spec/103 F103-17, aiml F62-40;
+      # das Domaenenmodell doc/spec/01 §1.5 nennt das Feld seit je so).  0 = die
+      # Vorgabe des Agenten.  Ein Lehen beweist nur, dass der AGENT lebt (F103-5) —
+      # ohne Grenze haelt ein haengender Befehl seinen Schritt fuer immer.
+      - [timeout_ms,       i32]

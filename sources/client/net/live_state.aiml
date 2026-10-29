@@ -1,0 +1,145 @@
+# LiveState — der Cluster-Schnappschuss als INSTANZ statt als Global
+# (doc/spec/105 Schritt 1).
+#
+# Vorher lag er in `g_live_cluster` + `g_live_cluster_seq`.  Ein Global hat
+# keinen Eigentuemer: jeder darf es lesen, jeder darf es weiterreichen, und
+# genau das Weiterreichen an einen `ptr<T>`-Parameter hat den WASM-Client
+# zweimal zum Absturz gebracht (doc/spec/105 §105.0).  Als Member gehoert der
+# Schnappschuss der Instanz; wer ihn lesen will, LEIHT ihn (`ref<>`).
+
+- import: "sources/client/net/session_state.aiml"
+- import: "sources/models/cluster_reqs.aiml"
+- import: "sources/shared/cluster_view.aiml"
+
+- class:
+    name: LiveState
+    members:
+      # Kollaborateur; von der Gruppe ueber `sees: [session]` verdrahtet
+      # (spec/58 §5.1) — darum duerfen gewoehnliche Methoden ihn benutzen.
+      - [session,      ref<SessionState>]
+      # Besitzend — aber MIT Eigentuemer: diese Instanz gibt ihn frei, niemand
+      # sonst reicht ihn weiter.
+      - [view, ptr<ClusterView>]
+      - [seq,  i32]
+      # Wann kam dieser Schnappschuss HIER an?  Damit laeuft die Server-Uhr
+      # weiter, ohne dass eine Uhren-Differenz zwischen Server und Browser in
+      # die Anwesenheit einfliesst (doc/spec/104 F99-10).
+      - [got_ms, i64]
+    methods:
+      - def:
+          name: has
+          access: public
+          return: i32
+          body:
+            - if: { condition: { peq: [<.view, null] }, then: [{ return: 0 }] }
+            - return: 1
+
+      - def:
+          name: revision
+          access: public
+          return: i32
+          body: [{ return: <.seq }]
+
+      # Einen fertigen Schnappschuss UEBERNEHMEN (Besitz wandert hierher).
+      # Gebraucht von Tests und Demos, die ohne Server rendern — und der
+      # ehrliche Weg dafuer: nicht am Member vorbei, sondern durch die Tuer.
+      - def:
+          name: adopt
+          access: public
+          # `consumed`: der Besitz wandert WIRKLICH hierher — der Aufrufer gibt
+          # ihn ab und darf ihn danach nicht weiterbenutzen (spec/61 §6.2).
+          # Ohne das Wort waere es ein geliehener Zeiger, den diese Instanz
+          # ueberlebt; genau davor warnt der Compiler.
+          args: [[fresh, ptr<ClusterView>, { lifetime: consumed }]]
+          body:
+            - set: [<.view, fresh]
+            - set: [<.seq, { +: [<.seq, 1] }]
+            - set: [<.got_ms, { call: [time.now] }]
+
+      # server_now: die Server-Uhr, fortgeschrieben.  EINE Uhr fuer alle Fragen
+      # nach Anwesenheit und Alter — vorher rechnete die Fusszeile gegen die
+      # Zeit DES SCHNAPPSCHUSSES (also immer „frisch") und die rechte Spalte
+      # gegen die echte Uhr.  Derselbe Agent stand deshalb gleichzeitig als
+      # „verbunden" und als „weg seit 48 s" da (User 2026-10-15).
+      #
+      # Weder die eine noch die andere Uhr allein taugt: die Schnappschuss-Zeit
+      # steht still (ein still gestorbener Agent bliebe ewig „verbunden"), die
+      # Browser-Uhr traegt die Differenz zur Server-Uhr hinein.  Darum: Stand
+      # des Schnappschusses PLUS die hier verstrichene Zeit.
+      - def:
+          name: server_now
+          access: public
+          return: i64
+          body:
+            - if: { condition: { peq: [<.view, null] }, then: [{ return: { call: [time.now] } }] }
+            - if: { condition: { le: [<.view.live.taken_ms, 0] }, then: [{ return: { call: [time.now] } }] }
+            - decl: [since, i64, { -: [{ call: [time.now] }, <.got_ms] }]
+            - if: { condition: { lt: [since, 0] }, then: [{ set: [since, 0] }] }
+            - return: { +: [<.view.live.taken_ms, since] }
+
+      # Abonnieren: der Server pusht fortan `cluster_update`.
+      - def:
+          name: subscribe
+          access: public
+          static_off: ["str_cmp"]
+          return: i32
+          body:
+            - if: { condition: { eq: [<.session.connected, 0] }, then: [{ return: 0 }] }
+            - decl: [req, ClusterReq]
+            - set: [req.token, <.session.token]
+            # In eine LOKALE dekodieren und erst dann uebernehmen: send_and_await
+            # verlangt eine Modell-Variable, und derselbe Weg wie apply_push haelt
+            # die beiden Pfade gleich.
+            - decl: [fresh, ptr<ClusterView>, { new: ClusterView }]
+            - decl: [got, i32, { call: [<.session.conn.send_and_await, 0, "subscribe_cluster", req, fresh, 4000] }]
+            - if:
+                condition: { eq: [got, 1] }
+                then:
+                  # DURCH DIE TUER, nicht am Member vorbei: `adopt` pflegt den
+                  # Ankunftszeitpunkt mit.  Hier stand wieder eine eigene
+                  # Zuweisung — und damit blieb `got_ms` nach dem Anmelden auf
+                  # 0, bis zufaellig ein Push kam.  Die Fusszeile rechnete
+                  # „seither verstrichene Zeit" gegen 1970 und meldete „Stand
+                  # vor 497965 h" (gemeldet 22.10.2026; derselbe Fehler wie
+                  # 2026-10-15, siehe unten).
+                  - call: [<.adopt, fresh]
+            - return: got
+
+      # Einen Push verarbeiten.  1 = war ein Cluster-Push.
+      #
+      # Immer in ein FRISCHES ClusterView dekodieren (erprobter Pfad);
+      # re-decode in ein bereits gefuelltes verschachteltes list<Model>-Ziel
+      # korrumpiert (aiml-Runtime-Verdacht) → Crash beim 2. Update.
+      - def:
+          name: apply_push
+          access: public
+          static_off: ["str_cmp"]
+          args: [[rpc, rpc_event]]
+          return: i32
+          body:
+            - if: { condition: { neq: [rpc.method, "cluster_update"] }, then: [{ return: 0 }] }
+            - decl: [fresh, ptr<ClusterView>, { new: ClusterView }]
+            - if:
+                condition: { eq: [{ call: [<.session.conn.decode_rpc, rpc, fresh] }, 0] }
+                then:
+                  # EIN Weg hinein: `adopt`.  Hier stand bis 2026-10-15 eine
+                  # zweite Zuweisung — und als `adopt` den Ankunftszeitpunkt
+                  # bekam, pflegte sie ihn nicht mit.  Folge: `got_ms` blieb 0,
+                  # die „seither verstrichene Zeit" wurde zur Zeit seit 1970,
+                  # und die Oberflaeche meldete „Stand vor 497799 h", „weg seit
+                  # 497799 h" und „0/1 Agenten verbunden" — waehrend die
+                  # Agentenliste denselben Agenten als „vor 1 min" fuehrte.
+                  - call: [<.adopt, fresh]
+            - return: 1
+
+      - def:
+          name: fetch_once
+          access: public
+          return: { type: ptr<ClusterView>, lifetime: producer }
+          body:
+            - decl: [view, ptr<ClusterView>, { new: ClusterView }]
+            - if: { condition: { eq: [<.session.connected, 0] }, then: [{ return: view }] }
+            - decl: [req, ClusterReq]
+            - set: [req.token, <.session.token]
+            - decl: [got, i32, { call: [<.session.conn.send_and_await, 0, "get_cluster", req, view, 4000] }]
+            - return: view

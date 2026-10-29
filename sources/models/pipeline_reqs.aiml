@@ -1,0 +1,18 @@
+# RPC-Nachrichten fuer `run_pipeline` (doc/spec/96 §96.13).
+#
+# Der Quelltext reist im Request, nicht ein fertiger Auftrag: geprueft und
+# ausgefaltet wird serverseitig (F96-29/F96-31), damit der Browser nichts
+# behaupten kann, was der Server nicht nachgerechnet hat.
+- model:
+    name: PipelineSubmitReq
+    fields:
+      - [token,  string]
+      - [source, string]
+
+- model:
+    name: PipelineSubmitResp
+    fields:
+      - [accepted,   i32]
+      - [run_id,     string]
+      - [message,    string]
+      - [lane_count, i32]

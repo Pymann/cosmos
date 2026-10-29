@@ -1,0 +1,10 @@
+# Probe: laesst sich im Container ein overlay ueber "/" legen und darin
+# arbeiten?  Davon haengt die Schicht je Stufe ab (doc/spec/110 F110-93).
+- pipeline:
+    name: overlay_probe
+    image: ubuntu-base
+    steps:
+      - stage:
+          name: overlay_test
+          timeout: 120000
+          run: "set -e; echo '== Kernel =='; uname -r; echo '== overlay bekannt? =='; grep -c overlay /proc/filesystems || true; mkdir -p /work/ovl/up /work/ovl/wk /work/ovl/mnt; echo '== mounten =='; unshare -m sh -c 'mount -t overlay overlay -o lowerdir=/,upperdir=/work/ovl/up,workdir=/work/ovl/wk /work/ovl/mnt && echo MOUNT-OK && touch /work/ovl/mnt/etc/probe-datei && ls -la /work/ovl/mnt/etc/probe-datei' ; echo '== was in der Schicht liegt =='; find /work/ovl/up -maxdepth 3 | head -10; echo '== und im Original NICHT =='; ls /etc/probe-datei 2>&1 | head -1"

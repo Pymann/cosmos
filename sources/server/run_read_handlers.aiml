@@ -1,0 +1,54 @@
+# AP1-Handler: Ausgabe-Fenster + Lauf-Metadaten lesen (doc/spec/90 §AP1.5a Schritt 4).
+# Beide token-gesichert.  read_run_output liefert NUR das angefragte Byte-Fenster;
+# der Server liest es kurzlebig aus der Datei und hält es nicht.
+#
+# Stufe 2 (spec/58): das waren zwei Klassen, die den Lauf-Store über ein Global
+# erreichten.  Jetzt sind es Instanzen der CosmosRuntime, und ihr `run` steht
+# hier als Gruppen-Methode — `<.runs` ist die deklarierte sees-Kante, kein
+# Zugriff auf einen globalen Zustand mehr.
+
+# KEIN Import aus dem Server: diese Datei liefert nur Methoden-Körper in die
+# Gruppe (§1.1).  Die Gruppen-Datei importiert sie, nicht umgekehrt — sonst
+# entstünde ein Zyklus.  Gebraucht werden nur die Modelle.
+- import: "sources/models/agent_exec.aiml"
+
+- groupmethods:
+    group: CosmosRuntime
+    instances:
+      - instance: read_run_output
+        methods:
+          - def:
+              name: run
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, RunWindowReq]
+                - decl: [win, RunWindow]
+                - if:
+                    condition: { neq: [{ call: [session.decode_rpc, rpc, req] }, 0] }
+                    then: [{ call: [session.reply_rpc, rpc, "set_result", 0, win] }, { return: [] }]
+                - decl: [req_pid, string, { call: [<.auth.pid_for_token, req.token] }]
+                - if:
+                    condition: { eq: [req_pid.len, 0] }
+                    then: [{ call: [session.reply_rpc, rpc, "set_result", 0, win] }, { return: [] }]
+                - set: [win, { call: [<.runs.window, req.run_ref, req.stream, req.offset, req.len] }]
+                - call: [<.note_handled]
+                - call: [session.reply_rpc, rpc, "set_result", 0, win]
+
+      - instance: get_run_info
+        methods:
+          - def:
+              name: run
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, RunInfoReq]
+                - decl: [nfo, RunInfo]
+                - if:
+                    condition: { neq: [{ call: [session.decode_rpc, rpc, req] }, 0] }
+                    then: [{ call: [session.reply_rpc, rpc, "set_result", 0, nfo] }, { return: [] }]
+                - decl: [req_pid, string, { call: [<.auth.pid_for_token, req.token] }]
+                - if:
+                    condition: { eq: [req_pid.len, 0] }
+                    then: [{ call: [session.reply_rpc, rpc, "set_result", 0, nfo] }, { return: [] }]
+                - set: [nfo, { call: [<.runs.info, req.run_ref] }]
+                - call: [<.note_handled]
+                - call: [session.reply_rpc, rpc, "set_result", 0, nfo]

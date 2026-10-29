@@ -1,0 +1,34 @@
+# Anfragen der Job-Verwaltung (doc/spec/106 §106.4).
+
+
+- model:
+    name: SaveJobReq
+    fields:
+      - [token,   string]
+      - [job_id,  string]
+      - [name,    string]
+      - [source,  string]
+      - [enabled, i32]
+      # doc/spec/106 G2: der Auslöser.  Ohne dieses Feld konnte `interval_s` am
+      # JobDef NIEMAND setzen — der Zeitplan war toter Code, er konnte nie
+      # auslösen (gefunden 2026-10-15).  0 = laeuft nur von Hand.
+      - [interval_s, i32]
+
+- model:
+    name: RunJobReq
+    fields:
+      - [token,  string]
+      - [job_id, string]
+
+- model:
+    name: JobAck
+    fields:
+      - [accepted, i32]
+      - [message,  string]
+      # Welchen Job hat der Server angelegt?  Bei einem NEUEN Job leitet er die
+      # Kennung aus dem Namen ab — ohne diese Antwort kann der Editor den eben
+      # gespeicherten Job nicht auswaehlen, und „Starten" sagt „erst einen Job
+      # waehlen" (User 2026-10-15).
+      - [job_id,   string]
+      - [run_id,   string]
+      - [build,    i32]

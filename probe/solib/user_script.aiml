@@ -1,0 +1,17 @@
+# Das, was ein NUTZER einschickt — plus die Praeambel, die die Konsole voranstellt.
+# Die Praeambel traegt KEIN `level:`: das waere Selbstbeglaubigung (spec/65 F65-6).
+- extern: "C"
+  defs:
+    - def:
+        name: cosmos_probe_offer
+        args: []
+        return: i32
+
+- def:
+    name: main
+    return: i32
+    body:
+      - decl: [val, i32, { call: [cosmos_probe_offer] }]
+      - call: [log.info, "Wirt sagt ${val}"]
+      - if: { condition: { neq: [val, 11] }, then: [{ return: [1] }] }
+      - return: [0]

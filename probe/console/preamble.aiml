@@ -1,0 +1,13 @@
+# Praeambel, die die Konsole dem Nutzer-Quelltext VORANSTELLT (doc/spec/108 F108-9).
+# Kein `level:` hier — das waere Selbstbeglaubigung (spec/65 F65-6) und wuerde den Lauf
+# ablehnen.  Die Level stehen in der Angebots-Tabelle, also beim Wirt.
+- extern: "C"
+  defs:
+    - def:
+        name: cosmos_whoami
+        args: []
+        return: string
+    - def:
+        name: cosmos_cluster_summary
+        args: []
+        return: string

@@ -1,0 +1,209 @@
+# Jobs: anlegen, Nummern vergeben, Ergebnis zurueckschreiben (doc/spec/106).
+#
+# Geprueft wird der SERVER-Teil ohne Netz: ein Job ist dauerhaft, ein Lauf
+# vergaenglich (F106-1), die Nummer vergibt der Server monoton (F106-2), und
+# ein erneutes Speichern darf Nummer und Geschichte NICHT zuruecksetzen — das
+# ist der Fehler, der eine Lauf-Historie still entwertet.
+# Expected exit code: 0
+
+- import: "sources/shared/ids.aiml"
+- import: "sources/server/cluster_bootstrap.aiml"
+
+- def:
+    name: expect
+    args: [[what, string], [cond, i32]]
+    return: i32
+    body:
+      - if:
+          condition: { eq: [cond, 1] }
+          then: [{ call: [log.info, "  ok   ${what}"] }, { return: 0 }]
+      - call: [log.info, "  FAIL ${what}"]
+      - return: 1
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      - decl: [boot, ptr<ClusterBootstrap>, { new: ClusterBootstrap }]
+      - call: [boot.init]
+
+      # Der Job-Speicher ist PERSISTENT: eine feste Kennung liesse den zweiten
+      # Lauf auf den Spuren des ersten laufen (Nummern zaehlen weiter).  Die
+      # Kennung kommt deshalb aus der Uhr — der Test prueft Verhalten, nicht
+      # den Zustand der letzten Ausfuehrung.
+      - decl: [stamp, i64, { call: [time.now] }]
+      - decl: [jid, string, "testjob-${stamp}"]
+      - decl: [job, JobDef]
+      - set: [job.job_id, jid]
+      - set: [job.name, "api-main"]
+      - set: [job.source, "- pipeline:\n    name: api\n"]
+      - set: [job.enabled, 1]
+      - set: [fails, { +: [fails, { call: [expect, "Job gespeichert", { call: [boot.save_job, job] }] }] }]
+
+      # F106-2: Nummern monoton, nie doppelt.
+      - decl: [num_one, i32, { call: [boot.take_build_number, jid] }]
+      - decl: [num_two, i32, { call: [boot.take_build_number, jid] }]
+      - set: [fails, { +: [fails, { call: [expect, "erste Nummer ist 1", { eq: [num_one, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "zweite Nummer ist 2", { eq: [num_two, 2] }] }] }]
+
+      # F106-1: erneutes Speichern setzt Nummer und Geschichte NICHT zurueck.
+      - decl: [again, JobDef]
+      - set: [again.job_id, jid]
+      - set: [again.name, "api-main (geaendert)"]
+      - set: [again.source, "- pipeline:\n    name: api2\n"]
+      - set: [again.enabled, 1]
+      - call: [boot.save_job, again]
+      - decl: [num_three, i32, { call: [boot.take_build_number, jid] }]
+      - set: [fails, { +: [fails, { call: [expect, "Nummer laeuft weiter (3)", { eq: [num_three, 3] }] }] }]
+      - decl: [after_save, JobDef, { call: [boot.job_of, jid] }]
+      - set: [fails, { +: [fails, { call: [expect, "Name wurde uebernommen", { eq: [after_save.name, "api-main (geaendert)"] }] }] }]
+
+      # G2: auch die STARTZEIT gehoert dem Job.  `due_job` liest
+      # `last_started_ms <= 0` als „sofort faellig" — ein Speichern, das sie
+      # verliert, schickt den Job bei JEDEM Bearbeiten neu los.
+      - decl: [sched, JobDef]
+      - set: [sched.job_id, jid]
+      - set: [sched.name, "api-main (geaendert)"]
+      - set: [sched.source, "- pipeline:\n    name: api2\n"]
+      - set: [sched.enabled, 1]
+      - set: [sched.interval_s, 60]
+      - call: [boot.save_job, sched]
+      - decl: [with_ivl, JobDef, { call: [boot.job_of, jid] }]
+      - set: [fails, { +: [fails, { call: [expect, "Intervall wurde uebernommen", { eq: [with_ivl.interval_s, 60] }] }] }]
+      - decl: [start_ms, i64, { call: [time.now] }]
+      - call: [boot.mark_started, jid, start_ms]
+      - decl: [started, JobDef, { call: [boot.job_of, jid] }]
+      - set: [fails, { +: [fails, { call: [expect, "Startzeit vermerkt", { gt: [started.last_started_ms, 0] }] }] }]
+      - call: [boot.save_job, sched]
+      - decl: [resaved, JobDef, { call: [boot.job_of, jid] }]
+      - set: [fails, { +: [fails, { call: [expect, "Speichern behaelt die Startzeit", { eq: [resaved.last_started_ms, started.last_started_ms] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und macht den Job NICHT sofort wieder faellig", { neq: [{ call: [boot.due_job, { +: [started.last_started_ms, 1000] }] }, jid] }] }] }]
+
+      # ── Verwaiste Schritte: der Agent kommt nicht wieder ───────────────
+      # Die Rechnung dafuer gab es laengst — nur rief sie NIEMAND auf, und ein
+      # Lauf blieb dauerhaft „running" mit offenen Stufen (gemessen 2026-10-15
+      # an einem echten Lauf: 6 Stufen, davon 2 fuer immer offen).
+      - decl: [orphan, PipelineRun]
+      - set: [orphan.run_id, "verwaist-${stamp}"]
+      - set: [orphan.status, "running"]
+      - decl: [ostage, PipelineStage]
+      - set: [ostage.stage_id, "s1"]
+      - set: [ostage.status, "running"]
+      - set: [ostage.agent, "weg-agent"]
+      - set: [ostage.lease_until, 1000]
+      # Ein Etikett, das kein Agent traegt.  Der verwaiste Lauf bleibt nach dem
+      # Fristablauf fuer immer wartend IM persistenten Speicher — ohne das
+      # griff sich `claim_for` spaeter in diesem Test (und in jedem naechsten
+      # Durchlauf) GENAU diesen Schritt statt des eigenen, und die Zaehlung
+      # pruefte einen fremden Job.  3 von 4 Durchlaeufen fielen so um.
+      - set: [ostage.required_label, "nie-${stamp}"]
+      - call: [orphan.stages.push, ostage]
+      - call: [boot.add_pipeline, orphan]
+      - decl: [freed, i32, { call: [boot.expire_leases, 99999999] }]
+      - set: [fails, { +: [fails, { call: [expect, "das abgelaufene Lehen wird zurueckgeholt", { gt: [freed, 0] }] }] }]
+      - decl: [after_exp, PipelineRun, { call: [boot.run_of, "verwaist-${stamp}"] }]
+      - decl: [back, PipelineStage, { at: [after_exp.stages, 0] }]
+      - set: [fails, { +: [fails, { call: [expect, "der Schritt ist wieder frei", { eq: [back.status, "pending"] }] }] }]
+      # F101-6: `agent` bleibt stehen — er nennt den LETZTEN Halter, damit genau
+      # dieser nachmelden darf.  Bis 2026-10-15 erwartete der Test hier ein
+      # leeres Feld; das war die alte Regel, unter der eine kurze Stoerung ein
+      # fertiges Ergebnis verwarf und den Schritt doppelt ausfuehren liess.
+      - set: [fails, { +: [fails, { call: [expect, "nennt aber weiter den letzten Halter (F101-6)", { eq: [back.agent, "weg-agent"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "der Lauf heisst jetzt wartend", { eq: [after_exp.status, "queued"] }] }] }]
+
+      # Ergebnisse werden fortgeschrieben (Dashboard-Zeile ohne Scan).
+      - call: [boot.note_run_result, jid, "api-main-1", "done", 4200]
+      - call: [boot.note_run_result, jid, "api-main-2", "failed", 1100]
+      - decl: [noted, JobDef, { call: [boot.job_of, jid] }]
+      - set: [fails, { +: [fails, { call: [expect, "zwei Laeufe gezaehlt", { eq: [noted.runs_total, 2] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "ein Fehlschlag gezaehlt", { eq: [noted.runs_failed, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "letztes Ergebnis ist failed", { eq: [noted.last_status, "failed"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "letzte Dauer behalten", { eq: [noted.last_ms, 1100] }] }] }]
+
+      # Unbekannter Job: keine Nummer, kein Absturz.
+      - set: [fails, { +: [fails, { call: [expect, "unbekannter Job bekommt keine Nummer", { eq: [{ call: [boot.take_build_number, "gibtsnicht"] }, 0] }] }] }]
+
+      # ── F106-9: die Kennung wird aus dem Namen ABGELEITET ───────────────
+      # Sie wird ein Dateiname (doc/spec/103 §103.4e) und ein KV-Schluessel.
+      # Woertlich uebernommen haette ein Job „my/job" einen Schraegstrich in
+      # jeden Pfad getragen.
+      - decl: [idgen, ptr<Ids>, { new: Ids }]
+      - set: [fails, { +: [fails, { call: [expect, "einfacher Name bleibt", { eq: [{ call: [idgen.slug, "nightly", "job"] }, "nightly"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Schraegstrich wird ersetzt", { eq: [{ call: [idgen.slug, "my/job", "job"] }, "my-job"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Pfadausbruch wird harmlos", { eq: [{ call: [idgen.slug, "../../etc/passwd", "job"] }, "etc-passwd"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Leerzeichen werden Trenner", { eq: [{ call: [idgen.slug, "Nachts um halb", "job"] }, "Nachts-um-halb"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "keine doppelten Trenner", { eq: [{ call: [idgen.slug, "a  //  b", "job"] }, "a-b"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Unterstrich bleibt", { eq: [{ call: [idgen.slug, "mein_job", "job"] }, "mein_job"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "nur Unsinn ergibt den Ersatznamen", { eq: [{ call: [idgen.slug, "///", "job"] }, "job"] }] }] }]
+
+      # ── G5: der LAUF wird abgeschlossen, nicht die einzelne Stufe ────────
+      - decl: [jrun, PipelineRun]
+      - set: [jrun.run_id, "${jid}-9"]
+      - set: [jrun.job_id, jid]
+      - set: [jrun.pipeline_name, "api-main"]
+      - set: [jrun.build_number, 9]
+      - set: [jrun.started_ms, 1000]
+      - set: [jrun.status, "running"]
+      - decl: [st_a, PipelineStage]
+      - set: [st_a.stage_id, "a"]
+      - set: [st_a.name, "compile"]
+      - set: [st_a.status, "pending"]
+      - call: [jrun.stages.push, st_a]
+      - decl: [st_b, PipelineStage]
+      - set: [st_b.stage_id, "b"]
+      - set: [st_b.name, "test"]
+      - set: [st_b.status, "pending"]
+      - call: [jrun.stages.push, st_b]
+      - call: [boot.add_pipeline, jrun]
+
+      - decl: [before, JobDef, { call: [boot.job_of, jid] }]
+      - decl: [runs_before, i32, before.runs_total]
+
+      # GEZIELT melden, nicht erst zuteilen lassen.  `claim_for` durchsucht den
+      # ganzen (geteilten, persistenten) Speicher und nimmt den ersten freien
+      # Schritt — auch den eines fremden Tests.  Die Zuteilung selbst prueft
+      # test_step_dispatch; hier geht es um G5: wird der LAUF abgeschlossen?
+      # Vorher fiel dieser Block in 1 von 4 Durchlaeufen um, je nachdem was
+      # sonst im Speicher lag (gefunden 2026-10-15).
+      - decl: [rep_a, StepReportReq]
+      - set: [rep_a.run_id, jrun.run_id]
+      - set: [rep_a.stage_id, "a"]
+      - call: [boot.report_for, rep_a, 3000]
+      - decl: [mid, JobDef, { call: [boot.job_of, jid] }]
+      - set: [fails, { +: [fails, { call: [expect, "eine Stufe ist KEIN Lauf-Ergebnis", { eq: [mid.runs_total, runs_before] }] }] }]
+
+      - decl: [rep_b, StepReportReq]
+      - set: [rep_b.run_id, jrun.run_id]
+      - set: [rep_b.stage_id, "b"]
+      - call: [boot.report_for, rep_b, 5000]
+      - decl: [after_run, JobDef, { call: [boot.job_of, jid] }]
+      - set: [fails, { +: [fails, { call: [expect, "der fertige Lauf wird gezaehlt", { eq: [after_run.runs_total, { +: [runs_before, 1] }] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Ergebnis ist done", { eq: [after_run.last_status, "done"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "Dauer wurde gemessen", { eq: [after_run.last_ms, 4000] }] }] }]
+
+      # ── G2: Faelligkeit, ohne Uhr und ohne Server ───────────────────────
+      - decl: [tjob, JobDef]
+      - set: [tjob.job_id, "${jid}-timed"]
+      - set: [tjob.name, "nightly"]
+      - set: [tjob.source, "- pipeline:\n    name: n\n"]
+      - set: [tjob.enabled, 1]
+      - set: [tjob.interval_s, 60]
+      - call: [boot.save_job, tjob]
+      # Nie gelaufen = SOFORT faellig, sonst wuesste niemand, ob der Zeitplan greift.
+      - set: [fails, { +: [fails, { call: [expect, "nie gelaufen ist sofort faellig", { eq: [{ call: [boot.due_job, 1000] }, "${jid}-timed"] }] }] }]
+      - call: [boot.mark_started, "${jid}-timed", 100000]
+      - set: [fails, { +: [fails, { call: [expect, "danach nicht sofort wieder", { eq: [{ call: [boot.due_job, 120000] }, ""] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "nach dem Intervall wieder faellig", { eq: [{ call: [boot.due_job, 161000] }, "${jid}-timed"] }] }] }]
+      # F106-6: ein abgeschalteter Job ist NIE faellig.
+      - decl: [offjob, JobDef, { call: [boot.job_of, "${jid}-timed"] }]
+      - set: [offjob.enabled, 0]
+      - call: [boot.save_job, offjob]
+      - set: [fails, { +: [fails, { call: [expect, "abgeschaltet ist nie faellig", { eq: [{ call: [boot.due_job, 999000] }, ""] }] }] }]
+
+      - if:
+          condition: { eq: [fails, 0] }
+          then: [{ call: [log.info, "test_job_lifecycle PASS"] }, { return: 0 }]
+      - call: [log.info, "test_job_lifecycle FAIL (${fails})"]
+      - return: 1

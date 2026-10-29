@@ -1,0 +1,69 @@
+# Abnahme C5 (doc/spec/92 §92.7): CAS hält grosse Inhalte NICHT im Arbeitsspeicher.
+#
+# Die Probe MISST nicht selbst.  Der Spitzen-RSS kommt vom Kernel über
+# `/usr/bin/time -f %M` (rusage.ru_maxrss), weil das genau der Wert ist, der
+# auffliegen muss: ein Puffer in Dateigrösse, der zwischendurch belegt und vor
+# dem Prozessende wieder freigegeben wird, bleibt im momentanen RSS unsichtbar
+# — und wäre doch der Fehler, den dieser Test sucht.
+#
+# Bewertet wird auch nicht hier: ein einzelner Lauf hat keinen Vergleich.
+# `run_cas_mem_check.sh` fährt zwei Grössen und prüft, ob der Zuwachs MIT DER
+# DATEIGRÖSSE SKALIERT (Verfahren wie §AP1.5a / run_mem_check.sh).
+#
+# Gefahren werden beide Richtungen über den echten Pfad eines Schritts:
+# put_tree (nimmt die Datei auf) und materialize (holt sie wieder heraus).
+#
+# Eingaben über die Umgebung:
+#   COSMOS_CAS_DIR  — Verzeichnis mit der grossen Datei (vom Skript erzeugt)
+#   COSMOS_CAS_ROOT — CAS-Wurzel
+#   COSMOS_CAS_OUT  — Ziel der Materialisierung
+
+- import: "sources/server/cas_trees.aiml"
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [envm, map<string:string>, { call: [sys.env] }]
+      - decl: [src_dir, string, "/tmp/cosmos_cas_mem/src"]
+      - if: { condition: { gt: [{ call: [envm.contains, "COSMOS_CAS_DIR"] }, 0] }, then: [{ set: [src_dir, { call: [envm.get, "COSMOS_CAS_DIR"] }] }] }
+      - decl: [root, string, "/tmp/cosmos_cas_mem/cas"]
+      - if: { condition: { gt: [{ call: [envm.contains, "COSMOS_CAS_ROOT"] }, 0] }, then: [{ set: [root, { call: [envm.get, "COSMOS_CAS_ROOT"] }] }] }
+      - decl: [out_dir, string, "/tmp/cosmos_cas_mem/out"]
+      - if: { condition: { gt: [{ call: [envm.contains, "COSMOS_CAS_OUT"] }, 0] }, then: [{ set: [out_dir, { call: [envm.get, "COSMOS_CAS_OUT"] }] }] }
+
+      - decl: [src_path, path, src_dir]
+      - if:
+          condition: { eq: [{ call: [io.is_dir, src_path] }, 0] }
+          then: [{ print: ["FAIL Quellverzeichnis fehlt: ${src_dir}"] }, { return: 1 }]
+
+      - decl: [store, ptr<CasStore>, { new: CasStore }]
+      - call: [store.init, root]
+      - decl: [trees, ptr<CasTrees>, { new: CasTrees }]
+      - call: [trees.init, store]
+
+      # ── Aufnehmen ────────────────────────────────────────────────────────
+      - decl: [tree_id, string, { call: [trees.put_tree, src_dir] }]
+      - if:
+          condition: { neq: [tree_id.len, 64] }
+          then: [{ print: ["FAIL put_tree lieferte '${tree_id}'"] }, { return: 1 }]
+
+      # ── Wieder herausholen ───────────────────────────────────────────────
+      - decl: [out_path, path, out_dir]
+      - call: [io.mkdir_all, out_path]
+      # materialize liefert 0 bei Erfolg, -1 im Fehlerfall.
+      - decl: [rc_mat, i32, { call: [trees.materialize, tree_id, out_dir] }]
+      - if:
+          condition: { neq: [rc_mat, 0] }
+          then: [{ print: ["FAIL materialize rc=${rc_mat}"] }, { return: 1 }]
+
+      # Gegenprobe: der materialisierte Baum muss dieselbe Adresse ergeben.
+      # Ohne das könnte die Messung an einem Lauf bestehen, der nichts tat.
+      - decl: [round_id, string, { call: [trees.put_tree, out_dir] }]
+      - if:
+          condition: { neq: [round_id, tree_id] }
+          then: [{ print: ["FAIL Rundlauf: ${round_id} != ${tree_id}"] }, { return: 1 }]
+
+      - print: ["CASMEM tree=${tree_id} ok"]
+      - return: 0

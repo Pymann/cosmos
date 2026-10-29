@@ -1,0 +1,188 @@
+# draw_grid als headless-Probe — WASM prueft Grenzen, nativ fallen dieselben
+# Fehlgriffe still durch.
+#
+# Anlass: der WASM-Client stuerzte in RunsScreen_draw_grid mit "memory access
+# out of bounds" ab (2026-10-13).  Alle nativen Nachbauten blieben sauber,
+# auch unter valgrind.  Diese Probe fuehrt dieselbe Abfolge aus wie draw_grid
+# — nur ohne Szene, damit sie ohne Fenster und ohne GL laeuft:
+#   Global ptr<ClusterView> → MEHRERE Laeufe → Alias je Lauf → render_run →
+#   Farb-Tripel um die Kopfzeile verschieben.
+# Gebaut als exodus-test-gridprobe-wasm.json und mit node ausgefuehrt.
+# Expected exit code: 0
+
+- import: "sources/shared/matrix_view.aiml"
+- import: "sources/shared/cluster_view.aiml"
+
+- decl: [g_probe_cluster, ptr<ClusterView>, null]
+- decl: [g_probe_seq,     i32,              0]
+
+- def:
+    name: expect
+    args: [[what, string], [cond, i32]]
+    return: i32
+    body:
+      - if:
+          condition: { eq: [cond, 1] }
+          then: [{ call: [log.info, "  ok   ${what}"] }, { return: 0 }]
+      - call: [log.info, "  FAIL ${what}"]
+      - return: 1
+
+- def:
+    name: probe_stage
+    args: [[stage_id, string], [title, string], [status, string]]
+    return: { type: PipelineStage, lifetime: producer }
+    body:
+      - decl: [stage, PipelineStage]
+      - set: [stage.stage_id, stage_id]
+      - set: [stage.name, title]
+      - set: [stage.stage_kind, "git"]
+      - set: [stage.status, status]
+      - set: [stage.required_label, "build"]
+      - set: [stage.script_ref, "pipelines/checkout.aiml"]
+      - return: stage
+
+- def:
+    name: probe_run
+    args: [[run_id, string], [name, string], [stage_count, i32]]
+    return: { type: PipelineRun, lifetime: producer }
+    body:
+      - decl: [run, PipelineRun]
+      - set: [run.run_id, run_id]
+      - set: [run.pipeline_name, name]
+      - set: [run.status, "running"]
+      - decl: [stage_ix, i32, 0]
+      - while:
+          condition: { lt: [stage_ix, stage_count] }
+          body:
+            - decl: [status, string, "pending"]
+            - if: { condition: { eq: [stage_ix, 0] }, then: [{ set: [status, "done"] }] }
+            - if: { condition: { eq: [stage_ix, 1] }, then: [{ set: [status, "running"] }] }
+            - call: [run.stages.push, { call: [probe_stage, "stufe-${stage_ix}", "Stufe ${stage_ix}", status] }]
+            - set: [stage_ix, { +: [stage_ix, 1] }]
+      - return: run
+
+# Mehrere Laeufe — der Client zeigte genau das, meine fruehere Probe nur einen.
+- def:
+    name: fill_cluster
+    args: [[run_count, i32]]
+    return: i32
+    body:
+      - decl: [fresh, ptr<ClusterView>, { new: ClusterView }]
+      - decl: [make_ix, i32, 0]
+      - while:
+          condition: { lt: [make_ix, run_count] }
+          body:
+            - call: [fresh.pipelines.push,
+                     { call: [probe_run, "pipeline-${make_ix}", "dienst-${make_ix}", { +: [make_ix, 2] }] }]
+            - set: [make_ix, { +: [make_ix, 1] }]
+      - set: [g_probe_cluster, fresh]
+      - set: [g_probe_seq, { +: [g_probe_seq, 1] }]
+      - return: 1
+
+# Genau die Form von RunsScreen: eine KLASSE, deren Gitter-Ansicht ein
+# klassenwertiges MEMBER ist (kein ptr), und deren Zeichen-Methode ihre
+# i32-Member im Lauf beschreibt.  Das ist der letzte Unterschied zwischen
+# dieser Probe und dem abgestuerzten Client.
+- class:
+    name: ProbeScreen
+    members:
+      - [grid_view, MatrixView]
+      - [shown_seq, i32]
+      - [sel_run,   i32]
+    methods:
+      - def:
+          name: draw_grid_probe
+          access: public
+          static_off: ["str_cmp"]
+          args: [[pick, i32]]
+          return: i32
+          body:
+            - if: { condition: { peq: [g_probe_cluster, null] }, then: [{ return: 0 }] }
+            - if: { condition: { eq: [<.shown_seq, g_probe_seq] }, then: [{ return: 0 }] }
+            - set: [<.shown_seq, g_probe_seq]
+            - decl: [run_count, i32, g_probe_cluster.pipelines.len]
+            - if: { condition: { le: [run_count, 0] }, then: [{ return: 0 }] }
+            - set: [<.sel_run, pick]
+            - if: { condition: { ge: [<.sel_run, run_count] }, then: [{ set: [<.sel_run, 0] }] }
+            - decl: [list_txt, string, ""]
+            - decl: [list_ix, i32, 0]
+            - while:
+                condition: { lt: [list_ix, run_count] }
+                body:
+                  - decl: [cur_run, PipelineRun, { at: [g_probe_cluster.pipelines, list_ix] }]
+                  - decl: [cur_stages, i32, cur_run.stages.len]
+                  - set: [list_txt, "${list_txt}${cur_run.run_id} ${cur_run.pipeline_name} ${cur_run.status} (${cur_stages})\n"]
+                  - set: [list_ix, { +: [list_ix, 1] }]
+            - decl: [run, PipelineRun, { at: [g_probe_cluster.pipelines, <.sel_run] }]
+            - decl: [color_runs, list<i32>]
+            - decl: [table, string, { call: [<.grid_view.render_run, run, color_runs] }]
+            - decl: [head_txt, string, "${run.run_id}  ${run.pipeline_name}\n"]
+            - decl: [head_len, i32, head_txt.len]
+            - decl: [shifted, list<i32>]
+            - decl: [row_ix, i32, 0]
+            - while:
+                condition: { lt: [{ +: [row_ix, 2] }, color_runs.len] }
+                body:
+                  - call: [shifted.push, { +: [{ at: [color_runs, row_ix] }, head_len] }]
+                  - call: [shifted.push, { at: [color_runs, { +: [row_ix, 1] }] }]
+                  - call: [shifted.push, { at: [color_runs, { +: [row_ix, 2] }] }]
+                  - set: [row_ix, { +: [row_ix, 3] }]
+            # Jeder Lauf muss INNERHALB des Textes liegen.
+            - decl: [full_len, i32, { +: [head_len, table.len] }]
+            - decl: [bad, i32, 0]
+            - decl: [chk_ix, i32, 0]
+            - while:
+                condition: { lt: [{ +: [chk_ix, 2] }, shifted.len] }
+                body:
+                  - decl: [start, i32, { at: [shifted, chk_ix] }]
+                  - decl: [span, i32, { at: [shifted, { +: [chk_ix, 1] }] }]
+                  - if:
+                      condition: { gt: [{ +: [start, span] }, full_len] }
+                      then: [{ set: [bad, { +: [bad, 1] }] }]
+                  - set: [chk_ix, { +: [chk_ix, 3] }]
+            - return: bad
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      - decl: [screen, ProbeScreen]
+      # MatrixView gehoert einer anderen Datei — hier auch direkt benutzt, damit
+      # die Status-Farben nicht still ihre Bedeutung verlieren (F97-17).
+      - decl: [direct_view, ptr<MatrixView>, { new: MatrixView }]
+      - set: [fails, { +: [fails, { call: [expect, "Status done ist gruen",
+              { neq: [{ call: [direct_view.status_color, "done"] }, { call: [direct_view.status_color, "failed"] }] }] }] }]
+
+      # Ein Lauf — der Fall, der zufaellig immer stimmt.
+      - call: [fill_cluster, 1]
+      - set: [fails, { +: [fails, { call: [expect, "ein Lauf: Laeufe im Text", { eq: [{ call: [screen.draw_grid_probe, 0] }, 0] }] }] }]
+
+      # Mehrere Laeufe, jeder mit mehr Stufen — wie beim Client.
+      - call: [fill_cluster, 4]
+      - set: [fails, { +: [fails, { call: [expect, "vier Laeufe angelegt", { eq: [g_probe_cluster.pipelines.len, 4] }] }] }]
+      - decl: [pick_ix, i32, 0]
+      - while:
+          condition: { lt: [pick_ix, 4] }
+          body:
+            - set: [fails, { +: [fails, { call: [expect, "Lauf ${pick_ix} zeichenbar", { eq: [{ call: [screen.draw_grid_probe, pick_ix] }, 0] }] }] }]
+            - set: [pick_ix, { +: [pick_ix, 1] }]
+
+      # Wie eine Bildschleife: immer neue Schnappschuesse, jedes Mal zeichnen.
+      - decl: [round, i32, 0]
+      - while:
+          condition: { lt: [round, 12] }
+          body:
+            - call: [fill_cluster, { +: [{ '%': [round, 5] }, 1] }]
+            - decl: [avail, i32, g_probe_cluster.pipelines.len]
+            - decl: [sel, i32, { '%': [round, avail] }]
+            - set: [fails, { +: [fails, { call: [screen.draw_grid_probe, sel] }] }]
+            - set: [round, { +: [round, 1] }]
+      - set: [fails, { +: [fails, { call: [expect, "14 Schnappschuesse gezaehlt", { eq: [g_probe_seq, 14] }] }] }]
+
+      - if:
+          condition: { eq: [fails, 0] }
+          then: [{ call: [log.info, "test_grid_wasm_probe PASS"] }, { return: 0 }]
+      - call: [log.info, "test_grid_wasm_probe FAIL (${fails})"]
+      - return: 1

@@ -1,0 +1,10 @@
+# Cosmos control plane entry point: seeds the demo cluster and runs one reconcile pass.
+- import: "sources/server/cluster_bootstrap.aiml"
+
+- def:
+    name: main
+    return: i32
+    body:
+      - decl: [bootstrap, ptr<ClusterBootstrap>, { new: ClusterBootstrap }]
+      - call: [bootstrap.init]
+      - return: { call: [bootstrap.run] }

@@ -1,0 +1,34 @@
+# Wer fragt — Kennung, Etiketten, Abbild (doc/spec/110 §110.29).
+#
+# Drei Angaben, die zusammen gehoeren: die Kennung (fuer `runs_on: <agent-id>`),
+# die Etiketten (WO der Knoten steht) und das Abbild (WORIN gearbeitet wird).
+# Als EIN Wert, weil eine Methode hoechstens fuenf Argumente nimmt — und weil
+# drei Strings, die immer zusammen gereicht werden, ohnehin ein Modell sind.
+- model:
+    name: ClaimWho
+    fields:
+      - [agent_id, string]
+      - [labels,   string]
+      - [image,    string]
+
+# Was wartet — und WORIN es laufen will (doc/spec/110 F110-74).
+#
+# `any = 0` heisst: nichts wartet.  Ein leeres `image` ist eine gueltige
+# Antwort („auf dem Dateisystem des Knotens"), darum kann der Name allein die
+# Frage nicht beantworten — es braucht das Ja/Nein daneben.
+- model:
+    name: PendingWant
+    fields:
+      - [any,   i32]
+      - [image, string]
+      # Was die wartende Stufe an Maschine verlangt (aiml spec/62 §18.1a).
+      # 0 = Vorgabe des Wirts.  Der Container wird FUER sie gestartet, also
+      # muss er mit ihren Grenzen starten — nachtraeglich aendern hiesse, die
+      # Grenze erst zu setzen, wenn sie schon gebrochen wurde.
+      - [cpu_cores, i32]
+      - [mem_mb,    i32]
+      - [pids_max,  i32]
+      # Welche Freigaben der Container braucht (aiml spec/62 §18.1b):
+      # "name:/ziel:modus,…".  Kompakt, weil der Container FUER diese Arbeit
+      # startet und die Zuordnung erst der Wirt aufloest (doc/spec/110 F110-101).
+      - [shares,    string]

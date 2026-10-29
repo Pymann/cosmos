@@ -1,0 +1,26 @@
+# Die Schichten EINES Laufs, zusammen gespeichert (doc/spec/107 §107.1c).
+#
+# Warum ein eigener Datensatz und kein Feld am Lauf: ein neues Feld an
+# PipelineRun/PipelineStage aendert den Schema-Fingerprint, und jeder
+# gespeicherte Lauf waere unlesbar (doc/spec/108 F108-2).  Dazu entstehen die
+# Schichtangaben spaeter und von jemand anderem — der Agent meldet sie, der
+# Zuteiler kennt sie nicht.
+#
+# Static-Check (aiml spec/49 §14): 1 model.
+- import: "sources/shared/stage_layer.aiml"
+
+- model:
+    name: RunLayers
+    fields:
+      - [run_id, string]
+      # Worauf dieser Lauf AUFSETZT (aiml spec/62 §18.4): "run:<lauf>" nimmt
+      # den Schichtstapel eines frueheren Laufs als Unterbau.  Leer heisst:
+      # nur das Abbild.  Neben dem Lauf gespeichert, nicht in ihm — ein Feld
+      # an PipelineRun machte jeden gespeicherten Lauf unlesbar (F108-2).
+      - [base,   string]
+      - [rows,   list<StageLayer>]
+      # Die Laufzeiten derselben Stufen (doc/spec/107 §107.1h).  Im GLEICHEN
+      # Datensatz, weil es dieselbe Frage ist — „was ist mit dieser Stufe
+      # passiert" — und zwei KVs fuer einen Lauf zwei Gelegenheiten waeren,
+      # auseinanderzulaufen.
+      - [times,  list<StageTime>]

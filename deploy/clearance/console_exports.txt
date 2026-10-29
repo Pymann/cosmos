@@ -1,0 +1,15 @@
+# Angebots-Tabelle der Skript-Konsole (doc/spec/108 §5, spec/65 F65-23).
+# Format: Name|Level.  Das Level ist die Freigabe, die man MINDESTENS braucht —
+# 1 = nur Admin, 7 = Operator, 255 = jedes angemeldete Konto.
+#
+# Diese Datei IST die Politik.  Sie steht im Repo, damit man sie lesen und prüfen kann,
+# statt sie aus Code zu rekonstruieren.  Jede Zeile ist eine Rechteentscheidung.
+#
+# WICHTIG — der Default erteilt nichts: ein Symbol ohne Zeile hier ist Level 0, und Level 0
+# erreicht NIEMAND, auch der Admin nicht (spec/65 F65-22, Probe n14).  Rechte entstehen
+# ausschliesslich durch Zeilen in dieser Datei.
+#
+# Entscheid User 2026-10-17: die Konsole ist zunaechst nur fuer Admin-Konten (F108-15),
+# das Angebot steht daher auf Level 1.  Oeffnen fuer Operatoren = 1 → 7, sonst nichts.
+cosmos_whoami|1
+cosmos_cluster_summary|1

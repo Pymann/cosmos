@@ -1,0 +1,175 @@
+# Cosmos agent: runs a job as a durable process (sys.exe detach + status_file, spec/23 §5.4 — like
+# Jenkins durable-task), streams ws/<job_id>/job.log to the controller and reconnects after a lost
+# connection or its own restart (sys.process_attach). The job never depends on the agent.
+- import: "sources/shared/job_state.aiml"
+- import: "sources/shared/agent_hello.aiml"
+- import: "sources/shared/job_update.aiml"
+
+- import: "sources/models/agent_cfg.aiml"
+
+
+# agent-local persisted state: which job this agent owns
+- model:
+    name: LocalJob
+    fields:
+      - [job_id,  string]
+      - [command, string]
+      - [pid,     i64]
+
+- class:
+    name: AgentRunner
+    members:
+      - [cfg,       AgentCfg]
+      - [local,     Kv<string:LocalJob>]
+      - [job_id,    string]
+      - [offset,    i32]
+      - [done,      i32]
+    methods:
+      - def:
+          name: init
+          access: public
+          args: [[cfg, AgentCfg]]
+          body:
+            - set: [<.cfg, cfg]
+            - set: [<.job_id, ""]
+            - set: [<.local, { call: [db.open_kv, "agent_jobs", {persist: true}] }]
+            - if:
+                condition: { eq: [{ call: [<.local.has, "current"] }, 1] }
+                then:
+                  - decl: [owned, ref<LocalJob>, { call: [<.local.get, "current"] }]
+                  - set: [<.job_id, owned.job_id]
+                  - call: [log.info, "agent restarted, still owns ${owned.job_id}"]
+
+      - def:
+          name: job_dir
+          access: public
+          return: string
+          body:
+            - return: "ws/${<.job_id}"
+
+      - def:
+          name: launch
+          access: public
+          args: [[new_job, string], [command, string]]
+          body:
+            - set: [<.job_id, new_job]
+            - decl: [dir, string, { call: [<.job_dir] }]
+            - call: [io.mkdir_all, dir]
+            - decl: [argv, list<string>, ["sh", "-c", command]]
+            - decl: [job, process, { call: [sys.exe, argv, {detach: true, stdout: "${dir}/job.log", stderr: "${dir}/job.log", status_file: "${dir}/job.status"}] }]
+            - decl: [owned, LocalJob]
+            - set: [owned.job_id, new_job]
+            - set: [owned.command, command]
+            - set: [owned.pid, job.pid]
+            - call: [<.local.set, "current", owned]
+            - call: [log.info, "launched ${new_job} pid=${job.pid}: ${command}"]
+
+      - def:
+          name: read_text
+          access: public
+          args: [[file_name, string]]
+          return: string
+          body:
+            - if: { condition: { eq: [{ call: [io.is_file, file_name] }, false] }, then: [{ return: "" }] }
+            - decl: [inp, file_handle, { call: [io.open, file_name, "r"] }]
+            - if: { condition: { eq: [inp, null] }, then: [{ return: "" }] }
+            - decl: [text, string, { call: [io.read_all, inp] }]
+            - call: [io.close, inp]
+            - return: text
+
+      - def:
+          name: hello
+          access: public
+          static_off: ["str_cmp"]
+          args: [[sess, mirror_session]]
+          return: i32
+          body:
+            - decl: [req, AgentHello]
+            - set: [req.agent_id, <.cfg.agent_id]
+            - set: [req.current_job_id, <.job_id]
+            - decl: [welcome, ptr<AgentWelcome>, { new: AgentWelcome }]
+            - decl: [got, i32, { call: [sess.send_and_await, 0, "hello", req, welcome, 3000] }]
+            - if: { condition: { neq: [got, 1] }, then: [{ return: 0 }] }
+            - if: { condition: { eq: [welcome.job_id, ""] }, then: [{ return: 1 }] }
+            - set: [<.offset, welcome.log_len]
+            - if: { condition: { eq: [<.job_id, ""] }, then: [{ call: [<.launch, welcome.job_id, welcome.command] }] }
+            - return: 1
+
+      - def:
+          name: push_update
+          access: public
+          static_off: ["str_cmp"]
+          args: [[sess, mirror_session]]
+          return: i32
+          body:
+            - if: { condition: { eq: [<.job_id, ""] }, then: [{ return: 1 }] }
+            - decl: [dir, string, { call: [<.job_dir] }]
+            - decl: [upd, JobUpdate]
+            - set: [upd.agent_id, <.cfg.agent_id]
+            - set: [upd.job_id, <.job_id]
+            - set: [upd.state, JobState.running]
+            - set: [upd.exit_code, -1]
+            - decl: [owned, ref<LocalJob>, { call: [<.local.get, "current"] }]
+            - set: [upd.pid, owned.pid]
+            # status first: once the job has ended its log is complete
+            - decl: [job, process, { call: [sys.process_attach, owned.pid, "${dir}/job.status"] }]
+            - if:
+                condition: { eq: [{ call: [job.running] }, false] }
+                then:
+                  - set: [upd.state, JobState.finished]
+                  - set: [upd.exit_code, job.returncode]
+                  - if: { condition: { eq: [job.returncode, -1] }, then: [{ call: [log.warn, "job process ${owned.pid} vanished without exit status"] }] }
+            - decl: [text, string, { call: [<.read_text, "${dir}/job.log"] }]
+            - set: [upd.offset, <.offset]
+            - if: { condition: { lt: [<.offset, text.len] }, then: [{ set: [upd.chunk, { call: [text.substr, <.offset] }] }] }
+            - decl: [ack, ptr<JobAck>, { new: JobAck }]
+            - decl: [got, i32, { call: [sess.send_and_await, 0, "job_update", upd, ack, 2000] }]
+            - if: { condition: { neq: [got, 1] }, then: [{ return: 0 }] }
+            - set: [<.offset, ack.log_len]
+            - if:
+                condition: { '&&': [{ eq: [upd.state, JobState.finished] }, { eq: [ack.log_len, text.len] }] }
+                then:
+                  - call: [log.info, "job ${<.job_id} finished exit=${upd.exit_code}, controller has full log (${ack.log_len} bytes)"]
+                  - call: [<.local.delete, "current"]
+                  - set: [<.done, 1]
+            - return: 1
+
+      - def:
+          name: run
+          access: public
+          return: i32
+          body:
+            - decl: [url, string, "tcp://127.0.0.1:${<.cfg.port}"]
+            - decl: [connected, i32, 0]
+            - decl: [sess, mirror_session]
+            - while:
+                condition: { eq: [<.done, 0] }
+                body:
+                  - if:
+                      condition: { eq: [connected, 0] }
+                      then:
+                        - set: [sess, { call: [mirror.connect_timeout, url, 500] }]
+                        - if:
+                            condition: { neq: [sess, null] }
+                            then:
+                              - call: [sess.update]
+                              - if:
+                                  condition: { eq: [{ call: [<.hello, sess] }, 1] }
+                                  then:
+                                    - set: [connected, 1]
+                                    - call: [log.info, "connected to controller (offset ${<.offset})"]
+                                  else:
+                                    - call: [sess.close]
+                      else:
+                        - call: [sess.update]
+                        - if:
+                            condition: { eq: [{ call: [sess.is_connected] }, 0] }
+                            then:
+                              - call: [log.warn, "controller connection lost, job keeps running"]
+                              - call: [sess.close]
+                              - set: [connected, 0]
+                            else:
+                              - call: [<.push_update, sess]
+                  - call: [time.sleep_ms, 200]
+            - if: { condition: { eq: [connected, 1] }, then: [{ call: [sess.close] }] }
+            - return: 0

@@ -1,0 +1,329 @@
+# ShellScreen (doc/spec/98 §98.9.1) — Kopfzeile, Bereichswechsel, Statuszeile.
+# Die Huelle bleibt stehen; Bereiche wechseln darin (F98-16).
+- import: "sources/client/prefabs.aiml"
+- import: "sources/shared/dashboard.aiml"
+- import: "sources/models/agent_list.aiml"
+- import: "sources/shared/presence.aiml"
+
+- class:
+    name: ShellScreen
+    members:
+      # doc/spec/107 F107-4: der Dauerzustand gehoert in die Huelle, nicht
+      # in einen Bildschirm — er bleibt in JEDER Ansicht sichtbar.
+      - [dash,      Dashboard]
+      - [pres,      Presence]   # doc/spec/104: „vor 3 s" statt einer Zeitmarke
+      - [shown_seq, i32]
+      - [initialized, i32]
+      - [scene,       prefab_instance]
+      - [is_visible,  i32]
+      - [area,        i32]      # 0=Lauf 2=cluster 3=agents 4=jobs 5=quelle 6=controller 7=konten 8=konto
+      # doc/spec/107 F107-5: die Ordnerleiste.  `folders` ist an den Container
+      # gebunden und gibt die Reiter-ANZAHL; der erste ist immer „alle".
+      - [folders,     list<string>]
+      - [sel_folder,  string]
+      - [folder_req,  i32]      # 1 = Auswahl hat sich geaendert, einmal abholbar
+      # Wann wurde zuletzt gezeichnet?  Die rechte Spalte nennt ALTER („vor 3 s").
+      # Nur bei neuen Daten nachzurechnen hiesse: die Angabe friert ein und
+      # behauptet Frische, die sie nicht kennt.
+      - [paint_ms,    i64]
+    methods:
+      - def:
+          name: init
+          body:
+            - if: { condition: { eq: [<.initialized, 1] }, then: [{ return }] }
+            - set: [<.scene, { call: [engine.instantiate, "ShellScene"] }]
+            - call: [<.scene.set_pos, 0.0, 0.0]
+            - call: [<.scene.set_z, 100]
+            - call: [<.scene.bind_list, "folder_tabs", <.folders]
+            - call: [<.folders.push, "alle"]
+            - set: [<.sel_folder, ""]
+            - set: [<.folder_req, 0]
+            # Build-Stempel einmal setzen (gilt fuer die ganze Anwendung, doc/spec/107).
+            - decl: [bstamp, string, { call: [io.read_asset, "build_version"] }]
+            - if: { condition: { gt: [bstamp.len, 0] }, then: [{ call: [<.scene.set_text, "build_lbl", "build ${bstamp}"] }] }
+            - set: [<.area, 0]
+            - set: [<.initialized, 1]
+            - set: [<.is_visible, 1]
+
+      # mark_area: zeigt, WO man ist — ohne das ist eine Huelle nur eine Leiste.
+      - def:
+          name: mark_area
+          args: [[which, i32]]
+          body:
+            - if: { condition: { eq: [<.initialized, 0] }, then: [{ return }] }
+            - call: [<.reset_tab, "pipes_btn"]
+            - call: [<.reset_tab, "clust_btn"]
+            - call: [<.reset_tab, "agent_btn"]
+            - call: [<.reset_tab, "cons_btn"]
+            - call: [<.reset_tab, "users_btn"]
+            # F107-9: Liste (4) UND Job-Seite (0) gehoeren unter „Jobs" — die
+            # Seite ist kein eigener Ort, sondern ein Job aus dieser Liste.
+            # F107-10: Jobliste (4), Lauf-Ansicht (0) und Quelltext (5) sind
+            # alle „Jobs" — der Reiter „Laeufe" ist gestrichen.
+            - if: { condition: { '||': [{ eq: [which, 0] }, { '||': [{ eq: [which, 4] }, { eq: [which, 5] }] }] }, then: [{ call: [<.mark_tab, "pipes_btn"] }] }
+            - if: { condition: { eq: [which, 2] }, then: [{ call: [<.mark_tab, "clust_btn"] }] }
+            - if: { condition: { eq: [which, 3] }, then: [{ call: [<.mark_tab, "agent_btn"] }] }
+            - if: { condition: { eq: [which, 6] }, then: [{ call: [<.mark_tab, "cons_btn"] }] }
+            # 7 = Konten.  8 = Konto: dessen Knopf steht oben rechts, nicht in der
+            # Reiterleiste (F107-3) — darum bleibt dort KEIN Reiter markiert.
+            - if: { condition: { eq: [which, 7] }, then: [{ call: [<.mark_tab, "users_btn"] }] }
+            - set: [<.area, which]
+
+      - def:
+          name: reset_tab
+          args: [[btn, string]]
+          body:
+            - call: [<.scene.set_bg_color, btn, 0x1A2030FF]
+            - call: [<.scene.set_border_color, btn, 0x3D5A77FF]
+            - call: [<.scene.set_color, btn, 0x8FA6BDFF]
+
+      - def:
+          name: mark_tab
+          args: [[btn, string]]
+          body:
+            - call: [<.scene.set_bg_color, btn, 0x2A3444FF]
+            - call: [<.scene.set_border_color, btn, 0xFFCC88FF]
+            - call: [<.scene.set_color, btn, 0xFFCC88FF]
+
+      - def:
+          name: set_visible
+          args: [[vis, i32]]
+          body:
+            - if: { condition: { eq: [<.initialized, 0] }, then: [{ return }] }
+            - call: [<.scene.set_visible, vis]
+            - set: [<.is_visible, vis]
+
+      # set_status: Verbindung, Agentenzahl, aktiver Lauf (F98-17).
+      - def:
+          name: set_status
+          # doc/spec/104 F104-4: die Leiste steht auf JEDEM Bildschirm — hier
+          # gehoert die Anwesenheit hin, nicht nur eine Gesamtzahl.
+          args: [[connected, i32], [agents, i32], [online, i32], [run_text, string]]
+          body:
+            - if: { condition: { eq: [<.initialized, 0] }, then: [{ return }] }
+            - if:
+                condition: { eq: [connected, 1] }
+                then:
+                  - call: [<.scene.set_text, "conn_lbl", "verbunden"]
+                  - call: [<.scene.set_bg_color, "conn_dot", 0x2F8F4EFF]
+                else:
+                  - call: [<.scene.set_text, "conn_lbl", "nicht verbunden"]
+                  - call: [<.scene.set_bg_color, "conn_dot", 0xC4452FFF]
+            - decl: [agent_txt, string, "keine Agenten"]
+            - if:
+                condition: { gt: [agents, 0] }
+                then: [{ set: [agent_txt, "${online}/${agents} Agenten verbunden"] }]
+            - call: [<.scene.set_text, "agent_lbl", agent_txt]
+            - call: [<.scene.set_text, "run_lbl", run_text]
+
+      # set_stand: wie ALT ist das, was hier steht?  Jede Sekunde neu — eine
+      # Alters-Angabe, die nur bei neuen Daten nachrechnet, kann per Bauart nie
+      # „VERALTET" sagen (genau das war der Fall).
+      - def:
+          name: set_stand
+          access: public
+          static_off: ["str_cmp"]
+          args: [[taken_ms, i64], [now_ms, i64]]
+          body:
+            - if: { condition: { eq: [<.initialized, 0] }, then: [{ return }] }
+            - call: [<.scene.set_text, "stand_lbl", { call: [<.pres.snapshot_line, taken_ms, now_ms] }]
+
+      # set_message: Fehler/Hinweis rechts unten; "" loescht.
+      # sync_folders: die Reiter kommen AUS DEN DATEN — „alle" plus jedes
+      # Namenspraefix vor dem ersten „/", das wirklich vorkommt (doc/spec/107
+      # F107-5).  Kein Job mit „/" → genau ein Reiter, und das ist die Wahrheit,
+      # nicht ein leerer Baum.
+      - def:
+          name: sync_folders
+          static_off: ["str_cmp"]
+          args: [[view, ref<ClusterView>]]
+          body:
+            - decl: [want, list<string>]
+            - call: [want.push, "alle"]
+            - decl: [fix, i32, 0]
+            - while:
+                condition: { lt: [fix, view.job_defs.len] }
+                body:
+                  - decl: [fjob, JobDef, { at: [view.job_defs, fix] }]
+                  - decl: [cut, i32, { call: [fjob.name.index_of, "/"] }]
+                  - if:
+                      condition: { gt: [cut, 0] }
+                      then:
+                        - decl: [pref, string, { call: [fjob.name.substr, 0, cut] }]
+                        - if: { condition: { eq: [{ call: [want.contains, pref] }, 0] }, then: [{ call: [want.push, pref] }] }
+                  - set: [fix, { +: [fix, 1] }]
+            # Nur bei echter Aenderung neu aufbauen: ein Container, der jeden
+            # Schnappschuss neu aufspannt, verliert den Hover unter der Maus.
+            - decl: [same, i32, 1]
+            - if: { condition: { neq: [want.len, <.folders.len] }, then: [{ set: [same, 0] }] }
+            - if:
+                condition: { eq: [same, 1] }
+                then:
+                  - decl: [cix, i32, 0]
+                  - while:
+                      condition: { lt: [cix, want.len] }
+                      body:
+                        - decl: [want_name, string, { at: [want, cix] }]
+                        - decl: [have_name, string, { at: [<.folders, cix] }]
+                        - if: { condition: { neq: [want_name, have_name] }, then: [{ set: [same, 0] }] }
+                        - set: [cix, { +: [cix, 1] }]
+            - if: { condition: { eq: [same, 1] }, then: [{ return: [] }] }
+            - call: [<.folders.clear]
+            - decl: [pix, i32, 0]
+            - while:
+                condition: { lt: [pix, want.len] }
+                body:
+                  - call: [<.folders.push, { at: [want, pix] }]
+                  - set: [pix, { +: [pix, 1] }]
+            # Verschwindet der gewaehlte Ordner, faellt die Auswahl auf „alle".
+            - if: { condition: { eq: [{ call: [<.folders.contains, <.sel_folder] }, 0] }, then: [{ set: [<.sel_folder, ""] }, { set: [<.folder_req, 1] }] }
+
+      # poll_folders: Reiter beschriften und Klicks einsammeln — JEDEN Rahmen,
+      # weil der Container seine Zeilen selbst aufspannt.
+      - def:
+          name: poll_folders
+          static_off: ["str_cmp"]
+          body:
+            - if: { condition: { eq: [<.initialized, 0] }, then: [{ return }] }
+            - decl: [tcc, i32, { call: [<.scene.container_row_count, "folder_tabs"] }]
+            - decl: [tci, i32, 0]
+            - while:
+                condition: { lt: [tci, tcc] }
+                body:
+                  - decl: [tab, prefab_instance, { call: [<.scene.container_row, "folder_tabs", tci] }]
+                  - if:
+                      condition: { '&&': [{ neq: [tab, null] }, { lt: [tci, <.folders.len] }] }
+                      then:
+                        - decl: [fname, string, { at: [<.folders, tci] }]
+                        - decl: [chosen, i32, 0]
+                        - if: { condition: { '&&': [{ eq: [tci, 0] }, { eq: [<.sel_folder.len, 0] }] }, then: [{ set: [chosen, 1] }] }
+                        - if: { condition: { eq: [fname, <.sel_folder] }, then: [{ set: [chosen, 1] }] }
+                        - decl: [lbl, string, fname]
+                        - if: { condition: { eq: [chosen, 1] }, then: [{ set: [lbl, "[ ${fname} ]"] }] }
+                        - call: [tab.set_text, "tab_btnxx", lbl]
+                        - if:
+                            condition: { eq: [{ call: [tab.child_clicked, "tab_btnxx"] }, 1] }
+                            then:
+                              - if: { condition: { eq: [tci, 0] }, then: [{ set: [<.sel_folder, ""] }], else: [{ set: [<.sel_folder, fname] }] }
+                              - set: [<.folder_req, 1]
+                  - set: [tci, { +: [tci, 1] }]
+
+      # take_folder: 1 = Auswahl hat sich geaendert (einmal abholbar).
+      - def:
+          name: take_folder
+          access: public
+          return: i32
+          body:
+            - decl: [want, i32, <.folder_req]
+            - set: [<.folder_req, 0]
+            - return: want
+
+      - def:
+          name: selected_folder
+          access: public
+          return: { type: string, lifetime: producer }
+          body: [{ return: <.sel_folder }]
+
+      - def:
+          name: set_message
+          args: [[msg, string]]
+          body:
+            - if: { condition: { eq: [<.initialized, 0] }, then: [{ return }] }
+            - call: [<.scene.set_text, "msg_lbl", msg]
+
+      - def:
+          name: logout_pressed
+          return: i32
+          body:
+            - if: { condition: { eq: [<.is_visible, 0] }, then: [{ return: 0 }] }
+            - return: { call: [<.scene.child_clicked, "logout_btn"] }
+
+      - def:
+          name: account_pressed
+          return: i32
+          body:
+            - if: { condition: { eq: [<.is_visible, 0] }, then: [{ return: 0 }] }
+            - return: { call: [<.scene.child_clicked, "accnt_btn"] }
+
+      # poll_area: liefert den gewaehlten Bereich, oder -1 wenn nichts geklickt.
+      - def:
+          name: poll_area
+          return: i32
+          body:
+            - if: { condition: { eq: [<.is_visible, 0] }, then: [{ return: -1 }] }
+            # F107-9: „Jobs" fuehrt auf die LISTE (Bereich 4), nicht auf den
+            # Editor — der gehoert zu einem Job und wird ueber ihn geoeffnet.
+            - if: { condition: { eq: [{ call: [<.scene.child_clicked, "pipes_btn"] }, 1] }, then: [{ set: [<.area, 4] }, { return: 4 }] }
+            - if: { condition: { eq: [{ call: [<.scene.child_clicked, "clust_btn"] }, 1] }, then: [{ set: [<.area, 2] }, { return: 2 }] }
+            - if: { condition: { eq: [{ call: [<.scene.child_clicked, "agent_btn"] }, 1] }, then: [{ set: [<.area, 3] }, { return: 3 }] }
+            # Bereich 6 = Skript-Konsole (doc/spec/108).
+            - if: { condition: { eq: [{ call: [<.scene.child_clicked, "cons_btn"] }, 1] }, then: [{ set: [<.area, 6] }, { return: 6 }] }
+            # 7 = Konten.  Ein BEREICH wie jeder andere (doc/spec/107 §107.6): vorher
+            # gab dieser Zweig die 7 zurueck, ohne den Bereich zu setzen — der Wirt
+            # machte damit alles unsichtbar und legte ein Overlay darueber (F107-29).
+            - if: { condition: { eq: [{ call: [<.scene.child_clicked, "users_btn"] }, 1] }, then: [{ set: [<.area, 7] }, { return: 7 }] }
+            - return: -1
+
+      # ── doc/spec/107 F107-4: die rechte Spalte ──────────────────────────
+      # Nur bei NEUEM Schnappschuss neu formatieren; sie steht in jeder Ansicht,
+      # also wuerde ein Neuaufbau je Rahmen staendig Arbeit kosten.
+      - def:
+          name: set_live
+          access: public
+          static_off: ["str_cmp"]
+          args: [[view, ref<ClusterView>], [lst, ref<AgentList>], [seq, i32], [now_ms, i64]]
+          body:
+            # Neu zeichnen bei NEUEN Daten — oder wenn eine Sekunde vergangen
+            # ist, damit die Alters-Angaben weiterlaufen.
+            - decl: [since, i64, { -: [now_ms, <.paint_ms] }]
+            - if: { condition: { '&&': [{ eq: [seq, <.shown_seq] }, { lt: [since, 1000] }] }, then: [{ return: [] }] }
+            - set: [<.shown_seq, seq]
+            - set: [<.paint_ms, now_ms]
+            # F107-12: die rechte Spalte ist weg.  `Dashboard.running` und
+            # `.executors` bleiben als gerechnete Aussagen bestehen (sie sind
+            # geprueft und werden gebraucht, sobald jemand sie wieder zeigt) —
+            # hier wird nur nichts mehr gezeichnet.  Die Fusszeile traegt die
+            # Kurzform (set_status), die Namen stehen unter Agenten.
+            - call: [<.sync_folders, view]
+
+      # show_console_tab: der Controller-Reiter ist IMMER da (User 2026-10-18: „wo die
+      # script-console zu finden ist, weiss ich generell nicht").
+      #
+      # Vorher war er fuer Nicht-Admins ausgeblendet — ein Bedienelement, das man nur
+      # sieht, wenn man schon das Recht hat, kann niemand finden, der es noch nicht hat.
+      # Die Sperre liegt dort, wo sie hingehoert: der Server lehnt ab, und der Reiter
+      # erklaert, was fehlt.  Verbergen war ohnehin nie die Sicherheit (doc/spec/91
+      # §AP2.C) — es war nur Bequemlichkeit, und hier war es Schaden.
+      - def:
+          name: show_console_tab
+          args: [[vis, i32]]
+          body:
+            - if: { condition: { eq: [<.initialized, 0] }, then: [{ return }] }
+            - call: [<.scene.set_child_visible, "cons_btn", 1]
+
+      # set_server_load: die Last des Servers in der Fusszeile (doc/spec/109 R5).
+      # Leere Anzeige, solange nichts gemessen ist — eine 0 waere eine Behauptung
+      # (dieselbe Regel wie bei den Agenten, R6).
+      # show_users_tab: die Kontenverwaltung bleibt Admin-Konten vorbehalten.  Anders
+      # als beim Controller-Reiter ist das hier richtig: die Konsole ist ein WERKZEUG,
+      # das man finden koennen muss, die Kontenliste ist eine AUSKUNFT (wer existiert
+      # ueberhaupt) — und die gehoert nicht jedem gezeigt.  Dass die Konsole trotzdem
+      # auffindbar ist, erledigt ihr eigener Reiter samt Hinweis.
+      - def:
+          name: show_users_tab
+          args: [[vis, i32]]
+          body:
+            - if: { condition: { eq: [<.initialized, 0] }, then: [{ return }] }
+            - call: [<.scene.set_child_visible, "users_btn", vis]
+
+      # show_folder_bar: die Ordnerleiste gehoert zur JOBLISTE und nirgendwo sonst
+      # (User 2026-10-18).  Auf der Lauf-Ansicht, im Editor, bei Cluster, Agenten oder
+      # Controller filtert sie nichts — sie stand dort nur herum und sah aus, als
+      # taete sie etwas.
+      - def:
+          name: show_folder_bar
+          args: [[vis, i32]]
+          body:
+            - if: { condition: { eq: [<.initialized, 0] }, then: [{ return }] }
+            - call: [<.scene.set_child_visible, "folder_bar", vis]
+            - call: [<.scene.set_child_visible, "folder_tabs", vis]

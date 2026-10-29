@@ -1,0 +1,12 @@
+# Barrel für das AP1-Protokoll (doc/spec/90 §AP1.4).  Selbst deklarationsfrei —
+# der 3-Typen-Cap (spec/49 §14.5) schreibt diese Aufteilung + Barrel-Datei vor.
+# Wer das AP1-Protokoll braucht, importiert nur diese Datei.
+
+- import: "sources/models/agent_proto.aiml"
+- import: "sources/models/agent_list.aiml"
+- import: "sources/models/run_reqs.aiml"
+- import: "sources/models/run_output.aiml"
+- import: "sources/models/run_window.aiml"
+- import: "sources/models/run_info.aiml"
+- import: "sources/models/agent_token.aiml"
+- import: "sources/models/agent_token_reqs.aiml"

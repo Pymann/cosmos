@@ -1,0 +1,55 @@
+{
+  "$schema": "exodus.project.config-1.0",
+  "name": "ui_shot",
+  "version": "0.0.1",
+  "output_type": "executable",
+  "sources": [
+    "test/ui_shot.aiml"
+  ],
+  "asset_directories": [
+    "assets"
+  ],
+  "compiler": {
+    "name": "/media/nikolai/95a208ef-ffa2-478b-abdd-ff394baa6a76/projects/python/test/aiml/out/aiml/aiml",
+    "lang_standard": "17",
+    "flags": []
+  },
+  "linker": {
+    "name": "g++",
+    "flags": [
+      "-Wl,-rpath,/media/nikolai/95a208ef-ffa2-478b-abdd-ff394baa6a76/projects/python/test/aiml/out/libaiml"
+    ],
+    "libraries": [
+      "aiml",
+      "pthread",
+      "ssl",
+      "crypto",
+      "dl"
+    ],
+    "library_paths": [
+      "/media/nikolai/95a208ef-ffa2-478b-abdd-ff394baa6a76/projects/python/test/aiml/out/libaiml"
+    ]
+  },
+  "artifact_in_cwd": true,
+  "optimization": "0",
+  "debug": false,
+  "warnings": [],
+  "env": {
+    "AIML_STRICT_TOPLEVEL": "1"
+  },
+  "jobs": 16,
+  "apt_packages": [
+    {
+      "name": "xvfb",
+      "version": "2:21.1.12-1ubuntu1.8",
+      "arch": "amd64",
+      "required": true
+    },
+    {
+      "name": "imagemagick",
+      "version": "8:6.9.12.98+dfsg1-5.2build2",
+      "arch": "amd64",
+      "required": true
+    }
+  ]
+}

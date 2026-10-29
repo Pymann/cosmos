@@ -1,0 +1,5 @@
+# Cluster-Read-Request: token-gesicherte Read-only-Abfrage des Cluster-Schnappschusses.
+- model:
+    name: ClusterReq
+    fields:
+      - [token, string]

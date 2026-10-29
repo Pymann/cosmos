@@ -1,0 +1,377 @@
+# ConsoleRunner — fuehrt ein Konsolen-Skript aus (doc/spec/108 §3/§4).
+#
+# Die ganze Begruendung fuer einen EIGENEN PROZESS steht in F108-5: der Uebersetzer haelt
+# einen JIT-Kontext zur Zeit (spec/65 F65-25), der Server ist AOT und hat ueberhaupt
+# keinen Uebersetzer eingebunden, und ein abstuerzender Faden naehme alle Nutzer mit.
+# Also: Quelltext in eine Datei, `aiml <datei> -r` als Kindprozess, Ausgabe einsammeln.
+#
+# Die Richtlinie kommt ausschliesslich ueber die UMGEBUNG des Kindprozesses (F108-6) —
+# nie aus der Quelle, denn die gehoert dem Nutzer (spec/65 F65-6).
+#
+# Static-Check (spec/49 §14): 1 class — OK.
+
+- import: "sources/models/console_reqs.aiml"
+
+- class:
+    name: ConsoleRunner
+    members:
+      # Alles ueber die Umgebung, mit brauchbaren Vorgaben: der Server soll ohne
+      # Konfiguration starten, und ein fehlender Pfad darf sich NICHT als Absturz des
+      # Skripts zeigen (spec/65 F65-40: ein zugelassenes `extern` ohne aufloesbares
+      # Symbol stuerzt ab).  Darum prueft `ready` beim Start, nicht beim ersten Skript.
+      - [aiml_bin,   string, ""]
+      - [exports,    string, ""]
+      - [preamble,   string, ""]
+      - [offer_lib,  string, ""]
+      - [snapshot,   string, ""]
+      - [work_dir,   string, ""]
+      - [timeout_ms, i32,    0]
+      - [ready,      i32,    0]
+      - [seq,        i32,    0]
+      # doc/spec/108 F108-18: der Lauf gehoert in einen EIGENEN FADEN.  `run_script`
+      # ruft `proc.wait` — im Ereignisloop haette das die ganze Steuerebene fuer die
+      # Dauer des Skripts angehalten, bis zu 10 Sekunden.  Genau diesen Fehler nennt
+      # §AP2.B beim Provisioner („neun Sekunden lang die ganze Steuerebene still"),
+      # und der Provisioner ist deshalb schon ein Faden — die Konsole folgt ihm.
+      #
+      # Die Sperre MUSS stehen, bevor der erste Faden sie anfasst: eine Klasse, deren
+      # Sperre erst spaeter entsteht, killt den Prozess beim ersten Zugriff
+      # (SIGSEGV in pthread_mutex_lock, cosmos 2026-10-15).  `armed` sichert das ab.
+      - [guard,      lock]
+      - [armed,      i32,    0]
+      - [running,    i32,    0]
+      - [done,       i32,    0]
+      - [cur_id,     i32,    0]
+      - [result,     ConsoleExecResult]
+      - [pend_actor, string, ""]
+      - [pend_src,   string, ""]
+      - [pend_clr,   i32,    0]
+      # Wie viele Zeilen die Praeambel VORANSTELLT.  Ohne diesen Versatz zeigte jede
+      # Fundstelle um genau diesen Betrag daneben — und ein Editor, der auf die
+      # falsche Zeile zeigt, ist schlimmer als einer, der auf keine zeigt.
+      - [pre_lines,  i32,    0]
+    methods:
+      - def:
+          name: init
+          body:
+            - decl: [cenv, map<string:string>, { call: [sys.env] }]
+            - set: [<.aiml_bin,  { call: [<.env_or, cenv, "COSMOS_CONSOLE_AIML", "aiml"] }]
+            - set: [<.exports,   { call: [<.env_or, cenv, "COSMOS_CONSOLE_EXPORTS", "deploy/clearance/console_exports.txt"] }]
+            - set: [<.preamble,  { call: [<.env_or, cenv, "COSMOS_CONSOLE_PREAMBLE", "deploy/clearance/console_preamble.aiml"] }]
+            - set: [<.offer_lib, { call: [<.env_or, cenv, "COSMOS_CONSOLE_LIB", "libcosmos_console_offer.so"] }]
+            - set: [<.snapshot,  { call: [<.env_or, cenv, "COSMOS_CONSOLE_SNAPSHOT", "console_snapshot.txt"] }]
+            - set: [<.work_dir,  { call: [<.env_or, cenv, "COSMOS_CONSOLE_WORK", "console_runs"] }]
+            - set: [<.timeout_ms, 10000]
+            - decl: [work_p, path, <.work_dir]
+            - call: [io.mkdir_all, work_p]
+            - call: [<.arm]
+            - call: [<.check_ready]
+
+      # init_with: dieselbe Einrichtung mit AUSDRUECKLICHEN Pfaden statt aus der Umgebung.
+      # Dafuer da, dass eine Probe den Lauf pruefen kann, ohne die Umgebung des
+      # Testlaufs zu veraendern — und damit die Pfadlogik an EINER Stelle bleibt:
+      # `init` liest die Umgebung und ruft dasselbe hier.
+      - def:
+          name: init_with
+          args: [[bin_in, string], [exp_in, string], [pre_in, string], [lib_in, string], [work_in, string]]
+          body:
+            - set: [<.aiml_bin,  bin_in]
+            - set: [<.exports,   exp_in]
+            - set: [<.preamble,  pre_in]
+            - set: [<.offer_lib, lib_in]
+            - set: [<.work_dir,  work_in]
+            - set: [<.timeout_ms, 10000]
+            - decl: [wrk_p, path, work_in]
+            - call: [io.mkdir_all, wrk_p]
+            - call: [<.arm]
+            - call: [<.check_ready]
+
+      # set_snapshot: den Pfad des Schnappschusses nachtraeglich setzen (der Server
+      # schreibt ihn erst, wenn der Cluster steht).
+      - def:
+          name: set_snapshot
+          args: [[snap_in, string]]
+          body:
+            - set: [<.snapshot, snap_in]
+
+      # env_or: Wert oder Vorgabe.  Die Interpolation KOPIERT — ein Wert aus einer
+      # `sys.env`-Map lebt nur so lange wie die Map (aiml spec/23), und hier soll er in
+      # ein Member.  Dieselbe Falle hat am 17.10. schon einmal zugeschlagen.
+      - def:
+          name: env_or
+          args: [[cenv, map<string:string>], [key, string], [dflt, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - if: { condition: { eq: [{ call: [cenv.contains, key] }, 0] }, then: [{ return: "${dflt}" }] }
+            - decl: [raw, string, { call: [cenv.get, key] }]
+            - if: { condition: { eq: [raw.len, 0] }, then: [{ return: "${dflt}" }] }
+            - return: "${raw}"
+
+      # check_ready: BEIM START pruefen, nicht beim ersten Skript (F108-9b).  Fehlt die
+      # Angebots-Bibliothek, stuerzt ein zugelassenes `extern` ab, statt zu melden —
+      # dann soll wenigstens der Server beim Hochfahren sagen, was fehlt.
+      - def:
+          name: check_ready
+          body:
+            - decl: [lib_p, path, <.offer_lib]
+            - decl: [exp_p, path, <.exports]
+            - decl: [pre_p, path, <.preamble]
+            - set: [<.ready, 1]
+            - if:
+                condition: { eq: [{ call: [io.exists, lib_p] }, 0] }
+                then:
+                  - set: [<.ready, 0]
+                  - call: [log.warn, "[console] Angebots-Bibliothek fehlt: ${<.offer_lib} — die Konsole bleibt zu (COSMOS_CONSOLE_LIB)"]
+            - if:
+                condition: { eq: [{ call: [io.exists, exp_p] }, 0] }
+                then:
+                  - set: [<.ready, 0]
+                  - call: [log.warn, "[console] Angebots-Tabelle fehlt: ${<.exports} (COSMOS_CONSOLE_EXPORTS)"]
+            - if:
+                condition: { eq: [{ call: [io.exists, pre_p] }, 0] }
+                then:
+                  - set: [<.ready, 0]
+                  - call: [log.warn, "[console] Praeambel fehlt: ${<.preamble} (COSMOS_CONSOLE_PREAMBLE)"]
+            - if:
+                condition: { eq: [<.ready, 1] }
+                then: [{ call: [log.info, "[console] bereit (aiml=${<.aiml_bin})"] }]
+
+      # write_snapshot: der Server schreibt, die Bibliothek liest (doc/spec/108 §11).
+      # So kommt ein Konsolen-Skript an Cluster-Zustand, OHNE dass ein zweiter Prozess
+      # dasselbe KV oeffnet — das ist in aiondb nicht vorgesehen.  Von Bauart nur
+      # lesend: ein Skript kann den Schnappschuss nicht veraendern, nur ansehen.
+      - def:
+          name: write_snapshot
+          args: [[agents_on, i32], [agents_all, i32]]
+          body:
+            - if: { condition: { eq: [<.snapshot.len, 0] }, then: [{ return: [] }] }
+            - decl: [snap_p, path, <.snapshot]
+            - call: [io.write_file, snap_p,
+                "agents_online=${agents_on}\nagents_total=${agents_all}\n"]
+
+      # first_error_line: die erste Zeilennummer aus den Befunden, umgerechnet auf den
+      # Quelltext DES NUTZERS (doc/spec/108 §6a).
+      #
+      # Das ist eine NAEHERUNG und soll als solche dastehen: sie liest die Meldungen des
+      # Uebersetzers als Text, weil es keine maschinenlesbare Form gibt (doc/spec/98
+      # §98.1, weiterhin offen).  Gesucht wird `<datei>:<zahl>:`; findet sie nichts,
+      # ist das Ergebnis 0 und die Oberflaeche markiert nichts — falsch markieren waere
+      # schlimmer als gar nicht.
+      - def:
+          name: first_error_line
+          args: [[diag, string]]
+          return: i32
+          body:
+            - decl: [lines, list<string>, { call: [diag.split, "\n"] }]
+            - decl: [eli, i32, 0]
+            - while:
+                condition: { lt: [eli, lines.len] }
+                body:
+                  - decl: [line, string, { at: [lines, eli] }]
+                  - decl: [mark, i32, { call: [line.index_of, ".aiml:"] }]
+                  - if:
+                      condition: { ge: [mark, 0] }
+                      then:
+                        - decl: [tail_s, string, { call: [line.substr, { +: [mark, 6] }, { -: [line.len, { +: [mark, 6] }] }] }]
+                        - decl: [stop_at, i32, { call: [tail_s.index_of, ":"] }]
+                        - if:
+                            condition: { gt: [stop_at, 0] }
+                            then:
+                              - decl: [num_s, string, { call: [tail_s.substr, 0, stop_at] }]
+                              - decl: [file_line, i32, { call: [num_s.to_int] }]
+                              - decl: [user_line, i32, { -: [file_line, <.pre_lines] }]
+                              - if:
+                                  condition: { gt: [user_line, 0] }
+                                  then: [{ return: user_line }]
+                  - set: [eli, { +: [eli, 1] }]
+            - return: 0
+
+      # split_streams: stderr nach Schwere auf Ausgabe und Befunde verteilen.
+      # `ref` auf das Ergebnis, damit beide Felder an einer Stelle gefuellt werden.
+      - def:
+          name: split_streams
+          args: [[raw, string], [dst, ref<ConsoleExecResult>]]
+          body:
+            - decl: [lines, list<string>, { call: [raw.split, "\n"] }]
+            - decl: [sli, i32, 0]
+            - while:
+                condition: { lt: [sli, lines.len] }
+                body:
+                  - decl: [line, string, { at: [lines, sli] }]
+                  - if:
+                      condition: { gt: [line.len, 0] }
+                      then:
+                        - decl: [is_err, i32, 0]
+                        - if: { condition: { ge: [{ call: [line.index_of, "[ERROR"] }, 0] }, then: [{ set: [is_err, 1] }] }
+                        - if: { condition: { ge: [{ call: [line.index_of, "[WARN"] }, 0] }, then: [{ set: [is_err, 1] }] }
+                        - if:
+                            condition: { eq: [is_err, 1] }
+                            then: [{ set: [dst.diagnostics, "${dst.diagnostics}${line}\n"] }]
+                            else: [{ set: [dst.output, "${dst.output}${line}\n"] }]
+                  - set: [sli, { +: [sli, 1] }]
+
+      - def:
+          name: arm
+          body:
+            - if: { condition: { eq: [<.armed, 1] }, then: [{ return }] }
+            - call: [<.guard.init]
+            - set: [<.armed, 1]
+
+      # begin: einen Lauf ANNEHMEN.  Gibt die Kennung zurueck, 0 = gerade belegt.
+      # Ein Lauf zur Zeit: mehr braucht eine Admin-Konsole nicht, und zwei
+      # gleichzeitige Uebersetzer im selben Verzeichnis waeren eine eigene Frage.
+      - def:
+          name: begin
+          args: [[actor, string], [src, string], [clr, i32]]
+          return: i32
+          body:
+            - if: { condition: { eq: [<.armed, 0] }, then: [{ call: [<.arm] }] }
+            - call: [<.guard.acquire]
+            - if:
+                condition: { eq: [<.running, 1] }
+                then:
+                  - call: [<.guard.release]
+                  - return: 0
+            - set: [<.running, 1]
+            - set: [<.done, 0]
+            - set: [<.cur_id, { +: [<.cur_id, 1] }]
+            - set: [<.pend_actor, actor]
+            - set: [<.pend_src, src]
+            - set: [<.pend_clr, clr]
+            - decl: [given, i32, <.cur_id]
+            - call: [<.guard.release]
+            - return: given
+
+      # execute: der Rumpf des Fadens.  Die EINGABE wird unter Sperre geholt, der LAUF
+      # laeuft ohne — sonst haelte der Faden die Sperre sekundenlang und die Abfrage
+      # des Standes blockierte genau so lange wie vorher der ganze Server.
+      - def:
+          name: execute
+          body:
+            - if: { condition: { eq: [<.armed, 0] }, then: [{ call: [<.arm] }] }
+            - call: [<.guard.acquire]
+            - decl: [actor_c, string, "${<.pend_actor}"]
+            - decl: [src_c, string, "${<.pend_src}"]
+            - decl: [clr_c, i32, <.pend_clr]
+            - decl: [id_c, i32, <.cur_id]
+            - call: [<.guard.release]
+
+            - decl: [res, ConsoleExecResult, { call: [<.run_script, actor_c, src_c, clr_c] }]
+
+            - call: [<.guard.acquire]
+            - set: [res.run_id, id_c]
+            - set: [res.finished, 1]
+            - set: [<.result, res]
+            - set: [<.done, 1]
+            - set: [<.running, 0]
+            - call: [<.guard.release]
+
+      # take_result: das Ergebnis dieses Laufs, als WERT.
+      #
+      # Nicht ueber einen `ref<>`-Ausgabeparameter: ein ganzes Modell dorthin zu
+      # schreiben kam beim Aufrufer nicht an (gemessen 17.10.2026 — der Faden war
+      # nachweislich fertig, die Abfrage sah nichts).  Ein Rueckgabewert ist in aiml
+      # eindeutig, und `finished` sagt, ob er gilt.
+      - def:
+          name: take_result
+          args: [[want_id, i32]]
+          return: ConsoleExecResult
+          body:
+            - if: { condition: { eq: [<.armed, 0] }, then: [{ call: [<.arm] }] }
+            - decl: [out, ConsoleExecResult]
+            - set: [out.run_id, want_id]
+            - call: [<.guard.acquire]
+            - if:
+                condition: { '&&': [{ eq: [<.done, 1] }, { eq: [<.result.run_id, want_id] }] }
+                then: [{ set: [out, <.result] }]
+            - call: [<.guard.release]
+            - return: out
+
+      # run_script: der eigentliche Lauf.
+      - def:
+          name: run_script
+          args: [[actor, string], [src, string], [clr, i32]]
+          return: ConsoleExecResult
+          body:
+            - decl: [out, ConsoleExecResult]
+            - set: [out.my_level, clr]
+            - set: [out.exit_code, -1]
+            - if:
+                condition: { eq: [<.ready, 0] }
+                then:
+                  - set: [out.message, "Die Konsole ist nicht eingerichtet — siehe Serverprotokoll beim Start."]
+                  - return: out
+
+            # Spur (F108-10): wer, wann, welcher Quelltext — als HASH, nicht als Text,
+            # und ohne Token (F108-12).  Ein Protokoll, das den Quelltext mitschreibt,
+            # ist eine zweite Kopie der Daten des Nutzers.
+            - set: [<.seq, { +: [<.seq, 1] }]
+            - decl: [src_hash, string, { call: [hash.sha256, src] }]
+            - decl: [started_ms, i64, { call: [time.now] }]
+            - call: [log.info, "[console] run #${<.seq} actor=${actor} sha256=${src_hash} bytes=${src.len}"]
+
+            # Praeambel + Nutzerquelle.  Die Praeambel steht VORNE, damit die
+            # Zeilennummern des Nutzers um einen festen Betrag verschoben sind und
+            # nicht um einen, der vom Skript abhaengt.
+            - decl: [pre_p, path, <.preamble]
+            - decl: [pre_txt, string, { call: [io.read_file, pre_p] }]
+            # +1, weil zwischen Praeambel und Nutzerquelle ein "\n" steht.
+            - decl: [pre_split, list<string>, { call: [pre_txt.split, "\n"] }]
+            - set: [<.pre_lines, pre_split.len]
+            - decl: [script_p, path, "${<.work_dir}/run_${<.seq}.aiml"]
+            - call: [io.write_file, script_p, "${pre_txt}\n${src}"]
+
+            - decl: [argv, list<string>]
+            - call: [argv.push, <.aiml_bin]
+            - call: [argv.push, "${<.work_dir}/run_${<.seq}.aiml"]
+            - call: [argv.push, "-r"]
+
+            # Die Richtlinie der Sitzung — NUR hier, nie in der Quelle (F108-6).
+            # `AIML_CREATE_LEVEL`/`AIML_REPLACE_LEVEL` werden bewusst NICHT gesetzt:
+            # fehlend heisst 0 heisst niemand, und ein Konsolen-Skript hat im Wirt
+            # nichts anzulegen und nichts zu ersetzen.
+            - decl: [cenv, map<string:string>, { call: [sys.env] }]
+            - call: [cenv.put, "AIML_CLEARANCE", "${clr}"]
+            - call: [cenv.put, "AIML_EXPORTS", <.exports]
+            - call: [cenv.put, "AIML_STATIC_CLEARANCE", "1"]
+            - call: [cenv.put, "LD_PRELOAD", <.offer_lib]
+            - call: [cenv.put, "COSMOS_CONSOLE_ACTOR", actor]
+            - call: [cenv.put, "COSMOS_CONSOLE_SNAPSHOT", <.snapshot]
+
+            - decl: [proc, process, { call: [sys.exe, argv, {capture: true, timeout: <.timeout_ms, env: cenv}] }]
+            - if:
+                condition: { eq: [proc, null] }
+                then:
+                  - set: [out.message, "Der Konsolen-Prozess liess sich nicht starten."]
+                  - return: out
+            - decl: [code, i32, { call: [proc.wait] }]
+            - decl: [o_txt, string, { call: [proc.stdout_buffer] }]
+            - decl: [e_txt, string, { call: [proc.stderr_buffer] }]
+            - set: [out.duration_ms, { -: [{ call: [time.now] }, started_ms] }]
+            - call: [log.info, "[console] run #${<.seq} fertig rc=${code} in ${out.duration_ms} ms"]
+            - set: [out.exit_code, code]
+            # Ausgabe und Befunde trennen — aber NICHT nach Strom.  `log.*` schreibt in
+            # aiml auf stderr (gemessen 17.10.2026), also laege die eigene Ausgabe eines
+            # Skripts im Befunde-Kasten, und der Nutzer saehe seine Meldungen dort, wo
+            # Ablehnungen stehen.  Getrennt wird nach SCHWERE: Fehler und Warnungen sind
+            # Befunde, alles andere ist Ausgabe.  Das haelt auch fuer den Fall, der
+            # zaehlt: ein abgelehntes Skript laeuft nie, erzeugt also NUR Fehlerzeilen.
+            - set: [out.output, o_txt]
+            - call: [<.split_streams, e_txt, out]
+            - set: [out.success, 1]
+            - set: [out.error_line, { call: [<.first_error_line, out.diagnostics] }]
+            - if:
+                condition: { eq: [code, 0] }
+                then: [{ set: [out.message, "ausgefuehrt"] }]
+                else: [{ set: [out.message, "beendet mit ${code}"] }]
+            - return: out
+
+# Der Einstiegspunkt des Fadens: `spawn:` nimmt eine FUNKTION, keine Methode.
+- def:
+    name: console_worker_main
+    # `ref<>`, nicht `ptr<>`: der Dienst gehoert der Gruppe und ueberlebt den Faden.
+    args: [[runner, ref<ConsoleRunner>]]
+    return: i32
+    body:
+      - call: [runner.execute]
+      - return: 1

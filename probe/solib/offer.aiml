@@ -1,0 +1,9 @@
+# Experiment: laesst sich eine aiml-Quelle als shared_lib bauen, deren Funktionen von
+# aussen (C-ABI) sichtbar sind?  Davon haengt ab, ob die Angebots-Funktionen der Konsole
+# in aiml geschrieben werden koennen (doc/spec/108 F108-9).
+- def:
+    name: cosmos_probe_offer
+    args: []
+    return: i32
+    body:
+      - return: [11]

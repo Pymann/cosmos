@@ -1,0 +1,56 @@
+# Die Schritt-Ablage des Agenten (doc/spec/103 §103.4a) als Zustandsmaschine.
+#
+# Geprueft werden die zwei Faelle, die bis 2026-10-15 Arbeit gekostet haben:
+#   F103-15  `pid == 0`  — vorgemerkt, aber unklar, ob er lief → zurueckgeben
+#   F103-16  `done == 1` — fertig, nur die Bestaetigung fehlt   → nachmelden
+#
+# Ohne Netz und ohne Server: genau das war der Grund, es ueberhaupt in die
+# Ablage zu schreiben.
+# Expected exit code: 0
+
+- import: "sources/agent/agent_step.aiml"
+
+- def:
+    name: expect
+    args: [[what, string], [cond, i32]]
+    return: i32
+    body:
+      - if:
+          condition: { eq: [cond, 1] }
+          then: [{ print: ["  ok   ${what}"] }, { return: 0 }]
+      - print: ["  FAIL ${what}"]
+      - return: 1
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      - decl: [work, ptr<StepWorker>, { new: StepWorker }]
+      - call: [work.init, "agent-notes", "linux", "/opt/cosmos/bwrap", "steps", 0]
+      - set: [fails, { +: [fails, { call: [expect, "frische Ablage ist leer", { '&&': [{ eq: [{ call: [work.pending_count] }, 0] }, { eq: [{ call: [work.lost_count] }, 0] }] }] }] }]
+
+      # ── F103-15: vorgemerkt, nie gestartet ──────────────────────────────
+      - call: [work.remember, "run-a", "stage-a", "steps/run-a/stage-a", 0]
+      - call: [work.resume]
+      - set: [fails, { +: [fails, { call: [expect, "eine Vormerkung ohne PID gilt als Verlust", { eq: [{ call: [work.lost_count] }, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und NICHT als fertiges Ergebnis", { eq: [{ call: [work.pending_count] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "der Eintrag ist danach weg", { eq: [{ call: [work.busy] }, 0] }] }] }]
+
+      # ── F103-16: fertig, Meldung offen ──────────────────────────────────
+      # Eine PID, die es nie gab: ohne `done` waere das ein Verlust.  Mit
+      # `done` ist es ein ERGEBNIS und darf nicht neu ausgefuehrt werden.
+      - call: [work.remember, "run-b", "stage-b", "steps/run-b/stage-b", 999999]
+      - call: [work.mark_done, "stage-b", 7]
+      - call: [work.resume]
+      - set: [fails, { +: [fails, { call: [expect, "ein fertiger Schritt wird nachgemeldet", { eq: [{ call: [work.pending_count] }, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und gilt nicht als verloren", { eq: [{ call: [work.lost_count] }, 1] }] }] }]
+      # Aufraeumen, damit ein zweiter Lauf desselben Tests dasselbe sieht.
+      - call: [work.forget, "stage-b"]
+
+      - if:
+          condition: { neq: [fails, 0] }
+          then: [{ print: ["test_step_notes FAIL (${fails})"] }, { return: 1 }]
+      - print: ["test_step_notes PASS"]
+      - return: 0

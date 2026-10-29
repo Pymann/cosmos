@@ -1,0 +1,100 @@
+# Das Lane-Gitter mit der Form, die der SERVER liefert — nicht mit der aus
+# meinen Testdaten.
+#
+# Anlass: der WASM-Client stuerzte in RunsScreen_draw_grid mit "memory access
+# out of bounds" ab (2026-10-13).  Meine bisherigen Tests bauten Laeufe ueber
+# PipelineSubmit.expand — die haben Achsen UND Bindungen.  Der Demo-Lauf des
+# Servers hat BEIDES NICHT: keine Achsen, leere Bindungen, Stufennamen ohne
+# " [".  Genau diese Form wird hier geprueft, mehrfach hintereinander wie in
+# einer Bildschleife.
+# Expected exit code: 0
+
+- import: "sources/shared/matrix_view.aiml"
+
+- def:
+    name: expect
+    args: [[what, string], [cond, i32]]
+    return: i32
+    body:
+      - if:
+          condition: { eq: [cond, 1] }
+          then: [{ print: ["  ok   ${what}"] }, { return: 0 }]
+      - print: ["  FAIL ${what}"]
+      - return: 1
+
+# So baut cluster_bootstrap.make_stage seine Eintraege: ohne bindings.
+- def:
+    name: demo_stage
+    args: [[stage_id, string], [title, string]]
+    return: { type: PipelineStage, lifetime: producer }
+    body:
+      - decl: [stage, PipelineStage]
+      - set: [stage.stage_id, stage_id]
+      - set: [stage.name, title]
+      - set: [stage.stage_kind, "git"]
+      - set: [stage.status, "pending"]
+      - set: [stage.required_label, "build"]
+      - set: [stage.script_ref, "pipelines/checkout.aiml"]
+      - return: stage
+
+- def:
+    name: demo_run
+    return: { type: PipelineRun, lifetime: producer }
+    body:
+      - decl: [run, PipelineRun]
+      - set: [run.run_id, "pipeline-api-main"]
+      - set: [run.pipeline_name, "api-main"]
+      - set: [run.status, "queued"]
+      - call: [run.stages.push, { call: [demo_stage, "checkout", "Checkout"] }]
+      - call: [run.stages.push, { call: [demo_stage, "build", "Build"] }]
+      - call: [run.stages.push, { call: [demo_stage, "deploy", "Deploy"] }]
+      - return: run
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      - decl: [view, ptr<MatrixView>, { new: MatrixView }]
+      - decl: [run, PipelineRun, { call: [demo_run] }]
+
+      - set: [fails, { +: [fails, { call: [expect, "Lauf ohne Achsen", { eq: [run.axes.len, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "drei Eintraege", { eq: [run.stages.len, 3] }] }] }]
+
+      # Ein Gitter ohne Achsen ist EINE Zelle (F97-15), nicht ein leeres.
+      - decl: [grid, MatrixGrid, { call: [view.build, run, 0] }]
+      - set: [fails, { +: [fails, { call: [expect, "eine Spalte", { eq: [grid.cols, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "eine Zeile", { eq: [grid.rows, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "drei Schichten erkannt", { eq: [grid.stage_count, 3] }] }] }]
+
+      # MEHRFACH rendern, wie in einer Bildschleife: hier starb der Client.
+      - decl: [round, i32, 0]
+      - while:
+          condition: { lt: [round, 25] }
+          body:
+            - decl: [runs, list<i32>]
+            - decl: [table, string, { call: [view.render_run, run, runs] }]
+            - if:
+                condition: { eq: [table.len, 0] }
+                then: [{ print: ["  FAIL leere Tabelle in Runde ${round}"] }, { set: [fails, { +: [fails, 1] }] }]
+            # Jeder Farblauf muss IM Text liegen — ein Lauf dahinter faerbt ins
+            # Leere und ist genau die Art Fehler, die erst in WASM auffaellt.
+            - decl: [rix, i32, 0]
+            - while:
+                condition: { lt: [rix, runs.len] }
+                body:
+                  - decl: [start_at, i32, { at: [runs, rix] }]
+                  - decl: [run_len, i32, { at: [runs, { +: [rix, 1] }] }]
+                  - if:
+                      condition: { gt: [{ +: [start_at, run_len] }, table.len] }
+                      then: [{ print: ["  FAIL Farblauf ausserhalb des Textes"] }, { set: [fails, { +: [fails, 1] }] }]
+                  - set: [rix, { +: [rix, 3] }]
+            - set: [round, { +: [round, 1] }]
+      - set: [fails, { +: [fails, { call: [expect, "25 Runden ohne Schaden", { eq: [fails, 0] }] }] }]
+
+      - if:
+          condition: { neq: [fails, 0] }
+          then: [{ print: ["test_matrix_live_shape FAIL (${fails})"] }, { return: 1 }]
+      - print: ["test_matrix_live_shape PASS"]
+      - return: 0

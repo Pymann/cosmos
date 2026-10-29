@@ -1,0 +1,1916 @@
+# Cosmos control plane bootstrap: persist a small cluster state, seed demo nodes, workloads and a
+# pipeline, then a simple scheduler-like reconcile pass (Kubernetes-style placement by label + capacity).
+- import: "sources/shared/node.aiml"
+- import: "sources/models/agent_list.aiml"
+- import: "sources/models/step_dispatch.aiml"
+- import: "sources/models/step_report.aiml"
+- import: "sources/shared/step_scheduler.aiml"
+- import: "sources/server/agent_registry.aiml"
+- import: "sources/shared/workload.aiml"
+- import: "sources/shared/pipeline_stage.aiml"
+- import: "sources/shared/pipeline_run.aiml"
+- import: "sources/models/run_control.aiml"
+- import: "sources/shared/run_layers.aiml"
+- import: "sources/shared/job_params.aiml"
+- import: "sources/shared/job_policy.aiml"
+- import: "sources/server/job_config.aiml"
+- import: "sources/models/rt_spawn.aiml"
+- import: "sources/shared/cluster_view.aiml"
+- import: "sources/shared/res_usage.aiml"
+- import: "sources/shared/job_record.aiml"
+- import: "sources/shared/job_def.aiml"
+- import: "sources/shared/job_state.aiml"
+
+- class:
+    name: ClusterBootstrap
+    members:
+      # doc/spec/109: die eigene Last des Servers.  Haelt den Bezugspunkt der
+      # letzten Messung (F109-2: CPU ist eine Ableitung ueber zwei Punkte).
+      - [res,       ResSampler]
+      - [nodes,     Kv<string:Node>]
+      - [workloads, Kv<string:Workload>]
+      - [pipelines, Kv<string:PipelineRun>]
+      - [jobs,      Kv<string:JobRecord>]   # Schritt 2: geteiltes Job-KV (Controller/Agent schreiben; hier nur gelesen)
+      # doc/spec/103: die Zuteilung selbst liegt im Scheduler — netzlos pruefbar.
+      - [sched,     StepScheduler]
+      # doc/spec/106: die dauerhaften Jobs.
+      - [job_defs,  Kv<string:JobDef>]
+      # aiml spec/62 §5.9: was der Bediener einem Lauf sagt — anhalten,
+      # weiterlaufen, einen Schritt.  Eigenes KV, nicht am Lauf: es ist die
+      # Absicht eines Menschen und kein Teil der Aufzeichnung (doc/spec/101
+      # §101.6).
+      - [run_ctrl,  Kv<string:RunControl>]
+      # doc/spec/107 §107.1c: was jede Stufe hinterlassen hat.  Eigenes KV aus
+      # demselben Grund wie run_ctrl — der Lauf selbst bleibt unangetastet und
+      # damit lesbar (doc/spec/108 F108-2).
+      - [run_layers, Kv<string:RunLayers>]
+      # doc/spec/106 §106.6 + doc/spec/101 §101.9: Parameter und Vorrang
+      # liegen in Beiwagen, und die gehoeren einer eigenen Klasse — diese
+      # Datei ist an ihrer Zeilengrenze (aiml spec/49 §14).
+      - [jobcfg, JobConfig]
+      # Wem wurde WANN ein Container-Auftrag gegeben (doc/spec/110 §110.36).
+      # Im Speicher, nicht auf Platte: ein Auftrag ueberlebt den Controller
+      # nicht — der neue fragt ohnehin neu.
+      - [spawn_out,  map<string:i64>]
+    methods:
+      - def:
+          name: init
+          access: public
+          body:
+            - set: [<.nodes,     { call: [db.open_kv, "nodes",     {persist: true}] }]
+            - set: [<.workloads, { call: [db.open_kv, "workloads", {persist: true}] }]
+            - set: [<.pipelines, { call: [db.open_kv, "pipelines", {persist: true}] }]
+            - set: [<.jobs,      { call: [db.open_kv, "jobs",      {persist: true}] }]
+            - set: [<.job_defs,  { call: [db.open_kv, "job_defs",  {persist: true}] }]
+            - set: [<.run_ctrl,  { call: [db.open_kv, "run_ctrl",  {persist: true}] }]
+            - set: [<.run_layers, { call: [db.open_kv, "run_layers", {persist: true}] }]
+            - call: [<.jobcfg.init]
+
+      - def:
+          name: make_stage
+          access: public
+          args: [[stage_id, string], [title, string], [kind, string], [label, string], [script_ref, string]]
+          return: PipelineStage
+          body:
+            - decl: [stage, PipelineStage]
+            - set: [stage.stage_id, stage_id]
+            - set: [stage.name, title]
+            - set: [stage.stage_kind, kind]
+            - set: [stage.status, "pending"]
+            - set: [stage.required_label, label]
+            - set: [stage.script_ref, script_ref]
+            - return: stage
+
+      - def:
+          name: label_match
+          access: public
+          args: [[labels, list<string>], [wanted, string]]
+          return: i32
+          body:
+            - if: { condition: { eq: [wanted.len, 0] }, then: [{ return: 1 }] }
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, labels.len] }
+                body:
+                  - if: { condition: { eq: [{ at: [labels, idx] }, wanted] }, then: [{ return: 1 }] }
+                  - set: [idx, { "+": [idx, 1] }]
+            - return: 0
+
+      # Places the workload on the node if it is ready, matches the label and has capacity.
+      # Mutations go through the store borrows and are persisted by writing them back (self-write).
+      - def:
+          name: place_on_node
+          access: public
+          static_off: ["str_cmp"]
+          args: [[workload_id, string], [node_id, string]]
+          return: i32
+          body:
+            - if: { condition: { eq: [{ call: [<.workloads.has, workload_id] }, 0] }, then: [{ return: 0 }] }
+            - if: { condition: { eq: [{ call: [<.nodes.has, node_id] }, 0] }, then: [{ return: 0 }] }
+            - decl: [work, ref<Workload>, { call: [<.workloads.get, workload_id] }]
+            - decl: [node, ref<Node>, { call: [<.nodes.get, node_id] }]
+            - if: { condition: { neq: [node.status, "ready"] }, then: [{ return: 0 }] }
+            - if: { condition: { eq: [{ call: [<.label_match, node.labels, work.required_label] }, 0] }, then: [{ return: 0 }] }
+            - if: { condition: { gt: [{ "+": [node.used_cpu, work.cpu_request] }, node.total_cpu] }, then: [{ return: 0 }] }
+            - if: { condition: { gt: [{ "+": [node.used_memory, work.memory_request] }, node.total_memory] }, then: [{ return: 0 }] }
+            - set: [node.used_cpu, { "+": [node.used_cpu, work.cpu_request] }]
+            - set: [node.used_memory, { "+": [node.used_memory, work.memory_request] }]
+            - call: [<.nodes.set, node_id, node]
+            - set: [work.status, "running"]
+            - set: [work.ready_replicas, work.desired_replicas]
+            - call: [work.assigned_node_ids.push, node.node_id]
+            - call: [<.workloads.set, workload_id, work]
+            - return: 1
+
+      - def:
+          name: reconcile_workload
+          access: public
+          args: [[workload_id, string]]
+          body:
+            - if: { condition: { eq: [{ call: [<.place_on_node, workload_id, "node-build-1"] }, 1] }, then: [{ return: 0 }] }
+            - if: { condition: { eq: [{ call: [<.place_on_node, workload_id, "node-general-1"] }, 1] }, then: [{ return: 0 }] }
+            - if: { condition: { eq: [{ call: [<.place_on_node, workload_id, "node-control-1"] }, 1] }, then: [{ return: 0 }] }
+            - if: { condition: { eq: [{ call: [<.workloads.has, workload_id] }, 0] }, then: [{ return: 0 }] }
+            - decl: [work, ref<Workload>, { call: [<.workloads.get, workload_id] }]
+            - set: [work.status, "waiting_for_capacity"]
+            - call: [<.workloads.set, workload_id, work]
+
+      - def:
+          # Einen eingereichten Lauf aufnehmen (doc/spec/96 §96.13).  Er kommt
+          # schon AUSGEFALTET herein (F96-31) — hier wird nur abgelegt, damit
+          # die Oberflaeche ihn zeigt und die Zuteilung ihn findet.
+          name: add_pipeline
+          access: public
+          args: [[run, PipelineRun]]
+          body:
+            - if: { condition: { eq: [run.run_id.len, 0] }, then: [{ return: [] }] }
+            - call: [<.pipelines.set, run.run_id, run]
+
+      # ── check_schema: unlesbare Laeufe BENENNEN (doc/spec/102 F102-8) ───
+      # Ein erweitertes Modell macht alles Gespeicherte unlesbar (Schema-
+      # Fingerabdruck).  Der Decoder liefert dann ein LEERES Modell, und der
+      # Server arbeitete damit weiter — eine FATAL-Zeile je Zugriff, und
+      # niemand sagte, was los ist.  Hier wird EINMAL beim Start gezaehlt.
+      #
+      # Es wird NICHTS geloescht: was nicht lesbar ist, ist auch nicht
+      # beurteilbar, und stilles Loeschen beim Start waere Datenverlust ohne
+      # Entscheidung.  Das Wegraeumen ist ein eigener Aufruf (tools/purge_demo).
+      - def:
+          name: check_schema
+          access: public
+          static_off: ["str_cmp"]
+          return: i32
+          body:
+            - decl: [bad, i32, 0]
+            - decl: [sit, iterator<string>, { call: [<.pipelines.iter] }]
+            - while:
+                condition: { gt: [{ call: [sit.has_next] }, 0] }
+                body:
+                  - decl: [skey, string, { call: [sit.next] }]
+                  - decl: [srun, PipelineRun, { call: [<.pipelines.get_copy, skey] }]
+                  # Leere Kennung bei vorhandenem Schluessel = der Datensatz
+                  # liess sich nicht entschluesseln.
+                  - if: { condition: { eq: [srun.run_id.len, 0] }, then: [{ set: [bad, { +: [bad, 1] }] }] }
+            - if:
+                condition: { gt: [bad, 0] }
+                then:
+                  - call: [log.error, "[schema] ${bad} Lauf/Laeufe sind unlesbar (Modell geaendert, Schema-Fingerabdruck passt nicht)."]
+                  - call: [log.error, "[schema] Bereinigen bei GESTOPPTEM Server: COSMOS_DROP_UNREADABLE=1 ./purge_demo"]
+            - return: bad
+
+      # ── Die Frist, an EINER Stelle (doc/spec/101 F101-3) ────────────────
+      # 30 s: lang genug fuer einen Schritt, der kurz haengt, kurz genug, dass
+      # ein toter Agent nicht lange blockiert.  Vorher stand die Zahl an jeder
+      # Aufrufstelle (Zuteilen und Erneuern) — zwei Orte fuer dieselbe
+      # Entscheidung, und `renew_for` brauchte ein Argument, das jetzt die
+      # Versuchsnummer tragen kann (F101-7).
+      - def:
+          name: lease_ms
+          access: public
+          return: i64
+          body:
+            - return: 30000
+
+      # ── doc/spec/103 §103.2: holen, melden, erneuern ─────────────────────
+      # Alle drei arbeiten auf dem Lauf-KV und delegieren die Entscheidung an
+      # den Scheduler.  Sie sind Klassenmethoden, damit die Kette ohne Server
+      # und ohne Agenten pruefbar bleibt.
+      - def:
+          name: claim_for
+          access: public
+          static_off: ["str_cmp"]
+          args: [[who, ClaimWho], [now_ms, i64]]
+          return: { type: StepAssignment, lifetime: producer }
+          body:
+            - decl: [out, StepAssignment]
+            - set: [out.found, 0]
+            # doc/spec/101 §101.9: NICHT in Speicherreihenfolge, sondern nach
+            # Vorrang und Alter (F101-29).  Vorher bekam der Lauf, der zufaellig
+            # frueh im KV stand, jeden freien Agenten — bei einer breiten Matrix
+            # wartete alles andere, bis sie fertig war.
+            - decl: [order, list<string>, { call: [<.queue_order] }]
+            - decl: [oix, i32, 0]
+            - while:
+                condition: { lt: [oix, order.len] }
+                body:
+                  - decl: [rkey, string, { at: [order, oix] }]
+                  - set: [oix, { +: [oix, 1] }]
+                  # Angehalten heiszt: hier startet nichts (aiml F62-53/55).
+                  - decl: [stop_here, i32, { call: [<.run_halted, rkey] }]
+                  - decl: [run, ref<PipelineRun>, { call: [<.pipelines.get, rkey] }]
+                  - decl: [got, StepClaim]
+                  - if:
+                      condition: { eq: [stop_here, 0] }
+                      then: [{ set: [got, { call: [<.sched.claim, run, now_ms, { call: [<.lease_ms] }, who] }] }]
+                  - if: { condition: { eq: [got.found, 1] }, then: [{ call: [<.consume_release, rkey] }] }
+                  # Mit der ersten Annahme laeuft der Lauf wirklich.
+                  - if: { condition: { eq: [got.found, 1] }, then: [{ set: [run.status, { call: [<.phase_of, rkey, run] }] }] }
+                  - if:
+                      condition: { eq: [got.found, 1] }
+                      then:
+                        - call: [<.pipelines.set, rkey, run]
+                        - set: [out.found, 1]
+                        - set: [out.run_id, rkey]
+                        - set: [out.stage_id, got.stage_id]
+                        - set: [out.stage_name, got.stage_name]
+                        - set: [out.bindings, got.bindings]
+                        - set: [out.lease_until, got.lease_until]
+                        - set: [out.attempt, got.attempt]
+                        - set: [out.timeout_ms, got.timeout_ms]
+                        - set: [out.command, { call: [<.command_of, rkey, got.stage_id] }]
+                        # Diagnose: der Agent weiss selbst, worin er laeuft —
+                        # aber in der Zuteilung steht, worin die Stufe laufen
+                        # WOLLTE.  Stimmen beide nicht ueberein, ist das ein
+                        # Fehler der Zuteilung und kein Raetsel im Protokoll.
+                        - set: [out.image, "${who.image}"]
+                        - set: [out.requires, { call: [<.requires_of, rkey, got.stage_id] }]
+                        - set: [out.base, { call: [<.base_of, rkey] }]
+                        - call: [<.stamp_stage, rkey, { call: [<.sched.bare_name, got.stage_name] }, got.bindings, now_ms, 1]
+                        - return: out
+            - return: out
+
+      # Die Vorbedingungen der Stufe (aiml F62-126) — wie `command_of`.
+      - def:
+          name: requires_of
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run_id, string], [stage_id, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - if: { condition: { eq: [{ call: [<.pipelines.has, run_id] }, 0] }, then: [{ return: "" }] }
+            - decl: [prun, PipelineRun, { call: [<.pipelines.get_copy, run_id] }]
+            - decl: [rqx, i32, 0]
+            - while:
+                condition: { lt: [rqx, prun.stages.len] }
+                body:
+                  - decl: [one, PipelineStage, { at: [prun.stages, rqx] }]
+                  - set: [rqx, { +: [rqx, 1] }]
+                  - if: { condition: { eq: [one.stage_id, stage_id] }, then: [{ return: one.requires }] }
+            - return: ""
+
+      # Der Befehl der Stufe (doc/spec/103 §103.3).  Getrennt, weil der
+      # Scheduler nichts ueber Befehle wissen muss.
+      - def:
+          name: command_of
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run_id, string], [stage_id, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - if: { condition: { eq: [{ call: [<.pipelines.has, run_id] }, 0] }, then: [{ return: "" }] }
+            - decl: [run, ref<PipelineRun>, { call: [<.pipelines.get, run_id] }]
+            - decl: [cix, i32, 0]
+            - while:
+                condition: { lt: [cix, run.stages.len] }
+                body:
+                  - decl: [stg_row, PipelineStage, { at: [run.stages, cix] }]
+                  - if: { condition: { eq: [stg_row.stage_id, stage_id] }, then: [{ return: stg_row.command }] }
+                  - set: [cix, { +: [cix, 1] }]
+            - return: ""
+
+      # set_base / base_of: worauf ein Lauf aufsetzt (aiml spec/62 §18.4).
+      # Neben dem Lauf, im selben Datensatz wie seine Schichten — es ist
+      # dieselbe Frage: welches Dateisystem sieht dieser Lauf.
+      # last_good_of: der juengste ERFOLGREICHE Lauf eines Jobs.
+      #
+      # „Letzter Lauf" waere die falsche Vorgabe: ein fehlgeschlagener Lauf hat
+      # eine halbe Schicht hinterlassen, und darauf zu bauen heisst, auf einem
+      # Zustand zu bauen, den nie jemand gesehen hat (aiml spec/62 F62-144).
+      # Wer genau das will, nennt den Lauf beim Namen.
+      - def:
+          name: last_good_of
+          access: public
+          static_off: ["str_cmp"]
+          args: [[job_id, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [best, string, ""]
+            - decl: [best_ms, i64, 0]
+            - decl: [git, iterator<string>, { call: [<.pipelines.iter] }]
+            - while:
+                condition: { gt: [{ call: [git.has_next] }, 0] }
+                body:
+                  - decl: [gkey, string, { call: [git.next] }]
+                  - decl: [grun, PipelineRun, { call: [<.pipelines.get_copy, gkey] }]
+                  - if:
+                      condition: { '&&': [{ eq: [grun.job_id, job_id] }, { eq: [{ call: [pipe_status_of, grun.status] }, PipeStatus.done] }] }
+                      then:
+                        - if:
+                            condition: { ge: [grun.started_ms, best_ms] }
+                            then: [{ set: [best_ms, grun.started_ms] }, { set: [best, "${gkey}"] }]
+            - return: best
+
+      - def:
+          name: set_base
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run_id, string], [base, string]]
+          body:
+            - if: { condition: { eq: [base.len, 0] }, then: [{ return: null }] }
+            # „job:<kennung>" wird JETZT aufgeloest, nicht bei jeder Zuteilung
+            # (aiml F62-145): ein Unterbau, der sich mitten im Lauf aendert,
+            # waere ein Lauf auf zwei verschiedenen Boeden.  Was aufgeloest
+            # wurde, steht danach als `run:<lauf>` im Datensatz — nachlesbar.
+            - decl: [use, string, "${base}"]
+            - if:
+                condition: { eq: [{ call: [base.starts_with, "job:"] }, 1] }
+                then:
+                  - decl: [want_job, string, { call: [base.substr, 4] }]
+                  - decl: [found, string, { call: [<.last_good_of, want_job] }]
+                  - if:
+                      condition: { eq: [found.len, 0] }
+                      then:
+                        - call: [log.error, "[lauf] ${run_id}: '${base}' — von diesem Job ist kein Lauf FERTIG geworden.  Dieser Lauf startet ohne Unterbau."]
+                        - return: null
+                  - set: [use, "run:${found}"]
+                  - call: [log.info, "[lauf] ${run_id}: '${base}' → ${use}"]
+            - decl: [bag, RunLayers]
+            - if:
+                condition: { gt: [{ call: [<.run_layers.has, run_id] }, 0] }
+                then: [{ set: [bag, { call: [<.run_layers.get_copy, run_id] }] }]
+            - set: [bag.run_id, run_id]
+            - set: [bag.base, use]
+            - call: [<.run_layers.set, run_id, bag]
+            - call: [log.info, "[lauf] ${run_id} setzt auf '${use}' auf"]
+
+      - def:
+          name: base_of
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run_id, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - if: { condition: { eq: [{ call: [<.run_layers.has, run_id] }, 0] }, then: [{ return: "" }] }
+            - decl: [bag, RunLayers, { call: [<.run_layers.get_copy, run_id] }]
+            - return: "${bag.base}"
+
+      # stamp_stage: wann eine Stufe begann und wann sie endete
+      # (doc/spec/107 §107.1h).  Gemessen am CONTROLLER, nicht am Agenten: nur
+      # so sind zwei Stufen vergleichbar, und die Uhr des Agenten geht
+      # woanders.  `ended` 0 heisst „laeuft noch"; die Ansicht rechnet dann
+      # gegen jetzt.
+      - def:
+          name: stamp_stage
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run_id, string], [bare, string], [lane, string], [now_ms, i64], [is_start, i32]]
+          body:
+            - if: { condition: { eq: [bare.len, 0] }, then: [{ return: null }] }
+            - decl: [bag, RunLayers]
+            - if:
+                condition: { gt: [{ call: [<.run_layers.has, run_id] }, 0] }
+                then: [{ set: [bag, { call: [<.run_layers.get_copy, run_id] }] }]
+            - set: [bag.run_id, run_id]
+            - decl: [fresh, list<StageTime>]
+            - decl: [done_it, i32, 0]
+            - decl: [tix, i32, 0]
+            - while:
+                condition: { lt: [tix, bag.times.len] }
+                body:
+                  - decl: [had, StageTime, { at: [bag.times, tix] }]
+                  - set: [tix, { +: [tix, 1] }]
+                  - if:
+                      condition: { '&&': [{ eq: [had.stage, bare] }, { eq: [had.bindings, lane] }] }
+                      then:
+                        - if:
+                            condition: { eq: [is_start, 1] }
+                            then: [{ set: [had.started_ms, now_ms] }, { set: [had.ended_ms, 0] }]
+                            else: [{ set: [had.ended_ms, now_ms] }]
+                        - set: [done_it, 1]
+                  - call: [fresh.push, had]
+            - if:
+                condition: { eq: [done_it, 0] }
+                then:
+                  - decl: [row_new, StageTime]
+                  - set: [row_new.run_id, run_id]
+                  - set: [row_new.stage, bare]
+                  - set: [row_new.bindings, lane]
+                  - if:
+                      condition: { eq: [is_start, 1] }
+                      then: [{ set: [row_new.started_ms, now_ms] }]
+                      else: [{ set: [row_new.ended_ms, now_ms] }]
+                  - call: [fresh.push, row_new]
+            - set: [bag.times, fresh]
+            - call: [<.run_layers.set, run_id, bag]
+
+      # note_layer: was eine Stufe hinterlassen hat, festhalten.
+      #
+      # Ersetzt den vorhandenen Eintrag derselben Stufe statt ihn anzuhaengen:
+      # laeuft eine Stufe erneut, ist die alte Schicht weg (doc/spec/110
+      # F110-97) — zwei Platten fuer eine Stufe waere ein Bild, das es nicht
+      # gibt.  `reuse` bleibt `opaque`, solange die Pipeline nichts anderes
+      # sagt (aiml spec/62 §7, die Vorgabe), und `stored` bleibt 0, solange
+      # niemand im Speicher nachgesehen hat: eine 1 ohne Nachsehen waere eine
+      # Behauptung ueber den naechsten Lauf.
+      - def:
+          name: note_layer
+          access: public
+          static_off: ["str_cmp"]
+          args: [[rep, StepReportReq], [run, ref<PipelineRun>]]
+          body:
+            - decl: [bare, string, ""]
+            - decl: [lane, string, ""]
+            - decl: [nix, i32, 0]
+            - while:
+                condition: { lt: [nix, run.stages.len] }
+                body:
+                  - decl: [row, PipelineStage, { at: [run.stages, nix] }]
+                  - if:
+                      condition: { eq: [row.stage_id, rep.stage_id] }
+                      then:
+                        - set: [bare, { call: [<.sched.bare_name, row.name] }]
+                        - set: [lane, row.bindings]
+                  - set: [nix, { +: [nix, 1] }]
+            - if:
+                condition: { gt: [bare.len, 0] }
+                then:
+                  - decl: [bag, RunLayers]
+                  - if:
+                      condition: { gt: [{ call: [<.run_layers.has, rep.run_id] }, 0] }
+                      then: [{ set: [bag, { call: [<.run_layers.get_copy, rep.run_id] }] }]
+                  - set: [bag.run_id, rep.run_id]
+                  # aiml kennt kein `continue` (spec/49 §2a): die alte Zeile
+                  # dieser Stufe wird UEBERSPRUNGEN, indem nur die anderen
+                  # uebernommen werden.
+                  - decl: [fresh, list<StageLayer>]
+                  - decl: [bix, i32, 0]
+                  - while:
+                      condition: { lt: [bix, bag.rows.len] }
+                      body:
+                        - decl: [had, StageLayer, { at: [bag.rows, bix] }]
+                        - set: [bix, { +: [bix, 1] }]
+                        - decl: [same, i32, 0]
+                        - if:
+                            condition: { '&&': [{ eq: [had.stage, bare] }, { eq: [had.bindings, lane] }] }
+                            then: [{ set: [same, 1] }]
+                        - if: { condition: { eq: [same, 0] }, then: [{ call: [fresh.push, had] }] }
+                  - decl: [row_new, StageLayer]
+                  - set: [row_new.run_id, rep.run_id]
+                  - set: [row_new.stage, bare]
+                  - set: [row_new.bindings, lane]
+                  - set: [row_new.bytes, rep.layer_bytes]
+                  - set: [row_new.files, rep.layer_files]
+                  - set: [row_new.reuse, ReuseClass.opaque]
+                  - call: [fresh.push, row_new]
+                  - set: [bag.rows, fresh]
+                  - call: [<.run_layers.set, rep.run_id, bag]
+
+      - def:
+          name: report_for
+          access: public
+          static_off: ["str_cmp"]
+          # Die MELDUNG selbst, nicht ihre Einzelteile: sie traegt Agent, Lauf,
+          # Stufe, Versuch und Rueckgabewert schon zusammen.  Sechs Argumente
+          # waren die Grenze des Compilers und auch sachlich eins zu viel.
+          args: [[rep, StepReportReq], [now_ms, i64]]
+          return: i32
+          body:
+            - decl: [run_id, string, rep.run_id]
+            - decl: [stage_id, string, rep.stage_id]
+            - decl: [agent_id, string, rep.agent_id]
+            - decl: [exit_code, i32, rep.exit_code]
+            - decl: [attempt, i32, rep.attempt]
+            - if: { condition: { eq: [{ call: [<.pipelines.has, run_id] }, 0] }, then: [{ return: 0 }] }
+            - decl: [run, ref<PipelineRun>, { call: [<.pipelines.get, run_id] }]
+            # Der Scheduler kennt Erfolg/Misserfolg, nicht den Rueckgabewert —
+            # er soll nicht ueber Shell-Konventionen urteilen.
+            - decl: [good, i32, 0]
+            - if: { condition: { eq: [exit_code, 0] }, then: [{ set: [good, 1] }] }
+            # Der Scheduler meldet 0 = angenommen, -1 = verspaetet (Lehen weg),
+            # -2 = unbekannter Schritt.  Nach aussen ist "angenommen" ein Ja/Nein
+            # (F103-4), darum wird hier UEBERSETZT statt die Zahl durchzureichen:
+            # zwei Konventionen nebeneinander laedt genau den Fehler ein, den
+            # dieser Test gefunden hat.
+            - decl: [took, i32, { call: [<.sched.report, run, stage_id, good, agent_id, attempt] }]
+            # Die Schicht gehoert zur Meldung, nicht zur Annahme: auch ein
+            # fehlgeschlagener Schritt hat etwas hinterlassen, und wer „ab hier
+            # nochmal" drueckt, soll sehen, wie viel das war.
+            - if: { condition: { eq: [took, 0] }, then: [{ call: [<.note_layer, rep, run] }] }
+            - if:
+                condition: { eq: [took, 0] }
+                then:
+                  - decl: [t_bare, string, ""]
+                  - decl: [t_lane, string, ""]
+                  - decl: [tsx, i32, 0]
+                  - while:
+                      condition: { lt: [tsx, run.stages.len] }
+                      body:
+                        - decl: [t_row, PipelineStage, { at: [run.stages, tsx] }]
+                        - set: [tsx, { +: [tsx, 1] }]
+                        - if:
+                            condition: { eq: [t_row.stage_id, stage_id] }
+                            then:
+                              - set: [t_bare, { call: [<.sched.bare_name, t_row.name] }]
+                              - set: [t_lane, t_row.bindings]
+                  - call: [<.stamp_stage, run_id, t_bare, t_lane, now_ms, 0]
+            - if:
+                condition: { eq: [took, 0] }
+                then:
+                  # doc/spec/106 G5: war das der letzte offene Schritt, ist der
+                  # LAUF fertig — und erst dann wird sein Ergebnis in den Job
+                  # zurueckgeschrieben.  Vorher waere jede Stufe ein "Ergebnis",
+                  # und die Uebersicht zaehlte Laeufe, die noch laufen.
+                  - decl: [outcome, string, { call: [<.sched.run_outcome, run] }]
+                  # Noch offen?  Dann sagt `phase`, ob gearbeitet wird oder
+                  # gewartet — „running" pauschal waere eine Behauptung.
+                  - if: { condition: { eq: [outcome.len, 0] }, then: [{ set: [run.status, { call: [<.phase_of, run_id, run] }] }] }
+                  - if:
+                      condition: { gt: [outcome.len, 0] }
+                      then:
+                        - set: [run.status, outcome]
+                        - set: [run.ended_ms, now_ms]
+                        - decl: [took_ms, i64, 0]
+                        - if: { condition: { gt: [run.started_ms, 0] }, then: [{ set: [took_ms, { -: [now_ms, run.started_ms] }] }] }
+                        - if:
+                            condition: { gt: [run.job_id.len, 0] }
+                            then: [{ call: [<.note_run_result, run.job_id, run_id, outcome, took_ms] }]
+                  - call: [<.pipelines.set, run_id, run]
+                  - return: 1
+            - return: 0
+
+      # ── release_for: der Agent gibt einen verlorenen Schritt zurueck ────
+      # Er hat nach seinem (oder des Rechners) Neustart nachgesehen und WEISS,
+      # dass der Prozess weg ist.  Sofort neu zuteilen statt 30 s Lehen
+      # abwarten: 1 = freigegeben, 0 = nichts zu tun.
+      - def:
+          name: release_for
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run_id, string], [stage_id, string], [agent_id, string], [attempt, i32]]
+          return: i32
+          body:
+            - if: { condition: { eq: [{ call: [<.pipelines.has, run_id] }, 0] }, then: [{ return: 0 }] }
+            - decl: [run, ref<PipelineRun>, { call: [<.pipelines.get, run_id] }]
+            - decl: [gave, i32, { call: [<.sched.release, run, stage_id, agent_id, attempt] }]
+            - if: { condition: { neq: [gave, 0] }, then: [{ return: 0 }] }
+            # Der Lauf wartet jetzt wieder, auch wenn er gerade „running" hiess
+            # — und wenn er angehalten ist, wartet er auf einen Menschen.
+            - set: [run.status, { call: [<.phase_of, run_id, run] }]
+            - call: [<.pipelines.set, run_id, run]
+            - return: 1
+
+      - def:
+          name: renew_for
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run_id, string], [stage_id, string], [agent_id, string], [now_ms, i64], [attempt, i32]]
+          return: i64
+          body:
+            - if: { condition: { eq: [{ call: [<.pipelines.has, run_id] }, 0] }, then: [{ return: 0 }] }
+            - decl: [run, ref<PipelineRun>, { call: [<.pipelines.get, run_id] }]
+            - decl: [rix, i32, 0]
+            - while:
+                condition: { lt: [rix, run.stages.len] }
+                body:
+                  - decl: [lease_row, PipelineStage, { at: [run.stages, rix] }]
+                  # Nur der Halter darf erneuern — sonst haelt ein fremder Agent
+                  # ein Lehen am Leben, das ihm nicht gehoert.
+                  - decl: [att_ok, i32, 1]
+                  - if: { condition: { '&&': [{ gt: [attempt, 0] }, { neq: [attempt, lease_row.attempt] }] }, then: [{ set: [att_ok, 0] }] }
+                  - if:
+                      condition: { '&&': [{ eq: [att_ok, 1] }, { '&&': [{ eq: [lease_row.stage_id, stage_id] }, { '&&': [{ eq: [lease_row.agent, agent_id] }, { eq: [lease_row.status, "running"] }] }] }] }
+                      then:
+                        - set: [lease_row.lease_until, { +: [now_ms, { call: [<.lease_ms] }] }]
+                        - idx: [run.stages, rix, lease_row]
+                        - call: [<.pipelines.set, run_id, run]
+                        - return: lease_row.lease_until
+                  - set: [rix, { +: [rix, 1] }]
+            - return: 0
+
+      # ── doc/spec/106: Jobs anlegen, starten, fortschreiben ───────────────
+      - def:
+          name: save_job
+          access: public
+          static_off: ["str_cmp"]
+          args: [[job, JobDef]]
+          return: i32
+          body:
+            - if: { condition: { eq: [job.job_id.len, 0] }, then: [{ return: 0 }] }
+            - decl: [rec, JobDef, job]
+            # Vorhandenen Job NICHT zuruecksetzen: Nummer und Geschichte
+            # gehoeren ihm, nicht dem Formular (F106-1).
+            - if:
+                condition: { gt: [{ call: [<.job_defs.has, job.job_id] }, 0] }
+                then:
+                  - decl: [old, JobDef, { call: [<.job_defs.get_copy, job.job_id] }]
+                  - set: [rec.created_ms, old.created_ms]
+                  - set: [rec.next_build, old.next_build]
+                  - set: [rec.last_run_id, old.last_run_id]
+                  - set: [rec.last_status, old.last_status]
+                  - set: [rec.last_ms, old.last_ms]
+                  - set: [rec.runs_total, old.runs_total]
+                  - set: [rec.runs_failed, old.runs_failed]
+                  # Auch die STARTZEIT gehoert dem Job: `last_started_ms <= 0`
+                  # heisst „sofort faellig" (due_job), ein Speichern haette den
+                  # Job also bei jedem Bearbeiten neu losgeschickt.
+                  - set: [rec.last_started_ms, old.last_started_ms]
+                else:
+                  - if: { condition: { le: [rec.next_build, 0] }, then: [{ set: [rec.next_build, 1] }] }
+            - call: [<.job_defs.set, rec.job_id, rec]
+            - return: 1
+
+      # queue_order: die Laeufe in der Reihenfolge, in der sie Arbeit anbieten
+      # duerfen (F101-29): hoeherer Vorrang zuerst, bei gleichem der AELTERE
+      # Lauf.  Die zweite Regel ist die, die Verhungern verhindert — innerhalb
+      # eines Vorrangs ueberholt kein Lauf einen anderen, egal wie breit er ist.
+      #
+      # Gebildet wird sie je Anfrage (F101-33).  Das ist dieselbe Stelle, die
+      # doc/spec/102 §102.2 als erste heisse nennt; behoben wird sie dort mit
+      # einem Index, nicht hier mit einer zweiten Ordnung.
+      - def:
+          name: queue_order
+          access: public
+          static_off: ["str_cmp"]
+          return: { type: list<string>, lifetime: producer }
+          body:
+            - decl: [keys, list<string>]
+            - decl: [prios, list<i32>]
+            - decl: [ages, list<i64>]
+            - decl: [pit, iterator<string>, { call: [<.pipelines.iter] }]
+            - while:
+                condition: { gt: [{ call: [pit.has_next] }, 0] }
+                body:
+                  - decl: [rkey, string, { call: [pit.next] }]
+                  - decl: [run, PipelineRun, { call: [<.pipelines.get_copy, rkey] }]
+                  - call: [keys.push, rkey]
+                  - call: [prios.push, { call: [<.jobcfg.priority_of_run, rkey] }]
+                  - call: [ages.push, run.started_ms]
+            # Auswahlsortieren: die Liste ist kurz (Laeufe, nicht Schritte),
+            # und eine stabile Ordnung ist wichtiger als der Grad.
+            - decl: [out, list<string>]
+            - decl: [taken, list<i32>]
+            - decl: [tix, i32, 0]
+            - while:
+                condition: { lt: [tix, keys.len] }
+                body:
+                  - call: [taken.push, 0]
+                  - set: [tix, { +: [tix, 1] }]
+            - decl: [done, i32, 0]
+            - while:
+                condition: { lt: [done, keys.len] }
+                body:
+                  - decl: [best, i32, -1]
+                  - decl: [six, i32, 0]
+                  - while:
+                      condition: { lt: [six, keys.len] }
+                      body:
+                        - if:
+                            condition: { eq: [{ at: [taken, six] }, 0] }
+                            then:
+                              - if:
+                                  condition: { lt: [best, 0] }
+                                  then: [{ set: [best, six] }]
+                                  else:
+                                    - decl: [cand_p, i32, { at: [prios, six] }]
+                                    - decl: [best_p, i32, { at: [prios, best] }]
+                                    - if:
+                                        condition: { gt: [cand_p, best_p] }
+                                        then: [{ set: [best, six] }]
+                                        else:
+                                          - if:
+                                              condition: { '&&': [{ eq: [cand_p, best_p] }, { lt: [{ at: [ages, six] }, { at: [ages, best] }] }] }
+                                              then: [{ set: [best, six] }]
+                        - set: [six, { +: [six, 1] }]
+                  - if: { condition: { lt: [best, 0] }, then: [{ set: [done, keys.len] }] }
+                  - if:
+                      condition: { ge: [best, 0] }
+                      then:
+                        - call: [out.push, { at: [keys, best] }]
+                        - idx: [taken, best, 1]
+                        - set: [done, { +: [done, 1] }]
+            - return: out
+
+      # run_of: EINEN Lauf lesen (Kopie).  Fuer Pruefungen und Ansichten, die
+      # nicht den ganzen Schnappschuss brauchen.
+      - def:
+          name: run_of
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run_id, string]]
+          return: { type: PipelineRun, lifetime: producer }
+          body:
+            - decl: [out, PipelineRun]
+            - if: { condition: { eq: [{ call: [<.pipelines.has, run_id] }, 0] }, then: [{ return: out }] }
+            - set: [out, { call: [<.pipelines.get_copy, run_id] }]
+            - return: out
+
+      # ── expire_leases: verwaiste Schritte zurueckholen ──────────────────
+      # `StepScheduler.expire` gab es laengst — mit dem Kommentar „sonst bleibt
+      # ein Schritt fuer immer bei einem Agenten, der nie wiederkommt".  Nur rief
+      # es NIEMAND.  Folge (gemessen 2026-10-15): ein Lauf, dessen Agent
+      # verschwand, stand dauerhaft auf „running" mit offenen Stufen, und kein
+      # anderer Agent durfte sie nehmen.  Code, den keiner aufruft, schuetzt
+      # nichts — er sieht nur so aus.
+      - def:
+          name: expire_leases
+          access: public
+          static_off: ["str_cmp"]
+          args: [[now_ms, i64]]
+          return: i32
+          body:
+            - decl: [freed_all, i32, 0]
+            - decl: [keys, list<string>]
+            - decl: [eit, iterator<string>, { call: [<.pipelines.iter] }]
+            - while:
+                condition: { gt: [{ call: [eit.has_next] }, 0] }
+                body: [{ call: [keys.push, { call: [eit.next] }] }]
+            - decl: [kix, i32, 0]
+            - while:
+                condition: { lt: [kix, keys.len] }
+                body:
+                  - decl: [rkey, string, { at: [keys, kix] }]
+                  - decl: [run, ref<PipelineRun>, { call: [<.pipelines.get, rkey] }]
+                  - decl: [freed, i32, { call: [<.sched.expire, run, now_ms] }]
+                  - if:
+                      condition: { gt: [freed, 0] }
+                      then:
+                        - set: [run.status, { call: [<.phase_of, rkey, run] }]
+                        - call: [<.pipelines.set, rkey, run]
+                        - call: [log.warn, "[lehen] ${rkey}: ${freed} Schritt(e) zurueckgeholt — der Agent kam nicht wieder"]
+                        - set: [freed_all, { +: [freed_all, freed] }]
+                  - set: [kix, { +: [kix, 1] }]
+            - return: freed_all
+
+      # Die naechste Nummer holen und weiterzaehlen (F106-2).
+      # doc/spec/106 G2: welcher Job ist FAELLIG?  Reine Rechnung, damit der
+      # Zeitplan ohne Uhr und ohne Server pruefbar ist — "" = keiner.
+      # Ein abgeschalteter Job ist nie faellig (F106-6).
+      - def:
+          name: due_job
+          access: public
+          static_off: ["str_cmp"]
+          args: [[now_ms, i64]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [dit, iterator<string>, { call: [<.job_defs.iter] }]
+            - while:
+                condition: { gt: [{ call: [dit.has_next] }, 0] }
+                body:
+                  - decl: [dkey, string, { call: [dit.next] }]
+                  - decl: [jrec, JobDef, { call: [<.job_defs.get_copy, dkey] }]
+                  - if:
+                      condition: { '&&': [{ eq: [jrec.enabled, 1] }, { gt: [jrec.interval_s, 0] }] }
+                      then:
+                        - decl: [span_ms, i64, { '*': [jrec.interval_s, 1000] }]
+                        - decl: [next_ms, i64, { +: [jrec.last_started_ms, span_ms] }]
+                        # Nie gelaufen heisst SOFORT faellig: sonst wartet ein
+                        # frisch angelegter Job erst ein ganzes Intervall, und
+                        # niemand weiss, ob der Zeitplan ueberhaupt greift.
+                        - if: { condition: { le: [jrec.last_started_ms, 0] }, then: [{ return: dkey }] }
+                        - if: { condition: { ge: [now_ms, next_ms] }, then: [{ return: dkey }] }
+            - return: ""
+
+      # Startzeit vermerken — VOR dem Start, damit ein scheiternder Start nicht
+      # in einer Dauerschleife wiederholt wird.
+      - def:
+          name: mark_started
+          access: public
+          static_off: ["str_cmp"]
+          args: [[job_id, string], [now_ms, i64]]
+          return: i32
+          body:
+            - if: { condition: { eq: [{ call: [<.job_defs.has, job_id] }, 0] }, then: [{ return: 0 }] }
+            - decl: [jrec, ref<JobDef>, { call: [<.job_defs.get, job_id] }]
+            - set: [jrec.last_started_ms, now_ms]
+            - call: [<.job_defs.set, job_id, jrec]
+            - return: 1
+
+      - def:
+          name: job_of
+          access: public
+          static_off: ["str_cmp"]
+          args: [[job_id, string]]
+          return: { type: JobDef, lifetime: producer }
+          body:
+            - decl: [out, JobDef]
+            - if: { condition: { eq: [{ call: [<.job_defs.has, job_id] }, 0] }, then: [{ return: out }] }
+            - set: [out, { call: [<.job_defs.get_copy, job_id] }]
+            - return: out
+
+      - def:
+          name: take_build_number
+          access: public
+          static_off: ["str_cmp"]
+          args: [[job_id, string]]
+          return: i32
+          body:
+            - if: { condition: { eq: [{ call: [<.job_defs.has, job_id] }, 0] }, then: [{ return: 0 }] }
+            - decl: [rec, ref<JobDef>, { call: [<.job_defs.get, job_id] }]
+            - decl: [num, i32, rec.next_build]
+            - if: { condition: { le: [num, 0] }, then: [{ set: [num, 1] }] }
+            - set: [rec.next_build, { +: [num, 1] }]
+            - call: [<.job_defs.set, job_id, rec]
+            - return: num
+
+      # Ergebnis eines Laufs in den Job zurueckschreiben (abgeleitete Felder).
+      - def:
+          name: note_run_result
+          access: public
+          static_off: ["str_cmp"]
+          args: [[job_id, string], [run_id, string], [status, string], [took_ms, i64]]
+          return: i32
+          body:
+            - if: { condition: { eq: [{ call: [<.job_defs.has, job_id] }, 0] }, then: [{ return: 0 }] }
+            - decl: [rec, ref<JobDef>, { call: [<.job_defs.get, job_id] }]
+            - set: [rec.last_run_id, run_id]
+            - set: [rec.last_status, status]
+            - set: [rec.last_ms, took_ms]
+            - set: [rec.runs_total, { +: [rec.runs_total, 1] }]
+            - if: { condition: { eq: [status, "failed"] }, then: [{ set: [rec.runs_failed, { +: [rec.runs_failed, 1] }] }] }
+            - call: [<.job_defs.set, job_id, rec]
+            - return: 1
+
+      - def:
+          name: promote_pipeline
+          access: public
+          args: [[run_id, string]]
+          body:
+            - if: { condition: { eq: [{ call: [<.pipelines.has, run_id] }, 0] }, then: [{ return: 0 }] }
+            - decl: [run, ref<PipelineRun>, { call: [<.pipelines.get, run_id] }]
+            - set: [run.status, "deploying"]
+            - call: [<.pipelines.set, run_id, run]
+
+      - def:
+          name: report_node
+          access: public
+          args: [[node_id, string]]
+          body:
+            - if: { condition: { eq: [{ call: [<.nodes.has, node_id] }, 0] }, then: [{ return: 0 }] }
+            - decl: [node, ref<Node>, { call: [<.nodes.get, node_id] }]
+            - call: [log.info, "node ${node.node_id} role=${node.role} status=${node.status} cpu=${node.used_cpu}/${node.total_cpu} mem=${node.used_memory}/${node.total_memory} endpoint=${node.endpoint}"]
+
+      - def:
+          name: report_workload
+          access: public
+          args: [[workload_id, string]]
+          body:
+            - if: { condition: { eq: [{ call: [<.workloads.has, workload_id] }, 0] }, then: [{ return: 0 }] }
+            - decl: [work, ref<Workload>, { call: [<.workloads.get, workload_id] }]
+            - decl: [assigned, string, "unassigned"]
+            - if: { condition: { gt: [work.assigned_node_ids.len, 0] }, then: [{ set: [assigned, { at: [work.assigned_node_ids, 0] }] }] }
+            - call: [log.info, "workload ${work.workload_id} kind=${work.kind} status=${work.status} ns=${work.namespace} node=${assigned} image=${work.image_ref}"]
+
+      - def:
+          name: report_pipeline
+          access: public
+          args: [[run_id, string]]
+          body:
+            - if: { condition: { eq: [{ call: [<.pipelines.has, run_id] }, 0] }, then: [{ return: 0 }] }
+            - decl: [run, ref<PipelineRun>, { call: [<.pipelines.get, run_id] }]
+            - call: [log.info, "pipeline ${run.run_id} name=${run.pipeline_name} status=${run.status} branch=${run.branch} stages=${run.stages.len} workload=${run.produced_workload_id}"]
+
+      # Oeffentlich, damit ein TEST die Beispiel-Daten ausdruecklich anlegen kann.
+      # Vorher bekam er sie als NEBENWIRKUNG von `run` — und genau diese
+      # Nebenwirkung hat die Oberflaeche des Nutzers mit erfundenen Knoten
+      # gefuellt (2026-10-15).  Wer sie will, sagt es jetzt.
+      - def:
+          name: seed_demo_cluster
+          access: public
+          access: public
+          body:
+            - decl: [node_control, Node]
+            - set: [node_control.node_id, "node-control-1"]
+            - set: [node_control.name, "cosmos-control"]
+            - set: [node_control.role, "control-plane"]
+            - set: [node_control.status, "ready"]
+            - set: [node_control.total_cpu, 8]
+            - set: [node_control.used_cpu, 0]
+            - set: [node_control.total_memory, 16000]
+            - set: [node_control.used_memory, 0]
+            - set: [node_control.endpoint, "wss://cosmos-control:7443"]
+            - call: [node_control.labels.push, "control-plane"]
+            - call: [node_control.labels.push, "deploy"]
+            - call: [node_control.agent_tags.push, "orchestrator"]
+            - call: [<.nodes.set, node_control.node_id, node_control]
+
+            - decl: [node_build, Node]
+            - set: [node_build.node_id, "node-build-1"]
+            - set: [node_build.name, "cosmos-builder"]
+            - set: [node_build.role, "build-agent"]
+            - set: [node_build.status, "ready"]
+            - set: [node_build.total_cpu, 16]
+            - set: [node_build.used_cpu, 0]
+            - set: [node_build.total_memory, 32000]
+            - set: [node_build.used_memory, 0]
+            - set: [node_build.endpoint, "ssh://cosmos-builder"]
+            - call: [node_build.labels.push, "build"]
+            - call: [node_build.labels.push, "amd64"]
+            - call: [node_build.agent_tags.push, "jenkins"]
+            - call: [<.nodes.set, node_build.node_id, node_build]
+
+            - decl: [node_worker, Node]
+            - set: [node_worker.node_id, "node-general-1"]
+            - set: [node_worker.name, "cosmos-worker"]
+            - set: [node_worker.role, "worker"]
+            - set: [node_worker.status, "ready"]
+            - set: [node_worker.total_cpu, 12]
+            - set: [node_worker.used_cpu, 0]
+            - set: [node_worker.total_memory, 24000]
+            - set: [node_worker.used_memory, 0]
+            - set: [node_worker.endpoint, "wss://cosmos-worker:7443"]
+            - call: [node_worker.labels.push, "general"]
+            - call: [node_worker.labels.push, "linux"]
+            - call: [node_worker.agent_tags.push, "runtime"]
+            - call: [<.nodes.set, node_worker.node_id, node_worker]
+
+            - decl: [workload_api, Workload]
+            - set: [workload_api.workload_id, "workload-api"]
+            - set: [workload_api.name, "api-gateway"]
+            - set: [workload_api.namespace, "production"]
+            - set: [workload_api.kind, "deployment"]
+            - set: [workload_api.status, "pending"]
+            - set: [workload_api.required_label, "general"]
+            - set: [workload_api.desired_replicas, 2]
+            - set: [workload_api.ready_replicas, 0]
+            - set: [workload_api.cpu_request, 2]
+            - set: [workload_api.memory_request, 1024]
+            - set: [workload_api.image_ref, "registry.local/cosmos/api:0.1.0"]
+            - call: [<.workloads.set, workload_api.workload_id, workload_api]
+
+            - decl: [workload_build, Workload]
+            - set: [workload_build.workload_id, "workload-build"]
+            - set: [workload_build.name, "build-runner"]
+            - set: [workload_build.namespace, "ci"]
+            - set: [workload_build.kind, "deployment"]
+            - set: [workload_build.status, "pending"]
+            - set: [workload_build.required_label, "build"]
+            - set: [workload_build.desired_replicas, 1]
+            - set: [workload_build.ready_replicas, 0]
+            - set: [workload_build.cpu_request, 4]
+            - set: [workload_build.memory_request, 2048]
+            - set: [workload_build.image_ref, "registry.local/cosmos/builder:0.1.0"]
+            - call: [<.workloads.set, workload_build.workload_id, workload_build]
+
+            - decl: [pipeline_api, PipelineRun]
+            - set: [pipeline_api.run_id, "pipeline-api-main"]
+            - set: [pipeline_api.pipeline_name, "api-main"]
+            - set: [pipeline_api.repo_url, "git@example.local:cosmos/api.git"]
+            - set: [pipeline_api.branch, "main"]
+            - set: [pipeline_api.status, "queued"]
+            - set: [pipeline_api.target_namespace, "production"]
+            - set: [pipeline_api.queue_label, "build"]
+            - set: [pipeline_api.produced_workload_id, "workload-api"]
+            - set: [pipeline_api.produced_job_id, "job-deploy-api"]
+            - call: [pipeline_api.stages.push, { call: [<.make_stage, "checkout", "Checkout", "git", "build", "pipelines/checkout.aiml"] }]
+            - call: [pipeline_api.stages.push, { call: [<.make_stage, "build", "Build", "build", "build", "pipelines/build.aiml"] }]
+            - call: [pipeline_api.stages.push, { call: [<.make_stage, "deploy", "Deploy", "deploy", "control-plane", "pipelines/deploy.aiml"] }]
+            - call: [<.pipelines.set, pipeline_api.run_id, pipeline_api]
+
+      # snapshot: Read-only-Sicht aller Stores für die Browser-Cluster-Ansicht.
+      # Betriebszustand: geoeffnete Speicher + Verbindungszahlen (doc/spec/99).
+      # Nur Kennzahlen, nie Inhalte (F99-7); Verbindungen ohne Anmeldung werden
+      # GEZAEHLT, nicht aufgefuehrt (F99-8) — sie sind Angriffsflaeche, nicht
+      # Betrieb.
+      # pending_for: wie viele wartende Schritte koennte ein Agent mit DIESEN
+      # Etiketten ueberhaupt nehmen?
+      #
+      # Die Unterscheidung ist nicht kosmetisch: zaehlt man alle wartenden
+      # Schritte, startet der Controller Helfer, die nichts helfen duerfen
+      # (gemessen 18.10.2026: drei Schritte der Demo-Pipeline verlangen
+      # `build`/`control-plane`, der frische Container fuehrt keines davon).
+      - def:
+          name: pending_for
+          access: public
+          static_off: ["str_cmp"]
+          args: [[who, ClaimWho]]
+          return: i32
+          body:
+            # Dieselbe Frage, die `claim` stellt (doc/spec/110 F110-84) — sonst
+            # raeumt die Kapazitaetsschleife einen Container ab, dem gleich ein
+            # Schritt zugeteilt wird, oder sie startet einen fuer Arbeit, die
+            # niemand nehmen darf.
+            - decl: [offen, i32, 0]
+            - decl: [fit, iterator<string>, { call: [<.pipelines.iter] }]
+            - while:
+                condition: { gt: [{ call: [fit.has_next] }, 0] }
+                body:
+                  - decl: [fkey, string, { call: [fit.next] }]
+                  - decl: [frun, ref<PipelineRun>, { call: [<.pipelines.get, fkey] }]
+                  - decl: [fix, i32, 0]
+                  # Dieselbe Frage wie in `claim_for` (F110-84): ein
+                  # angehaltener Lauf wartet nicht auf einen Agenten.
+                  - if: { condition: { eq: [{ call: [<.run_halted, fkey] }, 1] }, then: [{ set: [fix, frun.stages.len] }] }
+                  - while:
+                      condition: { lt: [fix, frun.stages.len] }
+                      body:
+                        - if:
+                            condition: { eq: [{ call: [<.sched.takeable, frun, fix, who] }, 1] }
+                            then: [{ set: [offen, { +: [offen, 1] }] }]
+                        - set: [fix, { +: [fix, 1] }]
+            - return: offen
+
+      # first_pending_want: die erste wartende Stufe, die ein Agent mit DIESEN
+      # Etiketten nehmen duerfte — und das Abbild, das sie verlangt.
+      #
+      # Die Kapazitaetsschleife fragt damit nicht mehr „wartet irgendwas?",
+      # sondern „wartet etwas, und WORIN muesste es laufen?" (doc/spec/110
+      # F110-74).  Ohne diese zweite Haelfte startet der Controller einen
+      # Container mit dem Vorgabe-Abbild und wundert sich, dass niemand die
+      # Arbeit nimmt.
+      # merge_shares: zwei kompakte Freigabe-Listen vereinigen, Ziel fuer Ziel.
+      # Doppelte Ziele waeren zwei Einhaengungen auf denselben Punkt — der
+      # zweite verdeckt den ersten, und welcher gewinnt, haengt an der
+      # Reihenfolge.  Also: der erste bleibt.
+      # run_shares: alle Freigaben, die dieser Lauf in diesem Abbild noch
+      # brauchen wird.  Fertige Stufen zaehlen nicht mehr — ihre Freigabe
+      # einzuhaengen waere Zugriff ohne Anlass.
+      - def:
+          name: run_shares
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run, ref<PipelineRun>], [image, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [out, string, ""]
+            - decl: [six2, i32, 0]
+            - while:
+                condition: { lt: [six2, run.stages.len] }
+                body:
+                  - decl: [one, PipelineStage, { at: [run.stages, six2] }]
+                  - set: [six2, { +: [six2, 1] }]
+                  - if:
+                      condition: { '&&': [{ eq: [one.image, image] }, { gt: [one.shares.len, 0] }] }
+                      then:
+                        - decl: [code, i32, { call: [pipe_status_of, one.status] }]
+                        - if:
+                            condition: { neq: [code, PipeStatus.done] }
+                            then: [{ set: [out, { call: [<.merge_shares, out, one.shares] }] }]
+            - return: out
+
+      - def:
+          name: merge_shares
+          access: public
+          static_off: ["str_cmp"]
+          args: [[have, string], [add, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - if: { condition: { eq: [add.len, 0] }, then: [{ return: have }] }
+            - if: { condition: { eq: [have.len, 0] }, then: [{ return: add }] }
+            - decl: [out, string, have]
+            - decl: [mine, list<string>, { call: [have.split, ","] }]
+            - decl: [more, list<string>, { call: [add.split, ","] }]
+            - decl: [aix, i32, 0]
+            - while:
+                condition: { lt: [aix, more.len] }
+                body:
+                  - decl: [one, string, { at: [more, aix] }]
+                  - set: [aix, { +: [aix, 1] }]
+                  - decl: [of_one, list<string>, { call: [one.split, ":"] }]
+                  - if:
+                      condition: { ge: [of_one.len, 2] }
+                      then:
+                        - decl: [dest, string, { at: [of_one, 1] }]
+                        - decl: [taken, i32, 0]
+                        - decl: [mix, i32, 0]
+                        - while:
+                            condition: { lt: [mix, mine.len] }
+                            body:
+                              - decl: [two, string, { at: [mine, mix] }]
+                              - set: [mix, { +: [mix, 1] }]
+                              - decl: [of_two, list<string>, { call: [two.split, ":"] }]
+                              - if:
+                                  condition: { ge: [of_two.len, 2] }
+                                  then:
+                                    - if: { condition: { eq: [{ at: [of_two, 1] }, dest] }, then: [{ set: [taken, 1] }] }
+                        - if: { condition: { eq: [taken, 0] }, then: [{ set: [out, "${out},${one}"] }] }
+            - return: out
+
+      - def:
+          name: first_pending_want
+          access: public
+          static_off: ["str_cmp"]
+          args: [[labels, string]]
+          return: { type: PendingWant, lifetime: producer }
+          body:
+            - decl: [out, PendingWant]
+            - set: [out.any, 0]
+            - decl: [wit, iterator<string>, { call: [<.pipelines.iter] }]
+            - while:
+                condition: { gt: [{ call: [wit.has_next] }, 0] }
+                body:
+                  - decl: [wkey, string, { call: [wit.next] }]
+                  - decl: [wrun, ref<PipelineRun>, { call: [<.pipelines.get, wkey] }]
+                  - decl: [wix, i32, 0]
+                  # Und auch hier (F110-84): fuer einen angehaltenen Lauf wird
+                  # kein Container gestartet.
+                  - if: { condition: { eq: [{ call: [<.run_halted, wkey] }, 1] }, then: [{ set: [wix, wrun.stages.len] }] }
+                  - while:
+                      condition: { lt: [wix, wrun.stages.len] }
+                      body:
+                        - decl: [wstg, PipelineStage, { at: [wrun.stages, wix] }]
+                        # `ready_here` ist `takeable` ohne die Umgebungsfrage —
+                        # die ist ja gerade die Antwort, die wir suchen.  Mit
+                        # Reihenfolge und Kausalitaet (F110-84): eine Stufe, die
+                        # auf ihre Vorgaenger oder auf ein Abbild wartet, ist
+                        # kein Grund, einen Container zu starten.
+                        - if:
+                            condition: { eq: [{ call: [<.sched.ready_here, wrun, wix, labels] }, 1] }
+                            then:
+                              - if:
+                                  condition: { eq: [out.any, 0] }
+                                  then:
+                                    - set: [out.any, 1]
+                                    - set: [out.image, wstg.image]
+                                    - set: [out.cpu_cores, wstg.cpu_cores]
+                                    - set: [out.mem_mb, wstg.mem_mb]
+                                    - set: [out.pids_max, wstg.pids_max]
+                                    # Die Freigaben des GANZEN Laufs, nicht nur
+                                    # dieser Stufe (doc/spec/110 F110-105): der
+                                    # Container bedient auch die spaeteren, und
+                                    # einhaengen laesst sich nur beim Start.
+                                    - set: [out.shares, { call: [<.run_shares, wrun, wstg.image] }]
+                        - set: [wix, { +: [wix, 1] }]
+            - return: out
+
+      # ── Container auf einem FREMDEN Wirt (doc/spec/110 §110.36) ─────────
+      #
+      # hand_out_spawn: darf dieser Agent einen Container starten — und wenn
+      # ja, welchen?  Der Agent FRAGT (F110-123); entschieden wird hier.
+      #
+      # Die PIPELINE entscheidet, nicht der Controller (doc/spec/110 F110-124):
+      # gefragt wird mit den ETIKETTEN dieses Wirts, und `first_pending_want`
+      # gibt nur zurueck, was zu ihnen passt — dieselbe Rechnung wie fuer den
+      # eigenen Starter.  Kein Ausweichen bei Ueberlast: wer `runs_on:` setzt,
+      # bekommt diesen Wirt, und wer keinen setzt, jeden, der kann.
+      - def:
+          name: hand_out_spawn
+          access: public
+          static_off: ["str_cmp"]
+          args: [[agent_id, string], [caps, string], [labels, string], [now_ms, i64]]
+          return: { type: SpawnWant, lifetime: producer }
+          body:
+            - decl: [out, SpawnWant]
+            - set: [out.found, 0]
+            # Kann dieser Wirt ueberhaupt Container?  (F110-119)
+            - if: { condition: { lt: [{ call: [caps.index_of, "spawn"] }, 0] }, then: [{ return: out }] }
+            # Schon ein Auftrag unterwegs?  Einer je Wirt — mehr waere ein
+            # Rennen gegen die eigene Antwort.
+            - if:
+                condition: { gt: [{ call: [<.spawn_out.contains, agent_id] }, 0] }
+                then:
+                  - decl: [since, i64, { call: [<.spawn_out.get, agent_id] }]
+                  - if: { condition: { lt: [{ -: [now_ms, since] }, 120000] }, then: [{ return: out }] }
+            # Wartet ueberhaupt Arbeit — und WORIN muesste sie laufen?
+            - decl: [want, PendingWant, { call: [<.first_pending_want, labels] }]
+            - if: { condition: { neq: [want.any, 1] }, then: [{ return: out }] }
+            # Ohne `image:` will die Stufe auf dem Dateisystem des Knotens
+            # laufen (aiml F62-147) — dafuer wird kein Container gestartet.
+            - if: { condition: { eq: [want.image.len, 0] }, then: [{ return: out }] }
+            - set: [out.found, 1]
+            - set: [out.image, "${want.image}"]
+            - set: [out.cpu_cores, want.cpu_cores]
+            - set: [out.mem_mb, want.mem_mb]
+            - set: [out.pids_max, want.pids_max]
+            - set: [out.shares, "${want.shares}"]
+            - call: [<.spawn_out.put, agent_id, now_ms]
+            - return: out
+
+      # note_spawn: was aus dem Auftrag geworden ist.  Ein gescheiterter Start
+      # loescht den Merkposten SOFORT — sonst wartet der Wirt zwei Minuten auf
+      # einen zweiten Versuch, den niemand bestellt hat.
+      - def:
+          name: note_spawn
+          access: public
+          static_off: ["str_cmp"]
+          args: [[host_id, string], [alive, i32], [reason, string]]
+          body:
+            - if:
+                condition: { eq: [alive, 1] }
+                then: [{ call: [log.info, "[spawn] ${host_id} hat einen Container gestartet"] }]
+                else:
+                  - call: [log.error, "[spawn] ${host_id}: Container nicht gestartet — ${reason}"]
+                  - if: { condition: { gt: [{ call: [<.spawn_out.contains, host_id] }, 0] }, then: [{ call: [<.spawn_out.remove, host_id] }] }
+
+      # ── push: das Ergebnis einer Stufe ablegen (aiml spec/62 §18) ───────
+      #
+      # push_ready: der erste offene Push, dessen Stufe FERTIG ist.  Vorher
+      # waere der Schnitt ein halbes Dateisystem; nachher ist er das Ergebnis.
+      # Der Agent reist mit, weil nur er sagt, WO die Wurzel liegt.
+      - def:
+          name: push_ready
+          access: public
+          static_off: ["str_cmp"]
+          return: { type: PushTarget, lifetime: producer }
+          body:
+            - decl: [out, PushTarget]
+            - decl: [rit, iterator<string>, { call: [<.pipelines.iter] }]
+            - while:
+                condition: { gt: [{ call: [rit.has_next] }, 0] }
+                body:
+                  - decl: [rkey, string, { call: [rit.next] }]
+                  - decl: [prun, ref<PipelineRun>, { call: [<.pipelines.get, rkey] }]
+                  - decl: [pix, i32, 0]
+                  - while:
+                      condition: { lt: [pix, prun.pushes.len] }
+                      body:
+                        - decl: [tgt, PushTarget, { at: [prun.pushes, pix] }]
+                        - set: [pix, { +: [pix, 1] }]
+                        - if:
+                            condition: { eq: [tgt.status, "pending"] }
+                            then:
+                              - decl: [who_ran, string, { call: [<.stage_agent_if_done, prun, tgt.from_stage] }]
+                              - if:
+                                  condition: { gt: [who_ran.len, 0] }
+                                  then:
+                                    - set: [out.from_stage, "${tgt.from_stage}"]
+                                    - set: [out.target, "${tgt.target}"]
+                                    - set: [out.tag, "${tgt.tag}"]
+                                    - set: [out.message, "${rkey}"]
+                                    - set: [out.agent, "${who_ran}"]
+                                    - set: [out.status, "ready"]
+                                    - return: out
+            - return: out
+
+      # stage_agent_if_done: wer hat diese Stufe ausgefuehrt — und ist sie
+      # fertig?  Leer heisst: noch nicht so weit.  Verglichen wird der NACKTE
+      # Name: im Lauf heisst die Stufe "bauen [arch=x86_64]".
+      - def:
+          name: stage_agent_if_done
+          access: public
+          static_off: ["str_cmp"]
+          args: [[prun, ref<PipelineRun>], [want, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [six2, i32, 0]
+            - while:
+                condition: { lt: [six2, prun.stages.len] }
+                body:
+                  - decl: [one, PipelineStage, { at: [prun.stages, six2] }]
+                  - set: [six2, { +: [six2, 1] }]
+                  - decl: [cut, i32, { call: [one.name.index_of, " ["] }]
+                  - decl: [bare, string, one.name]
+                  - if: { condition: { ge: [cut, 0] }, then: [{ set: [bare, { call: [one.name.substr, 0, cut] }] }] }
+                  - if:
+                      condition: { '&&': [{ eq: [bare, want] }, { eq: [{ call: [pipe_status_of, one.status] }, PipeStatus.done] }] }
+                      then: [{ return: one.agent }]
+            - return: ""
+
+      # push_mark: den Stand festhalten — mit Digest, wenn es eine gibt.
+      - def:
+          name: push_mark
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run_id, string], [from_stage, string], [status, string], [digest, string]]
+          return: i32
+          body:
+            - if: { condition: { eq: [{ call: [<.pipelines.has, run_id] }, 0] }, then: [{ return: 0 }] }
+            - decl: [prun, ref<PipelineRun>, { call: [<.pipelines.get, run_id] }]
+            - decl: [mix, i32, 0]
+            - while:
+                condition: { lt: [mix, prun.pushes.len] }
+                body:
+                  - decl: [tgt, PushTarget, { at: [prun.pushes, mix] }]
+                  - if:
+                      condition: { eq: [tgt.from_stage, from_stage] }
+                      then:
+                        - set: [tgt.status, status]
+                        - if: { condition: { gt: [digest.len, 0] }, then: [{ set: [tgt.digest, digest] }] }
+                        - idx: [prun.pushes, mix, tgt]
+                        - call: [<.pipelines.set, run_id, prun]
+                        - return: 1
+                  - set: [mix, { +: [mix, 1] }]
+            - return: 0
+
+      # agent_busy: haelt dieser Agent GERADE einen Schritt?
+      #
+      # Gebraucht von der Kapazitaetsschleife: ein zugeteilter Schritt wartet
+      # nicht mehr, also sagte `pending_for` 0 — und der Controller raeumte den
+      # Container ab, WAEHREND er arbeitete (gemessen 21.10.2026: Zuteilung
+      # 17:38:10, Abraeumung 17:39:09, Ausgabe leer).  „Nichts zu tun" muss
+      # beides heissen: nichts wartet UND nichts laeuft.
+      - def:
+          name: agent_busy
+          access: public
+          static_off: ["str_cmp"]
+          args: [[agent_id, string]]
+          return: i32
+          body:
+            - if: { condition: { eq: [agent_id.len, 0] }, then: [{ return: 0 }] }
+            - decl: [bit, iterator<string>, { call: [<.pipelines.iter] }]
+            - while:
+                condition: { gt: [{ call: [bit.has_next] }, 0] }
+                body:
+                  - decl: [bkey, string, { call: [bit.next] }]
+                  - decl: [brun, PipelineRun, { call: [<.pipelines.get_copy, bkey] }]
+                  - decl: [bix, i32, 0]
+                  - while:
+                      condition: { lt: [bix, brun.stages.len] }
+                      body:
+                        - decl: [bstg, PipelineStage, { at: [brun.stages, bix] }]
+                        - set: [bix, { +: [bix, 1] }]
+                        - if:
+                            condition: { '&&': [{ eq: [{ call: [pipe_status_of, bstg.status] }, PipeStatus.running] },
+                                                { eq: [bstg.agent, agent_id] }] }
+                            then: [{ return: 1 }]
+            - return: 0
+
+      # ── Anhalten, Weiterlaufen, Einzelschritt (aiml spec/62 §5.9) ───────
+      #
+      # F62-53: ein Lauf haelt NUR am Stufen-Rand.  Darum steht das Tor hier
+      # und nicht im Agenten: wer schon laeuft, laeuft zu Ende (F62-55), und
+      # was noch nicht zugeteilt ist, wird es nicht.
+      - def:
+          name: ctrl_of
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run_id, string]]
+          return: { type: RunControl, lifetime: producer }
+          body:
+            - decl: [out, RunControl]
+            - set: [out.run_id, run_id]
+            - set: [out.mode, RunMode.free]
+            - if: { condition: { eq: [{ call: [<.run_ctrl.has, run_id] }, 0] }, then: [{ return: out }] }
+            - set: [out, { call: [<.run_ctrl.get_copy, run_id] }]
+            - return: out
+
+      # set_mode: anhalten (RunMode.halted), freigeben (free) oder Einzelschritt
+      # mit n Freigaben.  Gibt den neuen Stand zurueck, damit der Aufrufer nicht
+      # zweimal fragen muss.
+      - def:
+          name: set_mode
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run_id, string], [mode, i32], [steps, i32], [who, string]]
+          return: { type: RunControl, lifetime: producer }
+          body:
+            - decl: [ctl, RunControl, { call: [<.ctrl_of, run_id] }]
+            - set: [ctl.mode, mode]
+            - set: [ctl.actor, who]
+            - set: [ctl.at_ms, { call: [time.now] }]
+            - if: { condition: { neq: [mode, RunMode.stepping] }, then: [{ set: [ctl.release, 0] }] }
+            - if:
+                condition: { eq: [mode, RunMode.stepping] }
+                then:
+                  # „Einen Schritt" heiszt nicht „keinen": 0 wird als 1 gelesen.
+                  - decl: [want, i32, steps]
+                  - if: { condition: { lt: [want, 1] }, then: [{ set: [want, 1] }] }
+                  - set: [ctl.release, want]
+            - call: [<.run_ctrl.set, run_id, ctl]
+            # Der Lebenszustand des Laufs folgt der Absicht — aber nur, solange
+            # nichts laeuft: eine laufende Stufe laeuft zu Ende (F62-55).
+            - if:
+                condition: { eq: [{ call: [<.pipelines.has, run_id] }, 1] }
+                then:
+                  - decl: [prun, ref<PipelineRun>, { call: [<.pipelines.get, run_id] }]
+                  # EINE Regel fuer den Lebenszustand (phase_of): sie kennt das
+                  # Anhalten und laesst eine laufende Stufe laufen (F62-55).
+                  - set: [prun.status, { call: [<.phase_of, run_id, prun] }]
+                  - call: [<.pipelines.set, run_id, prun]
+            - return: ctl
+
+      # phase_of: der Lebenszustand EINES Laufs — mit dem Anhalten darin.
+      #
+      # `sched.phase` kennt nur die Stufen und sagt darum `queued`, wenn alles
+      # wartet.  Ein angehaltener Lauf wartet aber nicht auf einen Agenten,
+      # sondern auf einen Menschen (F101-24), und das ist ein Unterschied, den
+      # die Oberflaeche zeigen muss: bei `queued` sucht man einen fehlenden
+      # Agenten, bei `paused` den eigenen Finger.
+      - def:
+          name: phase_of
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run_id, string], [prun, ref<PipelineRun>]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [base, string, { call: [<.sched.phase, prun] }]
+            - if: { condition: { eq: [base, { call: [pipe_status_name, PipeStatus.running] }] }, then: [{ return: base }] }
+            - if: { condition: { eq: [base, { call: [pipe_status_name, PipeStatus.done] }] }, then: [{ return: base }] }
+            - if: { condition: { eq: [base, { call: [pipe_status_name, PipeStatus.failed] }] }, then: [{ return: base }] }
+            - if: { condition: { eq: [{ call: [<.run_halted, run_id] }, 1] }, then: [{ return: { call: [pipe_status_name, PipeStatus.paused] } }] }
+            - return: base
+
+      # ── Haltepunkte: eine Flagge an den Rand vor einer Stufe ────────────
+      #
+      # Der Rand ist das Rohr (aiml F62-53: ein Lauf haelt NUR am Stufen-Rand),
+      # und ein Haltepunkt ist der Zustand genau dieses Randes.  Technisch
+      # traegt ihn die Stufe dahinter: `paused` heisst „diese wird nicht
+      # zugeteilt" — das Tor der Zuteilung steht damit schon, ohne eine zweite
+      # Liste neben den Stufen (die waere die zweite Wahrheit).
+      - def:
+          name: break_set
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run_id, string], [stage_id, string], [held, i32]]
+          return: i32
+          body:
+            - if: { condition: { eq: [{ call: [<.pipelines.has, run_id] }, 0] }, then: [{ return: 0 }] }
+            - decl: [run, ref<PipelineRun>, { call: [<.pipelines.get, run_id] }]
+            - decl: [bix, i32, 0]
+            - decl: [done_n, i32, 0]
+            - while:
+                condition: { lt: [bix, run.stages.len] }
+                body:
+                  - decl: [stg, PipelineStage, { at: [run.stages, bix] }]
+                  # Gemeint sein darf die KENNUNG oder der nackte Name: wer eine
+                  # Flagge setzt, sieht „zwei" vor sich und nicht
+                  # „run-1792669419309-0-1".  Ein Name trifft die Stufe in JEDER
+                  # Lane — wie ein Haltepunkt in einer Zeile, die mehrere
+                  # Faeden durchlaufen.
+                  - decl: [hits, i32, 0]
+                  - if: { condition: { eq: [stg.stage_id, stage_id] }, then: [{ set: [hits, 1] }] }
+                  - if: { condition: { eq: [{ call: [<.sched.bare_name, stg.name] }, stage_id] }, then: [{ set: [hits, 1] }] }
+                  - if:
+                      condition: { eq: [hits, 1] }
+                      then:
+                        - decl: [now_st, i32, { call: [pipe_status_of, stg.status] }]
+                        # Setzen geht nur an einer WARTENDEN Stufe: was laeuft,
+                        # laeuft zu Ende (F62-55), was fertig ist, ist fertig.
+                        - if:
+                            condition: { '&&': [{ eq: [held, 1] }, { eq: [now_st, PipeStatus.pending] }] }
+                            then:
+                              - set: [stg.status, { call: [pipe_status_name, PipeStatus.paused] }]
+                              - idx: [run.stages, bix, stg]
+                              - set: [done_n, { +: [done_n, 1] }]
+                        - if:
+                            condition: { '&&': [{ eq: [held, 0] }, { eq: [now_st, PipeStatus.paused] }] }
+                            then:
+                              - set: [stg.status, { call: [pipe_status_name, PipeStatus.pending] }]
+                              - idx: [run.stages, bix, stg]
+                              - set: [done_n, { +: [done_n, 1] }]
+                  - set: [bix, { +: [bix, 1] }]
+            - if: { condition: { eq: [done_n, 0] }, then: [{ return: 0 }] }
+            - set: [run.status, { call: [<.phase_of, run_id, run] }]
+            - call: [<.pipelines.set, run_id, run]
+            - return: 1
+
+      # rewind_to: diese Stufe und alles danach in DERSELBEN Lane wieder
+      # wartend machen — „von hier nochmal".
+      #
+      # Was es NICHT tut: zurueckrollen.  Das Dateisystem bleibt, wie der Lauf
+      # es hinterlassen hat; die Stufe laeuft auf dem JETZIGEN Stand erneut.
+      # Ein echtes Zurueck braucht die Schichten je Stufe (doc/spec/107
+      # §107.1c) — bis dahin ist das hier ehrlich benannt und nicht mehr.
+      - def:
+          name: rewind_to
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run_id, string], [stage_id, string]]
+          return: i32
+          body:
+            - if: { condition: { eq: [{ call: [<.pipelines.has, run_id] }, 0] }, then: [{ return: 0 }] }
+            - decl: [run, ref<PipelineRun>, { call: [<.pipelines.get, run_id] }]
+            - decl: [lane, string, ""]
+            - decl: [from_ix, i32, { -: [0, 1] }]
+            - decl: [fix2, i32, 0]
+            - while:
+                condition: { lt: [fix2, run.stages.len] }
+                body:
+                  - decl: [cand, PipelineStage, { at: [run.stages, fix2] }]
+                  # Auch hier: Kennung oder Name (die erste passende Stufe).
+                  - decl: [same, i32, 0]
+                  - if: { condition: { eq: [cand.stage_id, stage_id] }, then: [{ set: [same, 1] }] }
+                  - if: { condition: { eq: [{ call: [<.sched.bare_name, cand.name] }, stage_id] }, then: [{ set: [same, 1] }] }
+                  - if:
+                      condition: { '&&': [{ eq: [same, 1] }, { lt: [from_ix, 0] }] }
+                      then: [{ set: [lane, cand.bindings] }, { set: [from_ix, fix2] }]
+                  - set: [fix2, { +: [fix2, 1] }]
+            - if: { condition: { lt: [from_ix, 0] }, then: [{ return: 0 }] }
+            - decl: [back_n, i32, 0]
+            - decl: [rix, i32, from_ix]
+            - while:
+                condition: { lt: [rix, run.stages.len] }
+                body:
+                  - decl: [later_stg, PipelineStage, { at: [run.stages, rix] }]
+                  - if:
+                      condition: { '&&': [{ eq: [later_stg.bindings, lane] }, { neq: [{ call: [pipe_status_of, later_stg.status] }, PipeStatus.running] }] }
+                      then:
+                        - set: [later_stg.status, { call: [pipe_status_name, PipeStatus.pending] }]
+                        - set: [later_stg.agent, ""]
+                        - set: [later_stg.lease_until, 0]
+                        - idx: [run.stages, rix, later_stg]
+                        - set: [back_n, { +: [back_n, 1] }]
+                  - set: [rix, { +: [rix, 1] }]
+            - set: [run.status, { call: [<.phase_of, run_id, run] }]
+            - call: [<.pipelines.set, run_id, run]
+            - return: back_n
+
+      # run_status: der Lebenszustand eines Laufs, wie er gespeichert ist.
+      # Lesend — fuer die Oberflaeche und fuer Proben.
+      - def:
+          name: run_status
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run_id, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - if: { condition: { eq: [{ call: [<.pipelines.has, run_id] }, 0] }, then: [{ return: "" }] }
+            - decl: [srun, PipelineRun, { call: [<.pipelines.get_copy, run_id] }]
+            - return: srun.status
+
+      # stage_status: der Zustand EINER Stufe — fuer die Oberflaeche und fuer
+      # Proben, die sonst den ganzen Lauf durchsuchen muessten.
+      - def:
+          name: stage_status
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run_id, string], [stage_id, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - if: { condition: { eq: [{ call: [<.pipelines.has, run_id] }, 0] }, then: [{ return: "" }] }
+            - decl: [srun, PipelineRun, { call: [<.pipelines.get_copy, run_id] }]
+            - decl: [qix, i32, 0]
+            - while:
+                condition: { lt: [qix, srun.stages.len] }
+                body:
+                  - decl: [qstg, PipelineStage, { at: [srun.stages, qix] }]
+                  - set: [qix, { +: [qix, 1] }]
+                  - if: { condition: { eq: [qstg.stage_id, stage_id] }, then: [{ return: qstg.status }] }
+            - return: ""
+
+      # run_halted: darf aus DIESEM Lauf gerade etwas starten?
+      #
+      # Eine Frage, drei Frager (F110-84): `claim_for`, `pending_for` und
+      # `first_pending_want` stellen sie, bevor sie in die Stufen schauen.
+      - def:
+          name: run_halted
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run_id, string]]
+          return: i32
+          body:
+            - decl: [ctl, RunControl, { call: [<.ctrl_of, run_id] }]
+            - if: { condition: { eq: [ctl.mode, RunMode.halted] }, then: [{ return: 1 }] }
+            - if: { condition: { '&&': [{ eq: [ctl.mode, RunMode.stepping] }, { lt: [ctl.release, 1] }] }, then: [{ return: 1 }] }
+            - return: 0
+
+      # consume_release: eine Zuteilung im Einzelschritt verbraucht eine
+      # Freigabe.  Faellt sie auf 0, steht der naechste wieder.
+      - def:
+          name: consume_release
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run_id, string]]
+          return: i32
+          body:
+            - if: { condition: { eq: [{ call: [<.run_ctrl.has, run_id] }, 0] }, then: [{ return: 0 }] }
+            - decl: [ctl, RunControl, { call: [<.run_ctrl.get_copy, run_id] }]
+            - if: { condition: { neq: [ctl.mode, RunMode.stepping] }, then: [{ return: 0 }] }
+            - if: { condition: { lt: [ctl.release, 1] }, then: [{ return: 0 }] }
+            - set: [ctl.release, { -: [ctl.release, 1] }]
+            - call: [<.run_ctrl.set, run_id, ctl]
+            - return: ctl.release
+
+      # ── haelt dieser Container das Arbeitsverzeichnis eines Laufs? ───────
+      #
+      # Ein Lauf baut seinen Zustand im Container auf: Stufe 4 installiert, was
+      # Stufe 7 braucht; Stufe 6 klont, was Stufe 7 uebersetzt.  Wird der
+      # Container abgeraeumt, ist der Lauf verloren, auch wenn der naechste
+      # Container formal „dasselbe Abbild" traegt — das Abbild ist der ANFANG,
+      # nicht der Stand (gemessen 21.10.2026: der Lauf starb nach Stufe 6, weil
+      # der Container als untaetig galt; doc/spec/110 F110-85).
+      #
+      # Darum: wer eine Stufe eines noch nicht fertigen Laufs ausgefuehrt hat,
+      # bleibt stehen — auch waehrend er wartet (etwa auf ein Abbild, das eine
+      # andere Stufe erst schreibt).  Das ist die ehrliche Zwischenstufe zu
+      # einem Container JE LAUF (F110-68): solange der Zustand im Container
+      # liegt, gehoert der Container dem Lauf.
+      - def:
+          name: serves_open_run
+          access: public
+          static_off: ["str_cmp"]
+          args: [[agent_id, string]]
+          return: i32
+          body:
+            - if: { condition: { eq: [agent_id.len, 0] }, then: [{ return: 0 }] }
+            - decl: [sit, iterator<string>, { call: [<.pipelines.iter] }]
+            - while:
+                condition: { gt: [{ call: [sit.has_next] }, 0] }
+                body:
+                  - decl: [skey, string, { call: [sit.next] }]
+                  - decl: [srun, ref<PipelineRun>, { call: [<.pipelines.get, skey] }]
+                  # Ein fertiger oder gescheiterter Lauf braucht seinen Container
+                  # nicht mehr.
+                  - if:
+                      condition: { eq: [{ call: [<.run_open, srun] }, 1] }
+                      then:
+                        - decl: [six3, i32, 0]
+                        - while:
+                            condition: { lt: [six3, srun.stages.len] }
+                            body:
+                              - decl: [sstg, PipelineStage, { at: [srun.stages, six3] }]
+                              - set: [six3, { +: [six3, 1] }]
+                              - if: { condition: { eq: [sstg.agent, agent_id] }, then: [{ return: 1 }] }
+                  # Und nach der letzten Stufe ist der Container NOCH NICHT
+                  # entbehrlich: ein `push:` liest das Dateisystem, das in ihm
+                  # liegt (doc/spec/110 F110-89).  Wird er vorher abgeraeumt,
+                  # liest `tar` eine Wurzel, die unter ihm verschwindet —
+                  # gemessen 21.10.2026: „File removed before we read it" fuer
+                  # halb /usr, 19 Sekunden nach dem Start des Pushes.
+                  - decl: [pix3, i32, 0]
+                  - while:
+                      condition: { lt: [pix3, srun.pushes.len] }
+                      body:
+                        - decl: [ptgt, PushTarget, { at: [srun.pushes, pix3] }]
+                        - set: [pix3, { +: [pix3, 1] }]
+                        - if:
+                            condition: { '&&': [{ neq: [ptgt.status, "done"] },
+                                                { neq: [ptgt.status, "failed"] }] }
+                            then:
+                              # WER das Dateisystem gebaut hat, steht an der
+                              # Stufe — im gespeicherten Push-Eintrag steht nur
+                              # Ziel und Stand (`agent` fuellt erst der
+                              # Vorschlag in `push_ready`).
+                              - decl: [builder, string, { call: [<.stage_agent_if_done, srun, ptgt.from_stage] }]
+                              - if: { condition: { eq: [builder, agent_id] }, then: [{ return: 1 }] }
+            - return: 0
+
+      # run_open: hat dieser Lauf noch etwas vor?  Eine Stufe, die wartet oder
+      # laeuft, heisst ja; alles fertig oder gescheitert heisst nein.
+      - def:
+          name: run_open
+          access: public
+          static_off: ["str_cmp"]
+          args: [[orun, ref<PipelineRun>]]
+          return: i32
+          body:
+            - decl: [oix, i32, 0]
+            - while:
+                condition: { lt: [oix, orun.stages.len] }
+                body:
+                  - decl: [ostg, PipelineStage, { at: [orun.stages, oix] }]
+                  - decl: [ost, i32, { call: [pipe_status_of, ostg.status] }]
+                  - if: { condition: { eq: [ost, PipeStatus.running] }, then: [{ return: 1 }] }
+                  # Und ein HALTEPUNKT haelt den Lauf erst recht offen: wer vor
+                  # einer Flagge steht, will genau den Stand behalten, auf dem
+                  # er steht.  Den Container hier freizugeben hiesze, ihn zu
+                  # verlieren (F110-85).
+                  - if: { condition: { eq: [ost, PipeStatus.paused] }, then: [{ return: 1 }] }
+                  # Eine wartende Stufe haelt den Lauf offen — es sei denn, sie
+                  # ist uebersprungen (F101-10): ein gescheiterter Vorgaenger in
+                  # derselben Lane heisst „nie zugeteilt".  Ohne diese Ausnahme
+                  # haette ein einziger Fehlschlag den Container fuer immer
+                  # gebunden (F110-85 waere vom Schutz zur Fessel geworden).
+                  - if:
+                      condition: { '&&': [{ eq: [ost, PipeStatus.pending] },
+                                          { eq: [{ call: [<.sched.lane_dead, orun, oix] }, 0] }] }
+                      then: [{ return: 1 }]
+                  - set: [oix, { +: [oix, 1] }]
+            - return: 0
+
+      # pending_steps: wie viele Schritte warten auf einen Agenten?
+      #
+      # Das ist die EINZIGE Zahl, die die Kapazitaetsschleife braucht — der
+      # Agent zieht ja selbst (doc/spec/103 F103-2), es gibt nichts zuzuteilen.
+      # Gezaehlt wird ueber die Laeufe, nicht ueber eine gepflegte Warteschlange:
+      # eine zweite Liste neben den Laeufen waere wieder die zweite Wahrheit.
+      - def:
+          name: pending_steps
+          access: public
+          static_off: ["str_cmp"]
+          return: i32
+          body:
+            - decl: [waiting, i32, 0]
+            - decl: [pit, iterator<string>, { call: [<.pipelines.iter] }]
+            - while:
+                condition: { gt: [{ call: [pit.has_next] }, 0] }
+                body:
+                  - decl: [pkey, string, { call: [pit.next] }]
+                  - decl: [prun, PipelineRun, { call: [<.pipelines.get_copy, pkey] }]
+                  - decl: [six, i32, 0]
+                  - while:
+                      condition: { lt: [six, prun.stages.len] }
+                      body:
+                        - decl: [stg, PipelineStage, { at: [prun.stages, six] }]
+                        - set: [six, { +: [six, 1] }]
+                        - if:
+                            condition: { eq: [{ call: [pipe_status_of, stg.status] }, PipeStatus.pending] }
+                            then: [{ set: [waiting, { +: [waiting, 1] }] }]
+            - return: waiting
+
+      - def:
+          name: live_snapshot
+          access: public
+          return: { type: LiveView, lifetime: producer }
+          body:
+            - decl: [live, LiveView]
+            - set: [live.taken_ms, { call: [time.now] }]
+            - decl: [store_n, i32, { call: [db.open_count] }]
+            - decl: [six, i32, 0]
+            - while:
+                condition: { lt: [six, store_n] }
+                body:
+                  - decl: [row, KvStoreInfo]
+                  - set: [row.name,     { call: [db.open_name, six] }]
+                  - set: [row.path,     { call: [db.open_path, six] }]
+                  - set: [row.wal_used, { call: [db.open_wal_used, six] }]
+                  - set: [row.entries,  { call: [db.open_entries, six] }]
+                  - set: [row.writes,   { call: [db.open_writes, six] }]
+                  - call: [live.stores.push, row]
+                  - set: [six, { +: [six, 1] }]
+            - return: live
+
+
+      - def:
+          name: run
+          access: public
+          return: i32
+          body:
+            - call: [log.info, "cosmos: opening state stores"]
+            # Die Beispiel-Daten schreiben in DENSELBEN Speicher wie der Betrieb
+            # (gleicher AIONDB_PATH).  Einmal `./server` gestartet, und erfundene
+            # Knoten, Workloads und ein erfundener Lauf auf „builder-1/2/3"
+            # stehen dauerhaft in der Oberflaeche — gemeldet 2026-10-15.
+            # Darum NUR auf ausdrueckliche Anforderung, und laut.
+            - decl: [envm, map<string:string>, { call: [sys.env] }]
+            - decl: [want_demo, i32, 0]
+            - if:
+                condition: { gt: [{ call: [envm.contains, "COSMOS_SEED_DEMO"] }, 0] }
+                then:
+                  - decl: [demo_txt, string, { call: [envm.get, "COSMOS_SEED_DEMO"] }]
+                  - set: [want_demo, { call: [demo_txt.parse_i32] }]
+            - if:
+                condition: { eq: [want_demo, 1] }
+                then:
+                  - call: [log.warn, "cosmos: COSMOS_SEED_DEMO=1 — schreibe BEISPIEL-Daten in den Speicher"]
+                  - call: [<.seed_demo_cluster]
+                else:
+                  - call: [log.info, "cosmos: keine Beispiel-Daten (COSMOS_SEED_DEMO=1 setzt sie)"]
+            - call: [<.promote_pipeline, "pipeline-api-main"]
+            - call: [<.reconcile_workload, "workload-build"]
+            - call: [<.reconcile_workload, "workload-api"]
+            - call: [log.info, "cosmos: cluster snapshot"]
+            - call: [<.report_node, "node-control-1"]
+            - call: [<.report_node, "node-build-1"]
+            - call: [<.report_node, "node-general-1"]
+            - call: [<.report_workload, "workload-build"]
+            - call: [<.report_workload, "workload-api"]
+            - call: [<.report_pipeline, "pipeline-api-main"]
+            - call: [log.info, "cosmos: bootstrap complete"]
+            - return: 0
+
+      - def:
+          name: snapshot
+          access: public
+          return: ClusterView
+          body:
+            - decl: [view, ClusterView]
+            - set: [view.live, { call: [<.live_snapshot] }]
+            # doc/spec/109 F109-1: der Server misst SICH SELBST.  Im Takt des
+            # Schnappschusses — damit ist der Wert der Durchschnitt ueber genau das
+            # Fenster, das der Leser ohnehin sieht.
+            - decl: [srv_use, ResUsage, { call: [<.res.sample] }]
+            - set: [view.srv_cpu_permille, srv_use.cpu_permille]
+            - set: [view.srv_rss_kb, srv_use.rss_kb]
+            # Die eigene Adresse mitschicken (doc/spec/107 F107-39): der Client
+            # soll sie nicht raten.
+            - decl: [bind_env, map<string:string>, { call: [sys.env] }]
+            - set: [view.srv_bind, "ws://0.0.0.0:8765"]
+            - if:
+                condition: { gt: [{ call: [bind_env.contains, "COSMOS_BIND"] }, 0] }
+                then: [{ set: [view.srv_bind, { call: [bind_env.get, "COSMOS_BIND"] }] }]
+            # Die Speicher stehen schon in `live` (live_snapshot, aus der LAUFZEIT).
+            # Sie hier ein zweites Mal zu fuellen hiesse, denselben Umstand zweimal
+            # zu behaupten — und zwei Behauptungen laufen auseinander (F107-17).
+            - decl: [nit, iterator<string>, { call: [<.nodes.iter] }]
+            - while:
+                condition: { gt: [{ call: [nit.has_next] }, 0] }
+                body:
+                  - decl: [nkey, string, { call: [nit.next] }]
+                  - decl: [nrec, Node, { call: [<.nodes.get_copy, nkey] }]
+                  - call: [view.nodes.push, nrec]
+            - decl: [jdit, iterator<string>, { call: [<.job_defs.iter] }]
+            - while:
+                condition: { gt: [{ call: [jdit.has_next] }, 0] }
+                body:
+                  - decl: [jdkey, string, { call: [jdit.next] }]
+                  - decl: [jdrec, JobDef, { call: [<.job_defs.get_copy, jdkey] }]
+                  - call: [view.job_defs.push, jdrec]
+                  # Die Parameter dieses Jobs gleich mit (F106-16): ein
+                  # zweiter Lesekanal fuer denselben Augenblick waere die
+                  # zweite Quelle, die §104.0 teuer bezahlt hat.
+                  - if:
+                      condition: { gt: [{ call: [<.jobcfg.has_params, jdkey] }, 0] }
+                      then:
+                        - decl: [pbag, JobParams, { call: [<.jobcfg.params_of_job, jdkey] }]
+                        - call: [view.job_params.push, pbag]
+                  - if:
+                      condition: { gt: [{ call: [<.jobcfg.has_policy, jdkey] }, 0] }
+                      then:
+                        - decl: [polr, JobPolicy, { call: [<.jobcfg.policy_of_job, jdkey] }]
+                        - call: [view.job_policy.push, polr]
+            - decl: [wit, iterator<string>, { call: [<.workloads.iter] }]
+            - while:
+                condition: { gt: [{ call: [wit.has_next] }, 0] }
+                body:
+                  - decl: [wkey, string, { call: [wit.next] }]
+                  - decl: [wrec, Workload, { call: [<.workloads.get_copy, wkey] }]
+                  - call: [view.workloads.push, wrec]
+            - decl: [pit, iterator<string>, { call: [<.pipelines.iter] }]
+            - while:
+                condition: { gt: [{ call: [pit.has_next] }, 0] }
+                body:
+                  - decl: [pkey, string, { call: [pit.next] }]
+                  - decl: [prec, PipelineRun, { call: [<.pipelines.get_copy, pkey] }]
+                  - call: [view.pipelines.push, prec]
+                  # Die Schichten dieses Laufs gleich mit (doc/spec/107 §107.1c):
+                  # ein zweiter Lesekanal fuer denselben Augenblick waere die
+                  # zweite Quelle, die §104.0 teuer bezahlt hat.
+                  - if:
+                      condition: { gt: [{ call: [<.run_layers.has, pkey] }, 0] }
+                      then:
+                        - decl: [lbag, RunLayers, { call: [<.run_layers.get_copy, pkey] }]
+                        - decl: [lrx, i32, 0]
+                        - while:
+                            condition: { lt: [lrx, lbag.rows.len] }
+                            body:
+                              - call: [view.layers.push, { at: [lbag.rows, lrx] }]
+                              - set: [lrx, { +: [lrx, 1] }]
+                        - decl: [ltx, i32, 0]
+                        - while:
+                            condition: { lt: [ltx, lbag.times.len] }
+                            body:
+                              - call: [view.times.push, { at: [lbag.times, ltx] }]
+                              - set: [ltx, { +: [ltx, 1] }]
+            - call: [db.reload_kv, <.jobs]
+            - decl: [jit, iterator<string>, { call: [<.jobs.iter] }]
+            - while:
+                condition: { gt: [{ call: [jit.has_next] }, 0] }
+                body:
+                  - decl: [jkey, string, { call: [jit.next] }]
+                  - decl: [jrec, JobRecord, { call: [<.jobs.get_copy, jkey] }]
+                  - call: [view.jobs.push, jrec]
+            - return: view
+
+# doc/spec/104 F104-1: EIN Schnappschuss traegt auch die Anwesenheit.  Der Kern
+# (`snapshot`) bleibt eine Klassenmethode und damit OHNE Server pruefbar; nur
+# das Einschmelzen der Registry braucht die sees-Kante und steht deshalb hier
+# (doc/spec/93 §1.1).  Jeder Sender ruft `snapshot_live`, damit es GENAU EINE
+# Stelle gibt, an der Anwesenheit entsteht.
+
+# doc/spec/104 F104-1: EIN Schnappschuss traegt auch die Anwesenheit.  Der Kern
+# (`snapshot`) bleibt eine Klassenmethode und damit OHNE Server pruefbar; nur das
+# Einschmelzen der Registry braucht die sees-Kante und steht deshalb hier
+# (doc/spec/93 §1.1).  Jeder Sender ruft `snapshot_live` — damit gibt es GENAU
+# EINE Stelle, an der Anwesenheit entsteht.
+- groupmethods:
+    group: CosmosRuntime
+    instances:
+      - instance: cluster
+        methods:
+          - def:
+              name: snapshot_live
+              access: public
+              static_off: ["str_cmp"]
+              return: ClusterView
+              body:
+                - decl: [view, ClusterView, { call: [<.snapshot] }]
+                # Ein registrierter Agent, fuer den es keinen Knoten gibt, wird
+                # als Knoten ERGAENZT (F104-2) — sonst waere er genau dort
+                # unsichtbar, wo man den Cluster ansieht.
+                - decl: [adx, i32, 0]
+                - while:
+                    condition: { lt: [adx, { call: [<.agents.count] }] }
+                    body:
+                      - decl: [arow, AgentInfo, { call: [<.agents.at_index, adx] }]
+                      - decl: [merged, i32, 0]
+                      - decl: [ndx, i32, 0]
+                      - while:
+                          condition: { lt: [ndx, view.nodes.len] }
+                          body:
+                            - decl: [nrow, Node, { at: [view.nodes, ndx] }]
+                            # Zuordnung ueber node_id oder Namen: beides ist das,
+                            # was die Einrichtung vergibt.
+                            - if:
+                                condition: { '||': [{ eq: [nrow.node_id, arow.agent_id] }, { eq: [nrow.name, arow.agent_id] }] }
+                                then:
+                                  - set: [nrow.agent_id, arow.agent_id]
+                                  - set: [nrow.last_seen_ms, arow.last_seen_ms]
+                                  - set: [nrow.current_run, arow.current_run]
+                                  - idx: [view.nodes, ndx, nrow]
+                                  - set: [merged, 1]
+                            - set: [ndx, { +: [ndx, 1] }]
+                      - if:
+                          condition: { eq: [merged, 0] }
+                          then:
+                            - decl: [anode, Node]
+                            - set: [anode.node_id, arow.agent_id]
+                            - set: [anode.name, arow.agent_id]
+                            - set: [anode.role, "agent"]
+                            - set: [anode.status, "agent"]
+                            - set: [anode.endpoint, arow.host]
+                            - set: [anode.agent_id, arow.agent_id]
+                            - set: [anode.last_seen_ms, arow.last_seen_ms]
+                            - set: [anode.current_run, arow.current_run]
+                            - call: [view.nodes.push, anode]
+                      - set: [adx, { +: [adx, 1] }]
+                - return: view

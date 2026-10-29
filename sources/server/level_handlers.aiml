@@ -1,0 +1,158 @@
+# Mirror RPC-Handler der Rechtevergabe (doc/spec/108 §2).
+#
+#   my_clearance    (SetUserLevelReq → UserLevelResult)   eigene Freigabe lesen
+#   list_users      (SetUserLevelReq → UserLevelResult)   Uebersicht, nur fuer Berechtigte
+#   set_user_level  (SetUserLevelReq → UserLevelResult)   Freigabe setzen
+#
+# Alle drei nehmen denselben Request — er traegt Token, Zielkonto und Level, und die
+# beiden Lesefunktionen brauchen davon nur das Token.  Ein eigenes Model je RPC waere
+# dieselbe Struktur dreimal.
+#
+# Die Autorisierung steht NICHT hier, sondern in `AuthService.set_level` (F108-4:
+# niemand vergibt eine Freigabe, die staerker ist als die eigene).  Der Handler
+# uebersetzt nur Ablehnungsgruende in Text — eine Regel an zwei Stellen waere eine
+# Regel, die auseinanderlaeuft.
+#
+# Static-Check (spec/49 §14): 3 classes — am Cap.
+
+- import: "sources/models/level_reqs.aiml"
+- import: "sources/models/user.aiml"
+
+- groupmethods:
+    group: CosmosRuntime
+    instances:
+      # my_clearance: jeder angemeldete Nutzer darf seine EIGENE Freigabe lesen
+      # (F108-4).  Level sind nicht geheim (spec/65 F65-16), und ohne diese Auskunft
+      # kann die Oberflaeche eine Ablehnung nicht erklaeren.
+      - instance: my_clearance
+        methods:
+          - def:
+              name: run
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, SetUserLevelReq]
+                - decl: [rcv, i32, { call: [session.decode_rpc, rpc, req] }]
+                - decl: [out, UserLevelResult]
+                - set: [out.my_level, 255]
+                - if:
+                    condition: { neq: [rcv, 0] }
+                    then:
+                      - set: [out.message, "malformed my_clearance payload"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, out]
+                      - return: []
+                - decl: [eml, string, { call: [<.auth.email_for_token, req.token] }]
+                - if:
+                    condition: { eq: [eml.len, 0] }
+                    then:
+                      - set: [out.message, "invalid token"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, out]
+                      - return: []
+                - set: [out.success, 1]
+                - set: [out.my_level, { call: [<.auth.clearance_for_email, eml] }]
+                - set: [out.message, "ok"]
+                - call: [session.reply_rpc, rpc, "set_result", 0, out]
+
+      # list_users: die Uebersicht.  Nur fuer Konten mit Freigabe 1 — wer Rechte nicht
+      # vergeben darf, braucht auch die Liste nicht, und eine Kontenliste ist selbst
+      # eine Auskunft (wer existiert ueberhaupt).
+      - instance: list_users
+        methods:
+          - def:
+              name: run
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, SetUserLevelReq]
+                - decl: [rcv, i32, { call: [session.decode_rpc, rpc, req] }]
+                - decl: [out, UserLevelResult]
+                - set: [out.my_level, 255]
+                - if:
+                    condition: { neq: [rcv, 0] }
+                    then:
+                      - set: [out.message, "malformed list_users payload"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, out]
+                      - return: []
+                - decl: [eml, string, { call: [<.auth.email_for_token, req.token] }]
+                - if:
+                    condition: { eq: [eml.len, 0] }
+                    then:
+                      - set: [out.message, "invalid token"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, out]
+                      - return: []
+                - decl: [own, i32, { call: [<.auth.clearance_for_email, eml] }]
+                - set: [out.my_level, own]
+                - if:
+                    condition: { neq: [own, 1] }
+                    then:
+                      - set: [out.message, "Freigabe 1 (Admin) noetig — diese Sitzung hat ${own}"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, out]
+                      - return: []
+                - decl: [cnt, i32, { call: [<.auth.user_count] }]
+                - decl: [lui, i32, 0]
+                - while:
+                    condition: { lt: [lui, cnt] }
+                    body:
+                      - decl: [ueml, string, { call: [<.auth.user_at, lui] }]
+                      - if:
+                          condition: { gt: [ueml.len, 0] }
+                          then:
+                            - decl: [row, UserLevelRow]
+                            - set: [row.email, ueml]
+                            - set: [row.display_name, { call: [<.auth.nick_for, ueml] }]
+                            - set: [row.level, { call: [<.auth.clearance_for_email, ueml] }]
+                            - call: [out.users.push, row]
+                      - set: [lui, { +: [lui, 1] }]
+                - set: [out.success, 1]
+                - set: [out.message, "ok"]
+                - call: [session.reply_rpc, rpc, "set_result", 0, out]
+
+      # set_user_level: die Vergabe.  Der Handler prueft NUR die Identitaet; die Regel
+      # "nie staerker als die eigene" steht in AuthService.set_level (F108-4).
+      - instance: set_user_level
+        methods:
+          - def:
+              name: run
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, SetUserLevelReq]
+                - decl: [rcv, i32, { call: [session.decode_rpc, rpc, req] }]
+                - decl: [out, UserLevelResult]
+                - set: [out.my_level, 255]
+                - if:
+                    condition: { neq: [rcv, 0] }
+                    then:
+                      - set: [out.message, "malformed set_user_level payload"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, out]
+                      - return: []
+                - decl: [eml, string, { call: [<.auth.email_for_token, req.token] }]
+                - if:
+                    condition: { eq: [eml.len, 0] }
+                    then:
+                      - set: [out.message, "invalid token"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, out]
+                      - return: []
+                - decl: [own, i32, { call: [<.auth.clearance_for_email, eml] }]
+                - set: [out.my_level, own]
+                - decl: [src, i32, { call: [<.auth.set_level, eml, req.target_email, req.level] }]
+                - if:
+                    condition: { eq: [src, 1] }
+                    then:
+                      - set: [out.message, "unbekanntes Konto: ${req.target_email}"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, out]
+                      - return: []
+                - if:
+                    condition: { eq: [src, 2] }
+                    then:
+                      - set: [out.message, "Level ${req.level} ungueltig — gueltig ist 1..255, 0 heisst NIEMAND"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, out]
+                      - return: []
+                - if:
+                    condition: { eq: [src, 3] }
+                    then:
+                      # Der Grund wird GENANNT, nicht verschwiegen: eine Oberflaeche, die
+                      # nur "verweigert" sagt, laesst den Nutzer raten (spec/65 F65-12).
+                      - set: [out.message, "Freigabe ${req.level} ist staerker als die eigene (${own}) — nicht erlaubt"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, out]
+                      - return: []
+                - set: [out.success, 1]
+                - set: [out.message, "${req.target_email} hat jetzt Freigabe ${req.level}"]
+                - call: [session.reply_rpc, rpc, "set_result", 0, out]

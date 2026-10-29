@@ -1,0 +1,64 @@
+# cosmos-oci — der Wandler zwischen Cut und OCI-Image (doc/spec/110 §110.25).
+#
+#   cosmos-oci --cut deploy/rt_cuts/stufe1 --image deploy/oci/stufe1 [--ref-name stufe1]
+#   cosmos-oci --image deploy/oci/stufe1 --bundle logs/rt_runs/aus-image
+#
+# Die Richtung ergibt sich aus den Angaben: `--cut` heisst hinaus, `--bundle`
+# heisst herein.  Beides braucht `--image`, denn das ist in beiden Richtungen
+# die Gegenseite.
+
+- import: "sources/runtime/rt_oci.aiml"
+
+- model:
+    name: OciArgs
+    fields:
+      - [cut,      string, ""]
+      - [layers,   string, ""]     # Schichten je Stufe (doc/spec/110 F110-95)
+      - [image,    string, ""]
+      - [bundle,   string, ""]
+      - [base,     string, "deploy/rt_base"]
+      - [rtbin,    string, "./cosmos-rt"]
+      - [work,     string, "logs/oci_work"]
+      - [ref_name, string, "latest"]
+      - [arch,     string, "amd64"]
+      - [quiet,    i32, 0]
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [args, OciArgs]
+      - call: [sys.arg_dump, args]
+      - if:
+          condition: { eq: [args.image.len, 0] }
+          then:
+            - call: [log.error, "cosmos-oci: --image <verzeichnis> fehlt"]
+            - call: [log.error, "  hinaus: --cut <cut> --image <ziel>"]
+            - call: [log.error, "  hinaus (geschichtet): --layers <lauf>/layers --image <ziel>"]
+            - call: [log.error, "  herein: --image <image> --bundle <ziel>"]
+            - return: 2
+      - if:
+          condition: { eq: [{ call: [io.is_dir, args.base] }, false] }
+          then: [{ call: [log.error, "cosmos-oci: ${args.base} fehlt — tools/make_base_rootfs.sh"] }, { return: 3 }]
+
+      - decl: [tool, ptr<RtOci>, { new: RtOci }]
+      - call: [tool.init, args.base, args.rtbin, args.work]
+      - set: [tool.quiet, args.quiet]
+
+      - if:
+          condition: { gt: [args.layers.len, 0] }
+          then: [{ return: { call: [tool.export_layers, args.layers, args.image, args.ref_name, args.arch] } }]
+      - if:
+          condition: { gt: [args.cut.len, 0] }
+          then:
+            - if:
+                condition: { eq: [{ call: [io.is_dir, args.cut] }, false] }
+                then: [{ call: [log.error, "cosmos-oci: ${args.cut} ist kein Verzeichnis"] }, { return: 3 }]
+            - return: { call: [tool.export_cut, args.cut, args.image, args.ref_name, args.arch] }
+      - if:
+          condition: { gt: [args.bundle.len, 0] }
+          then: [{ return: { call: [tool.import_image, args.image, args.bundle, args.arch] } }]
+
+      - call: [log.error, "cosmos-oci: weder --cut/--layers noch --bundle genannt — welche Richtung?"]
+      - return: 2

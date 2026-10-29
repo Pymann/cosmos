@@ -1,0 +1,20 @@
+# Ein KV-Speicher als Trommel (doc/spec/107 §107.1b).
+#
+# Die Formel kann einen Zylinder; was sie nicht kann, ist das, was eine
+# Trommel zur Datenbank macht: abgesetzte Deckelringe, eine leichte Taille.
+#
+# EINHEITSGROSS: Radius 0.5, Hoehe 1, Mittelpunkt im Ursprung.
+shapeml: 1
+materials:
+  body: { base_color: [0.78, 0.62, 0.90, 1], metallic: 0.3, roughness: 0.45 }
+  rim:  { base_color: [0.55, 0.42, 0.68, 1], metallic: 0.5, roughness: 0.3 }
+model:
+  operation: group
+  children:
+    - { type: cylinder, radius: 0.46, height: 0.90, segments: 28, position: [0, 0, 0], material: body }
+    # Deckel- und Bodenring: etwas weiter als der Rumpf, damit die Trommel
+    # auch im Gegenlicht als Trommel gelesen wird.
+    - { type: cylinder, radius: 0.50, height: 0.08, segments: 28, position: [0, 0.46, 0], material: rim }
+    - { type: cylinder, radius: 0.50, height: 0.08, segments: 28, position: [0, -0.46, 0], material: rim }
+    - { type: cylinder, radius: 0.49, height: 0.05, segments: 28, position: [0, 0.0, 0], material: rim }
+output: { file: cosmos_drum.glb }

@@ -1,0 +1,108 @@
+# AP1-Handler: Agent-Registrierung, Heartbeat, Abo der Live-Agentenliste
+# (doc/spec/90 §AP1.4).  Sicherheits-Minimum §AP1.2 Punkt 5:
+#   - Agent authentifiziert sich mit einem im Web-UI erzeugten Enrollment-Token
+#     (§AP1.9); ohne passendes, nicht widerrufenes Token wird JEDE Registrierung
+#     abgelehnt (fail closed).
+#   - Nur authentifizierte Nutzer dürfen die Agentenliste abonnieren.
+#   - Das Token wird NIE geloggt.
+
+- import: "sources/models/agent_exec.aiml"
+
+# Stufe 2 (spec/58): diese Handler waren Klassen, die die Dienste über
+# Globals erreichten.  Jetzt sind sie Instanzen der CosmosRuntime und ihr
+# `run` steht hier als Gruppen-Methode — Zugriff nur über die deklarierten
+# sees-Kanten.  KEIN Import aus dem Server: die Gruppen-Datei importiert
+# diese Datei (§1.1), umgekehrt gäbe es einen Zyklus.
+
+- groupmethods:
+    group: CosmosRuntime
+    instances:
+      - instance: agent_register
+        methods:
+          - def:
+              name: run
+              static_off: ["str_cmp"]
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, AgentRegister]
+                - decl: [ack, AgentAck]
+                - set: [ack.accepted, 0]
+                - if:
+                    condition: { neq: [{ call: [session.decode_rpc, rpc, req] }, 0] }
+                    then:
+                      # „decode failed" allein nennt die Ursache nicht.  Der
+                      # haeufigste Grund ist ein Agent, dessen Nachrichtenformat
+                      # aelter ist als das des Servers — dann ist die Antwort
+                      # „erneuere den Agenten", nicht „pruefe dein Netz"
+                      # (gemessen 2026-10-15 nach einem neuen Feld in
+                      # AgentRegister: der alte Agent lief in eine Dauerschleife).
+                      - set: [ack.reason, "Anmeldung unlesbar — der Agent ist vermutlich aelter als der Server.  Agenten erneuern."]
+                      - call: [log.warn, "[agent_reg] peer=${rpc.peer_id}: AgentRegister unlesbar (Agent zu alt?)"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, ack]
+                      - return: []
+                # §AP1.9: Token gegen den Store prüfen (nur Hash gespeichert, constant-time).
+                - if:
+                    condition: { neq: [{ call: [<.tokens.verify, req.agent_token] }, 1] }
+                    then:
+                      - set: [ack.reason, "ungültiges oder widerrufenes Agent-Token"]
+                      - call: [log.warn, "[agent_reg] refused peer=${rpc.peer_id}: invalid enrollment token"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, ack]
+                      - return: []
+                - if:
+                    condition: { eq: [req.agent_id.len, 0] }
+                    then:
+                      - set: [ack.reason, "empty agent_id"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, ack]
+                      - return: []
+                - decl: [is_new, i32, { call: [<.agents.upsert, req, rpc.peer_id, { call: [time.now] }] }]
+                - set: [ack.accepted, 1]
+                - call: [session.reply_rpc, rpc, "set_result", 0, ack]
+                - call: [log.info, "[agent_reg] ${req.agent_id} connected peer=${rpc.peer_id} new=${is_new}"]
+      - instance: agent_heartbeat
+        methods:
+          - def:
+              name: run
+              static_off: ["str_cmp"]
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, AgentBeat]
+                - decl: [ack, AgentAck]
+                - set: [ack.accepted, 0]
+                - if:
+                    condition: { neq: [{ call: [session.decode_rpc, rpc, req] }, 0] }
+                    then:
+                      - set: [ack.reason, "decode failed"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, ack]
+                      - return: []
+                # Der Heartbeat gilt nur für den Agenten, der an DIESER Verbindung hängt.
+                - decl: [bound, string, { call: [<.agents.agent_of_peer, rpc.peer_id] }]
+                - if:
+                    condition: { neq: [bound, req.agent_id] }
+                    then:
+                      - set: [ack.reason, "peer is not this agent"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, ack]
+                      - return: []
+                - call: [<.agents.heartbeat, req.agent_id, { call: [time.now] }]
+                # doc/spec/109: die mitgereiste Last uebernehmen.
+                - call: [<.agents.note_usage, req.agent_id, req.cpu_permille, req.rss_kb]
+                - set: [ack.accepted, 1]
+                - call: [session.reply_rpc, rpc, "set_result", 0, ack]
+      - instance: subscribe_agents
+        methods:
+          - def:
+              name: run
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, TokenReq]
+                - decl: [lst, AgentList]
+                - if:
+                    condition: { neq: [{ call: [session.decode_rpc, rpc, req] }, 0] }
+                    then: [{ call: [session.reply_rpc, rpc, "set_result", 0, lst] }, { return: [] }]
+                - decl: [req_pid, string, { call: [<.auth.pid_for_token, req.token] }]
+                - if:
+                    condition: { eq: [req_pid.len, 0] }
+                    then: [{ call: [session.reply_rpc, rpc, "set_result", 0, lst] }, { return: [] }]
+                # Abonnent registrieren (dedupe über peer_id), dann initiale Liste zurückgeben.
+                - decl: [fresh_sub, i32, { call: [<.agent_subs.add, rpc.peer_id] }]
+                - set: [lst, { call: [<.agents.snapshot] }]
+                - call: [session.reply_rpc, rpc, "set_result", 0, lst]

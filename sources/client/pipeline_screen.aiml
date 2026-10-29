@@ -1,0 +1,274 @@
+# PipelineScreen (doc/spec/98) — Quelle ansehen, prüfen, starten.
+# Offline-Stand: src_box ist ein textbox (nur lesbar); Bearbeiten + Hervorhebung
+# brauchen erst ui.text_area mit Gutter und Farb-Läufen (98 F98-2/F98-3), die
+# Prüfung einen RPC (F98-7).  Was hier steht, läuft ohne Server.
+- import: "sources/client/prefabs.aiml"
+- import: "sources/client/net/pipeline_state.aiml"
+- import: "sources/client/net/live_state.aiml"
+- import: "sources/shared/dashboard.aiml"
+- import: "sources/shared/demo_pipeline.aiml"
+
+- class:
+    name: PipelineScreen
+    members:
+      # Kollaborateur; von der Gruppe verdrahtet (spec/58 §5.1).
+      - [pipelines, ref<PipelineState>]
+      # doc/spec/106 G4: die Jobs kommen aus DEMSELBEN Schnappschuss wie alles
+      # andere (F104-1) — der Editor holt sie nicht ueber einen eigenen Kanal.
+      - [live,      ref<LiveState>]
+      - [dash,      Dashboard]
+      - [demo,      DemoPipeline]
+      - [sel_job,   i32]
+      # Der eben gespeicherte Job.  Seine ZEILE kennt der Editor erst mit dem
+      # naechsten Schnappschuss — bis dahin steht hier die Kennung, sonst waere
+      # nach dem Speichern nichts gewaehlt und „Starten" taete nichts.
+      - [want_id,   string]
+      # „zurueck zum Job" — gemerkt, nicht selbst ausgefuehrt: den Bereich
+      # wechselt der Wirt (wie bei allen anderen Wuenschen auch).
+      - [want_job,  i32]
+      # doc/spec/106 §106.6a: der Reiter „Param." fuehrt zu den Parametern
+      # DIESES Jobs — gemerkt, nicht ausgefuehrt.
+      - [want_prm,  i32]
+      - [shown_seq, i32]
+      - [initialized, i32]
+      - [scene,       prefab_instance]
+      - [is_visible,  i32]
+    methods:
+      - def:
+          name: init
+          body:
+            - if: { condition: { eq: [<.initialized, 1] }, then: [{ return }] }
+            - set: [<.scene, { call: [engine.instantiate, "PipelineScene"] }]
+            - call: [<.scene.set_pos, 0.0, 0.0]
+            - call: [<.scene.set_z, 0]
+            # -1 = NICHTS gewaehlt.  Mit 0 zeigte „ausgewaehlt" auf den ersten
+            # Job, obwohl niemand etwas angeklickt hatte — und Speichern haette
+            # diesen fremden Job ueberschrieben.
+            - set: [<.sel_job, -1]
+            - call: [<.scene.set_text, "intvl_inpt", "0"]
+            - call: [<.scene.set_text, "src_box", ""]
+            - call: [<.scene.set_text, "diag_box", "noch nicht geprüft"]
+            - call: [<.scene.set_text, "status_lbl", "Kein Job gewählt — unter „Jobs“ einen öffnen oder „Neuer Job“ anlegen"]
+            - call: [<.highlight]
+            - set: [<.initialized, 1]
+            - set: [<.is_visible, 1]
+
+      # demo_source: ein Beispiel nach aiml spec/62, damit die Ansicht offline etwas zeigt.
+      - def:
+          name: selected_id
+          access: public
+          static_off: ["str_cmp"]
+          return: { type: string, lifetime: producer }
+          body:
+            - if: { condition: { peq: [<.live, null] }, then: [{ return: "" }] }
+            - if: { condition: { eq: [{ call: [<.live.has] }, 0] }, then: [{ return: "" }] }
+            - if: { condition: { lt: [<.sel_job, 0] }, then: [{ return: "" }] }
+            - if: { condition: { ge: [<.sel_job, <.live.view.job_defs.len] }, then: [{ return: "" }] }
+            - decl: [jrec, JobDef, { at: [<.live.view.job_defs, <.sel_job] }]
+            - return: jrec.job_id
+
+      # select_job: Auswahl von AUSSEN — ein Klick in der Jobliste (doc/spec/107
+      # F107-7).  „Job geoeffnet" muss heissen, dass seine Quelle im Editor
+      # steht; sonst waere nur eine Marke verschoben.
+      # new_job: ein LEERES Formular (doc/spec/107 F107-9).  Ohne Auswahl leitet
+      # der Server die Id aus dem Namen ab, es entsteht also ein neuer Job statt
+      # eines ueberschriebenen.
+      - def:
+          name: new_job
+          access: public
+          body:
+            - if: { condition: { eq: [<.initialized, 0] }, then: [{ call: [<.init] }] }
+            - set: [<.sel_job, -1]
+            - call: [<.scene.set_text, "title_lbl", "Neuer Job"]
+            - call: [<.scene.set_text, "name_input", ""]
+            - call: [<.scene.set_text, "intvl_inpt", "0"]
+            - call: [<.scene.set_text, "src_box", { call: [<.demo.source] }]
+            - call: [<.scene.set_text, "diag_box", "noch nicht geprüft"]
+            - call: [<.scene.set_text, "status_lbl", "Name vergeben, Quelle anpassen, dann Speichern"]
+            - call: [<.highlight]
+            - set: [<.shown_seq, -1]
+
+      - def:
+          name: select_job
+          access: public
+          args: [[idx, i32]]
+          body:
+            - if: { condition: { lt: [idx, 0] }, then: [{ return }] }
+            - if: { condition: { eq: [<.initialized, 0] }, then: [{ call: [<.init] }] }
+            - set: [<.sel_job, idx]
+            - if: { condition: { peq: [<.live, null] }, then: [{ return }] }
+            - if: { condition: { eq: [{ call: [<.live.has] }, 0] }, then: [{ return }] }
+            - if: { condition: { ge: [idx, <.live.view.job_defs.len] }, then: [{ return }] }
+            - decl: [job, JobDef, { at: [<.live.view.job_defs, idx] }]
+            - call: [<.scene.set_text, "title_lbl", "Job"]
+            - call: [<.scene.set_text, "name_input", job.name]
+            - call: [<.scene.set_text, "intvl_inpt", "${job.interval_s}"]
+            - if: { condition: { gt: [job.source.len, 0] }, then: [{ call: [<.scene.set_text, "src_box", job.source] }] }
+            - call: [<.highlight]
+            - call: [<.scene.set_text, "status_lbl", "${job.name} geladen — bearbeiten, speichern, starten"]
+            # Die Liste im Editor neu zeichnen lassen (Marke steht jetzt anders).
+            - set: [<.shown_seq, -1]
+
+      - def:
+          name: highlight
+          body:
+            - decl: [src, string, { call: [<.scene.text_value, "src_box"] }]
+            - decl: [toks, list<i32>, { call: [yaml.tokens, src] }]
+            - decl: [runs, list<i32>]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, toks.len] }
+                body:
+                  - call: [runs.push, { at: [toks, idx] }]
+                  - call: [runs.push, { at: [toks, { +: [idx, 1] }] }]
+                  - call: [runs.push, { call: [<.color_for, { at: [toks, { +: [idx, 2] }] }] }]
+                  - set: [idx, { +: [idx, 3] }]
+            - call: [<.scene.set_color_runs, "src_box", runs]
+
+      - def:
+          name: color_for
+          args: [[kind, i32]]
+          return: i32
+          body:
+            - if: { condition: { eq: [kind, YamlTok.comment] },   then: [{ return: 0x6A7B8CFF }] }
+            - if: { condition: { eq: [kind, YamlTok.key] },       then: [{ return: 0x8FC7FFFF }] }
+            - if: { condition: { eq: [kind, YamlTok.string] },    then: [{ return: 0xC8E6A0FF }] }
+            - if: { condition: { eq: [kind, YamlTok.number] },    then: [{ return: 0xE6B98AFF }] }
+            - if: { condition: { eq: [kind, YamlTok.keyword] },   then: [{ return: 0xE09AD8FF }] }
+            - if: { condition: { eq: [kind, YamlTok.punct] },     then: [{ return: 0x7A8899FF }] }
+            - if: { condition: { eq: [kind, YamlTok.anchor] },    then: [{ return: 0xE0C97AFF }] }
+            - if: { condition: { eq: [kind, YamlTok.tag] },       then: [{ return: 0xE0C97AFF }] }
+            - if: { condition: { eq: [kind, YamlTok.directive] }, then: [{ return: 0xE09AD8FF }] }
+            - return: 0xDDE6F0FF
+
+      - def:
+          name: set_visible
+          args: [[vis, i32]]
+          body:
+            - if: { condition: { eq: [<.initialized, 0] }, then: [{ return }] }
+            - call: [<.scene.set_visible, vis]
+            - set: [<.is_visible, vis]
+
+      # take_job: der Wunsch „zurueck zum Job", EINMAL abholbar — dasselbe
+      # Muster wie `take_src`/`take_back` in der Lauf-Ansicht.
+      - def:
+          name: take_prm
+          access: public
+          return: i32
+          body:
+            - decl: [val, i32, <.want_prm]
+            - set: [<.want_prm, 0]
+            - return: val
+
+      - def:
+          name: take_job
+          access: public
+          return: i32
+          body:
+            - decl: [val, i32, <.want_job]
+            - set: [<.want_job, 0]
+            - return: val
+
+      - def:
+          name: render
+          body:
+            - if: { condition: { eq: [<.initialized, 0] }, then: [{ call: [<.init] }] }
+            - if: { condition: { eq: [<.is_visible, 0] }, then: [{ return }] }
+            - call: [io.write, io.stderr, "R1\n"]
+            - call: [<.highlight]
+            - call: [io.write, io.stderr, "R2\n"]
+            # doc/spec/106 G4: Jobliste und Historie aus dem Schnappschuss,
+            # nur bei NEUEM Stand neu formatieren.
+            - if:
+                condition: { '&&': [{ pneq: [<.live, null] }, { gt: [{ call: [<.live.has] }, 0] }] }
+                then:
+                  - decl: [snap_seq, i32, { call: [<.live.revision] }]
+                  - if:
+                      condition: { neq: [snap_seq, <.shown_seq] }
+                      then:
+                        - set: [<.shown_seq, snap_seq]
+                        # Den eben gespeicherten Job jetzt auswaehlen: mit diesem
+                        # Schnappschuss steht er zum ersten Mal in der Liste.
+                        - if:
+                            condition: { gt: [<.want_id.len, 0] }
+                            then:
+                              - decl: [wix, i32, 0]
+                              - while:
+                                  condition: { lt: [wix, <.live.view.job_defs.len] }
+                                  body:
+                                    - decl: [wjob, JobDef, { at: [<.live.view.job_defs, wix] }]
+                                    - if:
+                                        condition: { eq: [wjob.job_id, <.want_id] }
+                                        then:
+                                          - set: [<.sel_job, wix]
+                                          - set: [<.want_id, ""]
+                                          - call: [<.scene.set_text, "title_lbl", "Job"]
+                                          - call: [<.scene.set_text, "status_lbl", "${wjob.name} gespeichert — „Starten“ führt ihn aus"]
+                                    - set: [wix, { +: [wix, 1] }]
+                        # Die Laeufe stehen seit F107-10 in der Lauf-Ansicht
+                        # (eigene Spalte, anklickbar) — hier waeren sie eine
+                        # zweite, kleinere Kopie derselben Liste.
+
+            - call: [io.write, io.stderr, "R3\n"]
+            # Beispiel einsetzen: dieselbe Quelle, die ein NEUER Job bekommt.
+            # Der Name bleibt, nur der Rumpf wird ersetzt — wer die Form sucht,
+            # soll sie einsetzen koennen statt sie abzuschreiben.
+            - if:
+                condition: { eq: [{ call: [<.scene.child_clicked, "sample_btn"] }, 1] }
+                then:
+                  - call: [<.scene.set_text, "src_box", { call: [<.demo.source] }]
+                  - call: [<.scene.set_text, "status_lbl", "Beispiel eingesetzt — pruefen, dann speichern."]
+                  - call: [<.scene.set_text, "diag_box", "noch nicht geprueft"]
+
+            # Speichern: Name + Quelle als JOB (F106-5 — der Server prueft).
+            - if:
+                condition: { eq: [{ call: [<.scene.child_clicked, "save_btn"] }, 1] }
+                then:
+                  - decl: [job_name, string, { call: [<.scene.text_value, "name_input"] }]
+                  - decl: [src_txt, string, { call: [<.scene.text_value, "src_box"] }]
+                  - decl: [ivl_txt, string, { call: [<.scene.text_value, "intvl_inpt"] }]
+                  - decl: [ivl_sec, i32, { call: [ivl_txt.parse_i32] }]
+                  - if: { condition: { lt: [ivl_sec, 0] }, then: [{ set: [ivl_sec, 0] }] }
+                  # Ein GEWAEHLTER Job wird geaendert, nicht geklont: ohne seine
+                  # Id leitet der Server die Id aus dem Namen ab, ein Umbenennen
+                  # haette also einen zweiten Job erzeugt und den alten gelassen.
+                  - decl: [save_id, string, { call: [<.selected_id] }]
+                  - decl: [sack, JobAck, { call: [<.pipelines.save_job, save_id, job_name, src_txt, ivl_sec] }]
+                  - call: [<.scene.set_text, "status_lbl", sack.message]
+                  # Nach dem Speichern IST dieser Job der gewaehlte — sonst
+                  # muesste man ihn erst in der Liste suchen, um ihn zu starten.
+                  - if:
+                      condition: { '&&': [{ eq: [sack.accepted, 1] }, { gt: [sack.job_id.len, 0] }] }
+                      then:
+                        - set: [<.want_id, sack.job_id]
+                        - set: [<.shown_seq, -1]
+
+            - if:
+                condition: { eq: [{ call: [<.scene.child_clicked, "tab_prmx"] }, 1] }
+                then: [{ set: [<.want_prm, 1] }]
+            - if:
+                condition: { eq: [{ call: [<.scene.child_clicked, "tojob_btn"] }, 1] }
+                then: [{ set: [<.want_job, 1] }]
+            - if:
+                condition: { eq: [{ call: [<.scene.child_clicked, "check_btn"] }, 1] }
+                then:
+                  - call: [<.scene.set_text, "diag_box", "Prüfung läuft serverseitig (spec/98 F98-7) — noch nicht angebunden."]
+                  - call: [<.scene.set_text, "status_lbl", "check_pipeline RPC fehlt noch"]
+            - if:
+                condition: { eq: [{ call: [<.scene.child_clicked, "start_btn"] }, 1] }
+                then:
+                  # doc/spec/96 §96.13: der Quelltext geht zum Server, der
+                  # prueft und faltet aus.  Der Client behauptet nichts.
+                  # doc/spec/106 G4: gestartet wird ein JOB, nicht eine Quelle.
+                  # Ein Lauf ohne Job waere Geschichte, die niemandem gehoert.
+                  - decl: [job_id, string, { call: [<.selected_id] }]
+                  - if:
+                      condition: { eq: [job_id.len, 0] }
+                      then:
+                        - call: [<.scene.set_text, "status_lbl", "Erst einen Job waehlen oder speichern"]
+                      else:
+                        - decl: [rack, JobAck, { call: [<.pipelines.start_job, job_id] }]
+                        - if:
+                            condition: { eq: [rack.accepted, 1] }
+                            then: [{ call: [<.scene.set_text, "status_lbl", rack.message] }]
+                            else: [{ call: [<.scene.set_text, "status_lbl", "abgelehnt — ${rack.message}"] }]

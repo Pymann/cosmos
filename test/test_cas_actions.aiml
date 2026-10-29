@@ -1,0 +1,316 @@
+# Abnahme C6 (doc/spec/92 §92.7): ActionCache.
+#
+# Der Kern ist nicht „Treffer funktioniert", sondern dass es **keinen falschen
+# Treffer** gibt.  Ein Cache, der zu oft trifft, liefert stillschweigend das
+# Ergebnis eines anderen Schritts — das ist schlimmer als gar kein Cache.
+# Darum wird jede der fünf Schlüsselkomponenten einzeln variiert und muss
+# einzeln einen Fehlschlag erzeugen.
+
+- import: "sources/server/action_cache.aiml"
+
+- def:
+    name: expect
+    args: [[what, string], [cond, i32]]
+    return: i32
+    body:
+      - if:
+          condition: { eq: [cond, 1] }
+          then: [{ print: ["  ok   ${what}"] }, { return: 0 }]
+      - print: ["  FAIL ${what}"]
+      - return: 1
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      - decl: [cache, ptr<ActionCache>, { new: ActionCache }]
+      - decl: [db_dir, path, "cas_action_test"]
+      - call: [cache.init, db_dir]
+
+      # Ein Schritt: Shell-Zeile, Eingabebaum, cwd, zwei Env-Variablen.
+      - decl: [env_a, list<string>]
+      - call: [env_a.push, "LANG=C"]
+      - call: [env_a.push, "CI=1"]
+
+      # Der Schluessel wird aus dem SCHRITT gebildet (§92.2): mit Klasse und
+      # Sondenausgabe waeren es sieben Einzelargumente, und aimls Grenze von
+      # fuenf (spec/49 §15) hat da recht.  Jede Variante unten setzt ALLE
+      # Felder ausdruecklich — so steht neben jeder Pruefung, was sich
+      # unterscheidet, statt es aus einer Kopie erraten zu muessen.
+      - decl: [base_step, StepDef]
+      - set: [base_step.kind, "shell"]
+      - set: [base_step.input_tree, "tree-input-1"]
+      - set: [base_step.cwd, "/w"]
+      - set: [base_step.env, env_a]
+      - set: [base_step.cache_class, 2]
+      - set: [base_step.resolve_out, ""]
+      - decl: [sd_key_one, StepDef]
+      - set: [sd_key_one.kind, "shell"]
+      - set: [sd_key_one.input_tree, "tree-input-1"]
+      - set: [sd_key_one.cwd, "/w"]
+      - set: [sd_key_one.env, env_a]
+      - set: [sd_key_one.cache_class, 2]
+      - set: [sd_key_one.resolve_out, ""]
+      - decl: [key_one, string, { call: [cache.key, sd_key_one, "bodyhash-aaa"] }]
+
+      # ── Schlüssel ist 64 Hex und stabil ──────────────────────────────────
+      - set: [fails, { +: [fails, { call: [expect, "C6 Schluessel ist 64 Hex", { eq: [key_one.len, 64] }] }] }]
+      - decl: [sd_key_again, StepDef]
+      - set: [sd_key_again.kind, "shell"]
+      - set: [sd_key_again.input_tree, "tree-input-1"]
+      - set: [sd_key_again.cwd, "/w"]
+      - set: [sd_key_again.env, env_a]
+      - set: [sd_key_again.cache_class, 2]
+      - set: [sd_key_again.resolve_out, ""]
+      - decl: [key_again, string, { call: [cache.key, sd_key_again, "bodyhash-aaa"] }]
+      - set: [fails, { +: [fails, { call: [expect, "C6 gleicher Schritt → gleicher Schluessel", { eq: [key_one, key_again] }] }] }]
+
+      # Env-Reihenfolge darf den Schlüssel NICHT ändern (kanonisch sortiert).
+      - decl: [env_rev, list<string>]
+      - call: [env_rev.push, "CI=1"]
+      - call: [env_rev.push, "LANG=C"]
+      - decl: [sd_key_rev, StepDef]
+      - set: [sd_key_rev.kind, "shell"]
+      - set: [sd_key_rev.input_tree, "tree-input-1"]
+      - set: [sd_key_rev.cwd, "/w"]
+      - set: [sd_key_rev.env, env_rev]
+      - set: [sd_key_rev.cache_class, 2]
+      - set: [sd_key_rev.resolve_out, ""]
+      - decl: [key_rev, string, { call: [cache.key, sd_key_rev, "bodyhash-aaa"] }]
+      - set: [fails, { +: [fails, { call: [expect, "C6 Env-Reihenfolge egal (kanonisch)", { eq: [key_one, key_rev] }] }] }]
+
+      # ── Klasse und Sondenausgabe gehoeren in den Schluessel (§92.2) ──────
+      # Derselbe Rumpf als `pure` und als `resolved` sind NICHT derselbe
+      # Schritt: der eine behauptet, nur von gehashten Eingaben zu haengen, der
+      # andere laesst eine Sonde entscheiden.  Ein gemeinsamer Eintrag liesse
+      # die eine Behauptung das Ergebnis der anderen erben.
+      - decl: [sd_k_cls, StepDef]
+      - set: [sd_k_cls.kind, "shell"]
+      - set: [sd_k_cls.input_tree, "tree-input-1"]
+      - set: [sd_k_cls.cwd, "/w"]
+      - set: [sd_k_cls.env, env_a]
+      - set: [sd_k_cls.cache_class, 1]
+      - set: [sd_k_cls.resolve_out, ""]
+      - decl: [k_cls, string, { call: [cache.key, sd_k_cls, "bodyhash-aaa"] }]
+      - set: [fails, { +: [fails, { call: [expect, "Klasse gehoert zum Schluessel", { neq: [key_one, k_cls] }] }] }]
+      # Die Sondenausgabe ist die aufgeloeste Adresse — bewegt sich der Branch,
+      # bewegt sich der Schluessel.
+      - decl: [sd_k_res1, StepDef]
+      - set: [sd_k_res1.kind, "shell"]
+      - set: [sd_k_res1.input_tree, "tree-input-1"]
+      - set: [sd_k_res1.cwd, "/w"]
+      - set: [sd_k_res1.env, env_a]
+      - set: [sd_k_res1.cache_class, 1]
+      - set: [sd_k_res1.resolve_out, "commit-aaa"]
+      - decl: [k_res1, string, { call: [cache.key, sd_k_res1, "bodyhash-aaa"] }]
+      - decl: [sd_k_res2, StepDef]
+      - set: [sd_k_res2.kind, "shell"]
+      - set: [sd_k_res2.input_tree, "tree-input-1"]
+      - set: [sd_k_res2.cwd, "/w"]
+      - set: [sd_k_res2.env, env_a]
+      - set: [sd_k_res2.cache_class, 1]
+      - set: [sd_k_res2.resolve_out, "commit-bbb"]
+      - decl: [k_res2, string, { call: [cache.key, sd_k_res2, "bodyhash-aaa"] }]
+      - set: [fails, { +: [fails, { call: [expect, "Sondenausgabe gehoert zum Schluessel", { neq: [k_res1, k_res2] }] }] }]
+
+      # ── Fehlschlag, solange nichts aufgezeichnet ist ─────────────────────
+      - decl: [miss, ActionResult, { call: [cache.lookup, key_one] }]
+      - set: [fails, { +: [fails, { call: [expect, "C6 leerer Cache → Fehlschlag", { eq: [miss.output_tree.len, 0] }] }] }]
+
+      # ── Aufzeichnen und wiederfinden ────────────────────────────────────
+      - decl: [rec_one, ActionResult]
+      - set: [rec_one.output_tree, "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"]
+      - set: [rec_one.exit_code, 0]
+      - set: [rec_one.out_bytes, 1234]
+      - set: [rec_one.err_bytes, 7]
+      - call: [cache.record, key_one, rec_one]
+
+      - decl: [hit, ActionResult, { call: [cache.lookup, key_one] }]
+      - set: [fails, { +: [fails, { call: [expect, "C6 zweiter Lauf trifft", { eq: [hit.output_tree, rec_one.output_tree] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "C6 exit_code erhalten", { eq: [hit.exit_code, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "C6 out_bytes erhalten", { eq: [hit.out_bytes, 1234] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "C6 err_bytes erhalten", { eq: [hit.err_bytes, 7] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "C6 created_ms gesetzt", { gt: [hit.created_ms, 0] }] }] }]
+
+      # ── Kein falscher Treffer: jede Komponente einzeln variiert ──────────
+      - decl: [sd_k_kind, StepDef]
+      - set: [sd_k_kind.kind, "aiml"]
+      - set: [sd_k_kind.input_tree, "tree-input-1"]
+      - set: [sd_k_kind.cwd, "/w"]
+      - set: [sd_k_kind.env, env_a]
+      - set: [sd_k_kind.cache_class, 2]
+      - set: [sd_k_kind.resolve_out, ""]
+      - decl: [k_kind, string, { call: [cache.key, sd_k_kind, "bodyhash-aaa"] }]
+      - decl: [m_kind, ActionResult, { call: [cache.lookup, k_kind] }]
+      - set: [fails, { +: [fails, { call: [expect, "C6 anderes kind → Fehlschlag", { eq: [m_kind.output_tree.len, 0] }] }] }]
+
+      - decl: [sd_k_body, StepDef]
+      - set: [sd_k_body.kind, "shell"]
+      - set: [sd_k_body.input_tree, "tree-input-1"]
+      - set: [sd_k_body.cwd, "/w"]
+      - set: [sd_k_body.env, env_a]
+      - set: [sd_k_body.cache_class, 2]
+      - set: [sd_k_body.resolve_out, ""]
+      - decl: [k_body, string, { call: [cache.key, sd_k_body, "bodyhash-bbb"] }]
+      - decl: [m_body, ActionResult, { call: [cache.lookup, k_body] }]
+      - set: [fails, { +: [fails, { call: [expect, "C6 anderer body_hash → Fehlschlag", { eq: [m_body.output_tree.len, 0] }] }] }]
+
+      - decl: [sd_k_input, StepDef]
+      - set: [sd_k_input.kind, "shell"]
+      - set: [sd_k_input.input_tree, "tree-input-2"]
+      - set: [sd_k_input.cwd, "/w"]
+      - set: [sd_k_input.env, env_a]
+      - set: [sd_k_input.cache_class, 2]
+      - set: [sd_k_input.resolve_out, ""]
+      - decl: [k_input, string, { call: [cache.key, sd_k_input, "bodyhash-aaa"] }]
+      - decl: [m_input, ActionResult, { call: [cache.lookup, k_input] }]
+      - set: [fails, { +: [fails, { call: [expect, "C6 anderer input_tree → Fehlschlag", { eq: [m_input.output_tree.len, 0] }] }] }]
+
+      - decl: [sd_k_cwd, StepDef]
+      - set: [sd_k_cwd.kind, "shell"]
+      - set: [sd_k_cwd.input_tree, "tree-input-1"]
+      - set: [sd_k_cwd.cwd, "/other"]
+      - set: [sd_k_cwd.env, env_a]
+      - set: [sd_k_cwd.cache_class, 2]
+      - set: [sd_k_cwd.resolve_out, ""]
+      - decl: [k_cwd, string, { call: [cache.key, sd_k_cwd, "bodyhash-aaa"] }]
+      - decl: [m_cwd, ActionResult, { call: [cache.lookup, k_cwd] }]
+      - set: [fails, { +: [fails, { call: [expect, "C6 anderes cwd → Fehlschlag", { eq: [m_cwd.output_tree.len, 0] }] }] }]
+
+      - decl: [env_b, list<string>]
+      - call: [env_b.push, "LANG=C"]
+      - call: [env_b.push, "CI=2"]
+      - decl: [sd_k_env, StepDef]
+      - set: [sd_k_env.kind, "shell"]
+      - set: [sd_k_env.input_tree, "tree-input-1"]
+      - set: [sd_k_env.cwd, "/w"]
+      - set: [sd_k_env.env, env_b]
+      - set: [sd_k_env.cache_class, 2]
+      - set: [sd_k_env.resolve_out, ""]
+      - decl: [k_env, string, { call: [cache.key, sd_k_env, "bodyhash-aaa"] }]
+      - decl: [m_env, ActionResult, { call: [cache.lookup, k_env] }]
+      - set: [fails, { +: [fails, { call: [expect, "C6 anderer Env-Wert → Fehlschlag", { eq: [m_env.output_tree.len, 0] }] }] }]
+
+      # Eine Variable WEGLASSEN ist auch eine Änderung — sonst träfe ein
+      # Schritt ohne CI denselben Schlüssel wie einer mit CI=1.
+      - decl: [env_short, list<string>]
+      - call: [env_short.push, "LANG=C"]
+      - decl: [sd_k_short, StepDef]
+      - set: [sd_k_short.kind, "shell"]
+      - set: [sd_k_short.input_tree, "tree-input-1"]
+      - set: [sd_k_short.cwd, "/w"]
+      - set: [sd_k_short.env, env_short]
+      - set: [sd_k_short.cache_class, 2]
+      - set: [sd_k_short.resolve_out, ""]
+      - decl: [k_short, string, { call: [cache.key, sd_k_short, "bodyhash-aaa"] }]
+      - decl: [m_short, ActionResult, { call: [cache.lookup, k_short] }]
+      - set: [fails, { +: [fails, { call: [expect, "C6 fehlende Env-Variable → Fehlschlag", { eq: [m_short.output_tree.len, 0] }] }] }]
+
+      # ── Fehlschlag wird ebenfalls gespeichert ───────────────────────────
+      # Sonst läuft ein reproduzierbar kaputter Schritt endlos neu (§92.2).
+      - decl: [bad, ActionResult]
+      - set: [bad.output_tree, "0000000000000000000000000000000000000000000000000000000000000000"]
+      - set: [bad.exit_code, 3]
+      - call: [cache.record, k_body, bad]
+      - decl: [bad_hit, ActionResult, { call: [cache.lookup, k_body] }]
+      - set: [fails, { +: [fails, { call: [expect, "C6 exit_code!=0 wird getroffen", { eq: [bad_hit.exit_code, 3] }] }] }]
+
+      # ── Trennung der Schlüssel-Felder ───────────────────────────────────
+      # Ohne Trennzeichen zwischen den Teilen wären ("ab","c") und ("a","bc")
+      # derselbe Schlüssel — ein falscher Treffer durch Verkettung.
+      - decl: [sd_k_split1, StepDef]
+      - set: [sd_k_split1.kind, "shell"]
+      - set: [sd_k_split1.input_tree, "c"]
+      - set: [sd_k_split1.cwd, "/w"]
+      - set: [sd_k_split1.env, env_a]
+      - set: [sd_k_split1.cache_class, 2]
+      - set: [sd_k_split1.resolve_out, ""]
+      - decl: [k_split1, string, { call: [cache.key, sd_k_split1, "ab"] }]
+      - decl: [sd_k_split2, StepDef]
+      - set: [sd_k_split2.kind, "shell"]
+      - set: [sd_k_split2.input_tree, "bc"]
+      - set: [sd_k_split2.cwd, "/w"]
+      - set: [sd_k_split2.env, env_a]
+      - set: [sd_k_split2.cache_class, 2]
+      - set: [sd_k_split2.resolve_out, ""]
+      - decl: [k_split2, string, { call: [cache.key, sd_k_split2, "a"] }]
+      - set: [fails, { +: [fails, { call: [expect, "C6 Felder sind getrennt (keine Verkettungs-Kollision)", { neq: [k_split1, k_split2] }] }] }]
+
+      # ── Befund 4: Trennzeichen sind im Inhalt erlaubt ───────────────────
+      # EINE Variable, deren Wert ein \n enthaelt, gegen ZWEI Variablen.
+      # Mit \n-Verkettung ergaben beide dasselbe Material und denselben
+      # Schluessel — zwei verschiedene Umgebungen, ein Cache-Eintrag.
+      - decl: [env_one, list<string>]
+      - call: [env_one.push, "A=x\nB=y"]
+      - decl: [env_two, list<string>]
+      - call: [env_two.push, "A=x"]
+      - call: [env_two.push, "B=y"]
+      - decl: [sd_k_one, StepDef]
+      - set: [sd_k_one.kind, "shell"]
+      - set: [sd_k_one.input_tree, "tree"]
+      - set: [sd_k_one.cwd, "/w"]
+      - set: [sd_k_one.env, env_one]
+      - set: [sd_k_one.cache_class, 2]
+      - set: [sd_k_one.resolve_out, ""]
+      - decl: [k_one, string, { call: [cache.key, sd_k_one, "bh"] }]
+      - decl: [sd_k_two, StepDef]
+      - set: [sd_k_two.kind, "shell"]
+      - set: [sd_k_two.input_tree, "tree"]
+      - set: [sd_k_two.cwd, "/w"]
+      - set: [sd_k_two.env, env_two]
+      - set: [sd_k_two.cache_class, 2]
+      - set: [sd_k_two.resolve_out, ""]
+      - decl: [k_two, string, { call: [cache.key, sd_k_two, "bh"] }]
+      - set: [fails, { +: [fails, { call: [expect, "C6 eine Variable mit \\n != zwei Variablen", { neq: [k_one, k_two] }] }] }]
+
+      # Auch die Laengencodierung selbst darf nicht zu taeuschen sein: ein Wert,
+      # der wie eine Laengenangabe aussieht.
+      - decl: [env_trick, list<string>]
+      - call: [env_trick.push, "A=3:xyz"]
+      - decl: [env_trick2, list<string>]
+      - call: [env_trick2.push, "A=3"]
+      - call: [env_trick2.push, "xyz"]
+      - decl: [sd_k_trick, StepDef]
+      - set: [sd_k_trick.kind, "shell"]
+      - set: [sd_k_trick.input_tree, "tree"]
+      - set: [sd_k_trick.cwd, "/w"]
+      - set: [sd_k_trick.env, env_trick]
+      - set: [sd_k_trick.cache_class, 2]
+      - set: [sd_k_trick.resolve_out, ""]
+      - decl: [k_trick, string, { call: [cache.key, sd_k_trick, "bh"] }]
+      - decl: [sd_k_trick2, StepDef]
+      - set: [sd_k_trick2.kind, "shell"]
+      - set: [sd_k_trick2.input_tree, "tree"]
+      - set: [sd_k_trick2.cwd, "/w"]
+      - set: [sd_k_trick2.env, env_trick2]
+      - set: [sd_k_trick2.cache_class, 2]
+      - set: [sd_k_trick2.resolve_out, ""]
+      - decl: [k_trick2, string, { call: [cache.key, sd_k_trick2, "bh"] }]
+      - set: [fails, { +: [fails, { call: [expect, "C6 Wert, der wie eine Laengenangabe aussieht", { neq: [k_trick, k_trick2] }] }] }]
+
+      # Ein \n in einem der SKALAREN Felder darf ebenso nicht verschmelzen.
+      - decl: [sd_k_nl_a, StepDef]
+      - set: [sd_k_nl_a.kind, "shell\nx"]
+      - set: [sd_k_nl_a.input_tree, "tree"]
+      - set: [sd_k_nl_a.cwd, "/w"]
+      - set: [sd_k_nl_a.env, env_a]
+      - set: [sd_k_nl_a.cache_class, 2]
+      - set: [sd_k_nl_a.resolve_out, ""]
+      - decl: [k_nl_a, string, { call: [cache.key, sd_k_nl_a, "bh"] }]
+      - decl: [sd_k_nl_b, StepDef]
+      - set: [sd_k_nl_b.kind, "shell"]
+      - set: [sd_k_nl_b.input_tree, "tree"]
+      - set: [sd_k_nl_b.cwd, "/w"]
+      - set: [sd_k_nl_b.env, env_a]
+      - set: [sd_k_nl_b.cache_class, 2]
+      - set: [sd_k_nl_b.resolve_out, ""]
+      - decl: [k_nl_b, string, { call: [cache.key, sd_k_nl_b, "x\nbh"] }]
+      - set: [fails, { +: [fails, { call: [expect, "C6 \\n in einem Feld verschmilzt nicht", { neq: [k_nl_a, k_nl_b] }] }] }]
+
+      - if:
+          condition: { neq: [fails, 0] }
+          then: [{ print: ["test_cas_actions FAIL (${fails})"] }, { return: 1 }]
+      - print: ["test_cas_actions PASS"]
+      - return: 0

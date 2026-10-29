@@ -1,0 +1,24 @@
+# Auth-Request-Models — Client-→-Server-Payloads für die drei Auth-RPCs.
+# Genau am 3-Models-Cap (siehe spec/49 §14).
+#
+# password landet im Klartext im Wire-Format — wir setzen Server-side
+# sofort hash_password() drauf, persistieren NIE plain.  TLS auf der
+# Transport-Ebene schützt das Wire selbst.
+
+- model:
+    name: LoginReq
+    fields:
+      - [email,    string]
+      - [password, string]
+
+- model:
+    name: RegisterReq
+    fields:
+      - [email,        string]
+      - [password,     string]
+      - [display_name, string]
+
+- model:
+    name: TokenReq
+    fields:
+      - [token, string]

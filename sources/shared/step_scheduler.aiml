@@ -1,0 +1,478 @@
+# StepScheduler — wer bekommt welchen Schritt (doc/spec/101).
+#
+# Bewusst OHNE Netz und ohne Ausfuehrung, wie StepRunner: er sagt, WAS als
+# naechstes zugeteilt werden darf, und haelt fest, was daraus wurde.  Dadurch
+# ist die Zuteilung ohne Agenten pruefbar — und genau die Faelle, die im Betrieb
+# weh tun (abgelaufenes Lehen, uebersprungene Abhaengige), sind die, die man
+# sonst nie testet.
+#
+# Ein Lehen ist eine FRIST, kein Eigentum (F101-3): laeuft sie ab, ist der
+# Schritt wieder frei.  Dass er dabei zweimal laufen kann, ist der Preis von
+# "mindestens einmal" (F101-5) — fuer `pure`/`resolved` harmlos, fuer `opaque`
+# nicht, und das steht in der Spec statt in einer Ueberraschung.
+
+- import: "sources/shared/pipeline_run.aiml"
+- import: "sources/shared/claim_who.aiml"
+- import: "sources/shared/pipe_status.aiml"
+
+- model:
+    name: StepClaim
+    fields:
+      - [found,       i32]
+      - [stage_id,    string]
+      - [stage_name,  string]
+      - [bindings,    string]
+      - [lease_until, i64]
+      - [attempt,     i32]
+      - [timeout_ms,   i32]
+
+- class:
+    name: StepScheduler
+    methods:
+      # ── claim: der naechste zuteilbare Schritt ───────────────────────────
+      # "Zuteilbar" heisst: `pending` UND alle frueheren Stufen DERSELBEN Lane
+      # sind fertig (F101-9).  Der Server sortiert nicht, er teilt zu, was
+      # bereit ist.
+      - def:
+          name: claim
+          access: public
+          static_off: ["str_cmp"]
+          # ref<>, weil claim den Lauf AENDERT: ein Wert-Argument aenderte eine
+          # Kopie, und der Aufrufer saehe nie ein Lehen.
+          args: [[run, ref<PipelineRun>], [now_ms, i64], [lease_ms, i64], [who, ClaimWho]]
+          return: { type: StepClaim, lifetime: producer }
+          body:
+            - decl: [out, StepClaim]
+            - set: [out.found, 0]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, run.stages.len] }
+                body:
+                  - decl: [entry, PipelineStage, { at: [run.stages, idx] }]
+                  - if:
+                      condition: { eq: [{ call: [<.takeable, run, idx, who] }, 1] }
+                      then:
+                        - set: [out.found, 1]
+                        - set: [out.stage_id, entry.stage_id]
+                        - set: [out.stage_name, entry.name]
+                        - set: [out.bindings, entry.bindings]
+                        - set: [out.lease_until, { +: [now_ms, lease_ms] }]
+                        - set: [entry.status, { call: [pipe_status_name, PipeStatus.running] }]
+                        - set: [entry.agent, who.agent_id]
+                        - set: [entry.lease_until, out.lease_until]
+                        # F101-7: JEDE Zuteilung ist ein neuer Versuch — auch die
+                        # an denselben Agenten.  Nur so wird eine verspaetete
+                        # Nachricht unterscheidbar.
+                        - set: [entry.attempt, { +: [entry.attempt, 1] }]
+                        - set: [out.attempt, entry.attempt]
+                        - set: [out.timeout_ms, entry.timeout_ms]
+                        - idx: [run.stages, idx, entry]
+                        - return: out
+                  - set: [idx, { +: [idx, 1] }]
+            - return: out
+
+      # ── image_there: GIBT es die Umgebung schon? (aiml F62-129) ─────────
+      #
+      # Nennt eine Stufe als `image:` ein Ziel, das eine ANDERE Stufe dieses
+      # Laufs erst schreibt, dann ist das eine Kante im Graphen — hergeleitet,
+      # nicht hingeschrieben.  Ohne sie liefe die zweite Stufe gegen das Abbild
+      # des VORIGEN Laufs: gruen, falsch, und beim naechsten Mal wieder anders.
+      - def:
+          name: image_there
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run, ref<PipelineRun>], [want, string]]
+          return: i32
+          body:
+            - if: { condition: { eq: [want.len, 0] }, then: [{ return: 1 }] }
+            - decl: [pix, i32, 0]
+            - while:
+                condition: { lt: [pix, run.pushes.len] }
+                body:
+                  - decl: [tgt, PushTarget, { at: [run.pushes, pix] }]
+                  - set: [pix, { +: [pix, 1] }]
+                  # Dieses Abbild wird in DIESEM Lauf hergestellt: warten, bis
+                  # es wirklich geschrieben ist.
+                  - if:
+                      condition: { eq: [tgt.target, want] }
+                      then:
+                        - if: { condition: { eq: [tgt.status, "done"] }, then: [{ return: 1 }] }
+                        - return: 0
+            - return: 1
+
+      # ── image_ok: laeuft der Agent in der richtigen UMGEBUNG? ────────────
+      # `image:` sagt, WORIN die Stufe laeuft (aiml spec/62 §18).  Ohne Angabe
+      # ist jede Umgebung recht — mit Angabe genau die genannte.  Das ist die
+      # Trennung, die ein Etikett nicht leisten darf: die Umgebung ist
+      # Schluesselmaterial (aiml F62-67), das Etikett nie (F62-49).
+      - def:
+          name: image_ok
+          access: public
+          static_off: ["str_cmp"]
+          args: [[required, string], [agent_image, string]]
+          return: i32
+          body:
+            - if: { condition: { eq: [required.len, 0] }, then: [{ return: 1 }] }
+            - if: { condition: { eq: [required, agent_image] }, then: [{ return: 1 }] }
+            - return: 0
+
+      # ── label_ok: darf DIESER Agent den Schritt nehmen? (F103-3) ─────────
+      # Ohne Etikett darf jeder.  Mit Etikett nur, wer es fuehrt — sonst liefe
+      # ein arm64-Schritt auf x86_64 und schluege erst beim Uebersetzen fehl,
+      # also an der Stelle, an der niemand mehr an die Zuteilung denkt.
+      - def:
+          name: label_ok
+          access: public
+          static_off: ["str_cmp"]
+          args: [[required, string], [agent_labels, string], [agent_id, string]]
+          return: i32
+          body:
+            - if: { condition: { eq: [required.len, 0] }, then: [{ return: 1 }] }
+            # Die KENNUNG des Agenten ist immer auch ein Etikett.  Sonst gaebe es
+            # keinen Weg, einen Schritt auf GENAU einem Rechner laufen zu lassen
+            # — man muesste diesem erst ein eigenes Etikett verpassen, obwohl er
+            # schon einen eindeutigen Namen traegt (User 2026-10-15).
+            - if: { condition: { eq: [required, agent_id] }, then: [{ return: 1 }] }
+            - decl: [parts, list<string>, { call: [agent_labels.split, ","] }]
+            - decl: [lix, i32, 0]
+            - while:
+                condition: { lt: [lix, parts.len] }
+                body:
+                  - decl: [raw_lab, string, { at: [parts, lix] }]
+                  - decl: [one, string, { call: [raw_lab.trim] }]
+                  - if: { condition: { eq: [one, required] }, then: [{ return: 1 }] }
+                  - set: [lix, { +: [lix, 1] }]
+            - return: 0
+
+      # ── report: was aus einem zugeteilten Schritt wurde ──────────────────
+      - def:
+          name: report
+          access: public
+          static_off: ["str_cmp"]
+          # `agent_id` gehoert dazu: ohne ihn durfte JEDER Agent den Schritt
+          # eines anderen abschliessen, und ein Ergebnis aus einer kurzen
+          # Stoerung war nicht vom Ergebnis eines Fremden zu unterscheiden.
+          args: [[run, ref<PipelineRun>], [stage_id, string], [success, i32], [agent_id, string], [attempt, i32]]
+          return: i32
+          body:
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, run.stages.len] }
+                body:
+                  - decl: [entry, PipelineStage, { at: [run.stages, idx] }]
+                  - if:
+                      condition: { eq: [entry.stage_id, stage_id] }
+                      then:
+                        # Wer darf diesen Schritt abschliessen?
+                        #
+                        #   laeuft + gehoert ihm   → ja
+                        #   wartet + war zuletzt seiner und niemand hat ihn neu
+                        #                            genommen → JA
+                        #   sonst                  → nein (F101-3)
+                        #
+                        # Der mittlere Fall ist die kurze Stoerung: das Lehen
+                        # lief ab, der Schritt wurde freigegeben, aber die Arbeit
+                        # IST getan.  Ihn zu verwerfen hiess, ihn ein zweites Mal
+                        # auszufuehren — bei `echo` unsichtbar, bei einem Deploy
+                        # ein zweites Deploy (Analyse 2026-10-15).
+                        # F101-7: die VERSUCHSNUMMER entscheidet, wenn sie da
+                        # ist.  Ein Bericht aus Versuch 1 ist nach einer
+                        # Neuzuteilung (Versuch 2) ungueltig, selbst wenn
+                        # derselbe Agent beide gefahren hat — vorher war das
+                        # nicht unterscheidbar.
+                        - if:
+                            condition: { '&&': [{ gt: [attempt, 0] }, { neq: [attempt, entry.attempt] }] }
+                            then: [{ return: -1 }]
+                        - decl: [same_agent, i32, 0]
+                        - if: { condition: { '||': [{ eq: [agent_id.len, 0] }, { eq: [entry.agent, agent_id] }] }, then: [{ set: [same_agent, 1] }] }
+                        - if: { condition: { eq: [same_agent, 0] }, then: [{ return: -1 }] }
+                        - if:
+                            condition: { '&&': [{ neq: [{ call: [pipe_status_of, entry.status] }, PipeStatus.running] }, { neq: [{ call: [pipe_status_of, entry.status] }, PipeStatus.pending] }] }
+                            then: [{ return: -1 }]
+                        - if:
+                            condition: { eq: [success, 1] }
+                            then: [{ set: [entry.status, { call: [pipe_status_name, PipeStatus.done] }] }]
+                            else: [{ set: [entry.status, { call: [pipe_status_name, PipeStatus.failed] }] }]
+                        - set: [entry.lease_until, 0]
+                        - idx: [run.stages, idx, entry]
+                        - return: 0
+                  - set: [idx, { +: [idx, 1] }]
+            - return: -2
+
+      # ── run_outcome: ist der LAUF fertig, und wie? ───────────────────────
+      # doc/spec/106 G5: der Scheduler erkennt den Abschluss, weil er als
+      # Einziger weiss, ob noch etwas offen ist.  "" = laeuft noch.
+      #
+      # Ein einziger Fehlschlag macht den LAUF zum Fehlschlag, auch wenn andere
+      # Lanes durchliefen: wer „done" neben einer gescheiterten Lane liest,
+      # haelt einen kaputten Stand fuer gut (F62-117 auf Lauf-Ebene).
+      - def:
+          name: run_outcome
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run, ref<PipelineRun>]]
+          return: { type: string, lifetime: producer }
+          body:
+            - if: { condition: { eq: [run.stages.len, 0] }, then: [{ return: "" }] }
+            - decl: [any_failed, i32, 0]
+            - decl: [odx, i32, 0]
+            - while:
+                condition: { lt: [odx, run.stages.len] }
+                body:
+                  - decl: [entry, PipelineStage, { at: [run.stages, odx] }]
+                  - decl: [est, i32, { call: [pipe_status_of, entry.status] }]
+                  # running heisst: der Lauf ist nicht fertig.
+                  - if: { condition: { eq: [est, PipeStatus.running] }, then: [{ return: "" }] }
+                  # Und `paused` auch: an einer Stufe mit Haltepunkt steht der
+                  # Lauf, er ist nicht zu Ende (aiml F62-44).  Ohne diesen Zweig
+                  # faellt eine angehaltene Stufe durch alle Faelle und der Lauf
+                  # heisst `done`, waehrend der Bediener noch davorsteht.
+                  - if: { condition: { eq: [est, PipeStatus.paused] }, then: [{ return: "" }] }
+                  # pending heisst das auch — AUSSER die Stufe ist uebersprungen
+                  # (F101-10): sie wartet auf einen Vorgaenger, der gescheitert
+                  # ist, und wird nie zugeteilt.  Sie zaehlt als Fehlschlag,
+                  # nicht als offene Arbeit.
+                  - if:
+                      condition: { eq: [est, PipeStatus.pending] }
+                      then:
+                        - if: { condition: { eq: [{ call: [<.lane_dead, run, odx] }, 0] }, then: [{ return: "" }] }
+                        - set: [any_failed, 1]
+                  - if: { condition: { eq: [est, PipeStatus.failed] }, then: [{ set: [any_failed, 1] }] }
+                  - set: [odx, { +: [odx, 1] }]
+            - if: { condition: { eq: [any_failed, 1] }, then: [{ return: { call: [pipe_status_name, PipeStatus.failed] } }] }
+            - return: { call: [pipe_status_name, PipeStatus.done] }
+
+      # ── phase: in WELCHEM Zustand ist dieser Lauf? ──────────────────────
+      # „running" ab dem Start zu behaupten war falsch: ein Lauf, den kein Agent
+      # angenommen hat, LAEUFT nicht — er wartet.  Der Unterschied ist der
+      # wichtigste des ganzen Bildschirms: wartet er, fehlt ein Agent (oder ein
+      # passendes Etikett); laeuft er, ist alles in Ordnung und man wartet nur
+      # (User 2026-10-15).
+      #
+      #   running  — mindestens ein Schritt ist bei einem Agenten
+      #   queued   — alle offenen Schritte warten noch auf einen Agenten
+      #   done/failed — nichts ist mehr offen (run_outcome)
+      - def:
+          name: phase
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run, ref<PipelineRun>]]
+          return: { type: string, lifetime: producer }
+          body:
+            - if: { condition: { eq: [run.stages.len, 0] }, then: [{ return: { call: [pipe_status_name, PipeStatus.queued] } }] }
+            - decl: [busy, i32, 0]
+            - decl: [waiting, i32, 0]
+            - decl: [held, i32, 0]
+            - decl: [pdx, i32, 0]
+            - while:
+                condition: { lt: [pdx, run.stages.len] }
+                body:
+                  - decl: [entry, PipelineStage, { at: [run.stages, pdx] }]
+                  - if: { condition: { eq: [{ call: [pipe_status_of, entry.status] }, PipeStatus.running] }, then: [{ set: [busy, 1] }] }
+                  - if: { condition: { eq: [{ call: [pipe_status_of, entry.status] }, PipeStatus.pending] }, then: [{ set: [waiting, 1] }] }
+                  - if: { condition: { eq: [{ call: [pipe_status_of, entry.status] }, PipeStatus.paused] }, then: [{ set: [held, 1] }] }
+                  - set: [pdx, { +: [pdx, 1] }]
+            - if: { condition: { eq: [busy, 1] }, then: [{ return: { call: [pipe_status_name, PipeStatus.running] } }] }
+            # Ein Haltepunkt schlaegt das Warten: wer vor einer Flagge steht,
+            # wartet nicht auf einen Agenten, sondern auf einen Menschen — und
+            # das ist der Unterschied, den die Oberflaeche zeigen muss.
+            - if: { condition: { eq: [held, 1] }, then: [{ return: { call: [pipe_status_name, PipeStatus.paused] } }] }
+            - if: { condition: { eq: [waiting, 1] }, then: [{ return: { call: [pipe_status_name, PipeStatus.queued] } }] }
+            - decl: [out, string, { call: [<.run_outcome, run] }]
+            - if: { condition: { eq: [out.len, 0] }, then: [{ return: { call: [pipe_status_name, PipeStatus.queued] } }] }
+            - return: out
+
+      # ── expire: abgelaufene Lehen zurueckgeben ───────────────────────────
+      # Ohne das bleibt ein Schritt fuer immer bei einem Agenten, der nie
+      # wiederkommt — genau das passiert bei einem Neustart des Knotens.
+      - def:
+          name: expire
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run, ref<PipelineRun>], [now_ms, i64]]
+          return: i32
+          body:
+            - decl: [freed, i32, 0]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, run.stages.len] }
+                body:
+                  - decl: [entry, PipelineStage, { at: [run.stages, idx] }]
+                  - if:
+                      condition: { '&&': [{ eq: [{ call: [pipe_status_of, entry.status] }, PipeStatus.running] }, { '&&': [{ gt: [entry.lease_until, 0] }, { gt: [now_ms, entry.lease_until] }] }] }
+                      then:
+                        - set: [entry.status, { call: [pipe_status_name, PipeStatus.pending] }]
+                        # `agent` bleibt stehen: er nennt den LETZTEN Halter.
+                        # Meldet genau der sich doch noch (kurze Stoerung), ist
+                        # sein Ergebnis gueltig, solange ihn niemand neu nahm.
+                        - set: [entry.lease_until, 0]
+                        - idx: [run.stages, idx, entry]
+                        - set: [freed, { +: [freed, 1] }]
+                  - set: [idx, { +: [idx, 1] }]
+            - return: freed
+
+      # ── release: ein Agent gibt einen Schritt ZURUECK ───────────────────
+      # Der Gegenspieler von `expire`: dort laeuft eine Frist ab, hier SAGT der
+      # Agent, dass er den Schritt verloren hat (Rechner neu gestartet, Prozess
+      # mit dem Stromausfall weg).  Das ist der bessere Weg, denn er weiss es
+      # sofort — auf das Lehen zu warten hiesse, eine halbe Minute zu schweigen,
+      # obwohl die Antwort schon vorliegt (User 2026-10-15).
+      #
+      # Nur der HALTER darf zurueckgeben; sonst koennte ein fremder (oder
+      # zurueckgekehrter, laengst ersetzter) Agent laufende Arbeit abraeumen.
+      - def:
+          name: release
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run, ref<PipelineRun>], [stage_id, string], [agent_id, string], [attempt, i32]]
+          return: i32
+          body:
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, run.stages.len] }
+                body:
+                  - decl: [entry, PipelineStage, { at: [run.stages, idx] }]
+                  - if:
+                      condition: { eq: [entry.stage_id, stage_id] }
+                      then:
+                        - if: { condition: { '&&': [{ gt: [attempt, 0] }, { neq: [attempt, entry.attempt] }] }, then: [{ return: -1 }] }
+                        - if: { condition: { neq: [entry.agent, agent_id] }, then: [{ return: -1 }] }
+                        # Schon abgeschlossen?  Dann ist nichts verloren — der
+                        # Bericht war vor dem Absturz da, und „freigeben" wuerde
+                        # ein gutes Ergebnis zu einer Wiederholung machen.
+                        - if: { condition: { '&&': [{ neq: [{ call: [pipe_status_of, entry.status] }, PipeStatus.running] }, { neq: [{ call: [pipe_status_of, entry.status] }, PipeStatus.pending] }] }, then: [{ return: 1 }] }
+                        - set: [entry.status, { call: [pipe_status_name, PipeStatus.pending] }]
+                        - set: [entry.lease_until, 0]
+                        - idx: [run.stages, idx, entry]
+                        - return: 0
+                  - set: [idx, { +: [idx, 1] }]
+            - return: -2
+
+      # ── lane_ready: sind die frueheren Stufen dieser Lane fertig? ────────
+      # ── takeable: darf DIESER Agent DIESE Stufe nehmen? ─────────────────
+      #
+      # Die eine Frage, die `claim` stellt — und die alle anderen auch stellen
+      # muessen.  Vorher fragte die Kapazitaetsschleife kuerzer („wartet eine
+      # Stufe mit passendem Etikett?") und bekam darum eine andere Antwort als
+      # die Zuteilung: der Controller startete im Minutentakt Container fuer
+      # Arbeit, die niemand nehmen DURFTE, raeumte sie als untaetig ab und
+      # verlor dabei den Container, in dem das Arbeitsverzeichnis des Laufs lag
+      # (gemessen 21.10.2026, doc/spec/110 F110-84).  Zwei Fragen an denselben
+      # Zustand driften auseinander; eine nicht.
+      - def:
+          name: takeable
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run, ref<PipelineRun>], [idx, i32], [who, ClaimWho]]
+          return: i32
+          body:
+            - if: { condition: { ge: [idx, run.stages.len] }, then: [{ return: 0 }] }
+            - decl: [entry, PipelineStage, { at: [run.stages, idx] }]
+            - if: { condition: { neq: [{ call: [pipe_status_of, entry.status] }, PipeStatus.pending] }, then: [{ return: 0 }] }
+            - if: { condition: { eq: [{ call: [<.label_ok, entry.required_label, who.labels, who.agent_id] }, 0] }, then: [{ return: 0 }] }
+            - if: { condition: { eq: [{ call: [<.image_ok, entry.image, who.image] }, 0] }, then: [{ return: 0 }] }
+            - if: { condition: { eq: [{ call: [<.image_there, run, entry.image] }, 0] }, then: [{ return: 0 }] }
+            - if: { condition: { eq: [{ call: [<.lane_ready, run, idx] }, 0] }, then: [{ return: 0 }] }
+            - return: 1
+
+      # ready_here: dasselbe OHNE die Umgebungsfrage — fuer die Kapazitaet, die
+      # ja gerade herausfinden will, WELCHE Umgebung zu starten waere.
+      - def:
+          name: ready_here
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run, ref<PipelineRun>], [idx, i32], [labels, string]]
+          return: i32
+          body:
+            - if: { condition: { ge: [idx, run.stages.len] }, then: [{ return: 0 }] }
+            - decl: [entry, PipelineStage, { at: [run.stages, idx] }]
+            - if: { condition: { neq: [{ call: [pipe_status_of, entry.status] }, PipeStatus.pending] }, then: [{ return: 0 }] }
+            - if: { condition: { eq: [{ call: [<.label_ok, entry.required_label, labels, ""] }, 0] }, then: [{ return: 0 }] }
+            - if: { condition: { eq: [{ call: [<.image_there, run, entry.image] }, 0] }, then: [{ return: 0 }] }
+            - if: { condition: { eq: [{ call: [<.lane_ready, run, idx] }, 0] }, then: [{ return: 0 }] }
+            - return: 1
+
+      # ── lane_dead: ist diese Stufe UEBERSPRUNGEN? (F101-10) ─────────────
+      #
+      # Eine frueher Stufe derselben Lane ist gescheitert: dann wird diese nie
+      # zugeteilt — „uebersprungen heisst: nie zugeteilt, kein Ausgang".  Sie
+      # bleibt trotzdem `pending` stehen, und genau das machte den Lauf
+      # unendlich: `run_outcome` sah etwas Offenes, der Lauf wurde nie `failed`,
+      # und seit F110-85 haette er damit auch den Container fuer immer gehalten.
+      # Wartend und nie dran ist nicht dasselbe wie wartend.
+      # bare_name: "bauen [arch=x86_64]" → "bauen".  Die Lane steht im Namen,
+      # weil ein Lauf alle Lanes in EINER Liste fuehrt; wer eine Stufe nennt,
+      # meint den Namen ohne sie.
+      - def:
+          name: bare_name
+          access: public
+          static_off: ["str_cmp"]
+          args: [[full, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [cut, i32, { call: [full.index_of, " ["] }]
+            - if: { condition: { gt: [cut, 0] }, then: [{ return: { call: [full.substr, 0, cut] } }] }
+            - return: full
+
+      - def:
+          name: lane_dead
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run, ref<PipelineRun>], [upto, i32]]
+          return: i32
+          body:
+            - if: { condition: { ge: [upto, run.stages.len] }, then: [{ return: 0 }] }
+            - decl: [target, PipelineStage, { at: [run.stages, upto] }]
+            - decl: [ddx, i32, 0]
+            - while:
+                condition: { lt: [ddx, upto] }
+                body:
+                  - decl: [before, PipelineStage, { at: [run.stages, ddx] }]
+                  - set: [ddx, { +: [ddx, 1] }]
+                  - if:
+                      condition: { '&&': [{ eq: [before.bindings, target.bindings] },
+                                          { eq: [{ call: [pipe_status_of, before.status] }, PipeStatus.failed] }] }
+                      then: [{ return: 1 }]
+            - return: 0
+
+      - def:
+          name: lane_ready
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run, ref<PipelineRun>], [upto, i32]]
+          return: i32
+          body:
+            - decl: [target, PipelineStage, { at: [run.stages, upto] }]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, upto] }
+                body:
+                  - decl: [entry, PipelineStage, { at: [run.stages, idx] }]
+                  - if:
+                      condition: { eq: [entry.bindings, target.bindings] }
+                      then:
+                        # Eine frueher Stufe derselben Lane, die nicht fertig
+                        # ist, haelt diese zurueck.  Ist sie GESCHEITERT, bleibt
+                        # der Nachfolger liegen — uebersprungen heisst nie
+                        # zugeteilt (F101-10).
+                        - if: { condition: { neq: [{ call: [pipe_status_of, entry.status] }, PipeStatus.done] }, then: [{ return: 0 }] }
+                  - set: [idx, { +: [idx, 1] }]
+            - return: 1
+
+      # ── offene Arbeit: wie viele Schritte warten noch? ───────────────────
+      - def:
+          name: pending_count
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run, ref<PipelineRun>]]
+          return: i32
+          body:
+            - decl: [count, i32, 0]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, run.stages.len] }
+                body:
+                  - decl: [entry, PipelineStage, { at: [run.stages, idx] }]
+                  - if: { condition: { eq: [{ call: [pipe_status_of, entry.status] }, PipeStatus.pending] }, then: [{ set: [count, { +: [count, 1] }] }] }
+                  - set: [idx, { +: [idx, 1] }]
+            - return: count

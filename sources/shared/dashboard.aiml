@@ -1,0 +1,249 @@
+# Dashboard — die drei Fragen des Hauptbildschirms (doc/spec/106 §106.2).
+#
+# Rechnen, nicht zeichnen — wie MatrixView und LiveTable.  Dadurch ist die
+# Uebersicht ohne Fenster pruefbar, und das ist der Teil, der falsch sein kann:
+# „was laeuft gerade" ist eine Aussage ueber Daten, keine ueber Pixel.
+#
+# Gelesen wird ausschliesslich aus EINEM Schnappschuss (doc/spec/104 F104-1).
+
+- import: "sources/shared/cluster_view.aiml"
+- import: "sources/models/agent_list.aiml"
+- import: "sources/models/agent_proto.aiml"   # AgentStatus
+- import: "sources/shared/presence.aiml"
+
+- class:
+    name: Dashboard
+    members:
+      - [pres, Presence]
+    methods:
+      # ── Frage 1: Was laeuft gerade? ─────────────────────────────────────
+      # Je laufendem Schritt: Job, Nummer, Stufe und der AGENT (F106-3).
+      - def:
+          name: running
+          access: public
+          static_off: ["str_cmp"]
+          args: [[view, ref<ClusterView>], [now_ms, i64]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [out, string, ""]
+            - decl: [count, i32, 0]
+            - decl: [rix, i32, 0]
+            - while:
+                condition: { lt: [rix, view.pipelines.len] }
+                body:
+                  - decl: [run, PipelineRun, { at: [view.pipelines, rix] }]
+                  - decl: [six, i32, 0]
+                  - while:
+                      condition: { lt: [six, run.stages.len] }
+                      body:
+                        - decl: [stg, PipelineStage, { at: [run.stages, six] }]
+                        - if:
+                            condition: { eq: [stg.status, "running"] }
+                            then:
+                              - decl: [who, string, "(noch nicht zugeteilt)"]
+                              - if: { condition: { gt: [stg.agent.len, 0] }, then: [{ set: [who, stg.agent] }] }
+                              - decl: [label, string, run.pipeline_name]
+                              - if: { condition: { gt: [run.build_number, 0] }, then: [{ set: [label, "${run.pipeline_name} #${run.build_number}"] }] }
+                              - decl: [age, string, ""]
+                              - if:
+                                  condition: { gt: [run.started_ms, 0] }
+                                  then:
+                                    - decl: [span, string, { call: [<.pres.ago, run.started_ms, now_ms] }]
+                                    - set: [age, "  seit ${span}"]
+                              - set: [out, "${out}${label}  ${stg.name}  auf ${who}${age}\n"]
+                              - set: [count, { +: [count, 1] }]
+                        - set: [six, { +: [six, 1] }]
+                  - set: [rix, { +: [rix, 1] }]
+            # Wartende Laeufe gehoeren DAZU.  Ein Lauf, den kein Agent genommen
+            # hat, taucht sonst nirgends auf — und der Leser sieht „Nichts laeuft
+            # gerade", waehrend sein Job seit Minuten haengt.  Mit dem Etikett,
+            # denn das ist fast immer der Grund (doc/spec/103 F103-3a).
+            - decl: [wix, i32, 0]
+            - while:
+                condition: { lt: [wix, view.pipelines.len] }
+                body:
+                  - decl: [wrun, PipelineRun, { at: [view.pipelines, wix] }]
+                  - if:
+                      condition: { eq: [wrun.status, "queued"] }
+                      then:
+                        - decl: [wlabel, string, wrun.pipeline_name]
+                        - if: { condition: { gt: [wrun.build_number, 0] }, then: [{ set: [wlabel, "${wrun.pipeline_name} #${wrun.build_number}"] }] }
+                        - decl: [need, string, ""]
+                        - decl: [wsix, i32, 0]
+                        - while:
+                            condition: { lt: [wsix, wrun.stages.len] }
+                            body:
+                              - decl: [wstg, PipelineStage, { at: [wrun.stages, wsix] }]
+                              - if: { condition: { '&&': [{ eq: [wstg.status, "pending"] }, { '&&': [{ eq: [need.len, 0] }, { gt: [wstg.required_label.len, 0] }] }] }, then: [{ set: [need, wstg.required_label] }] }
+                              - set: [wsix, { +: [wsix, 1] }]
+                        - if:
+                            condition: { gt: [need.len, 0] }
+                            then: [{ set: [out, "${out}${wlabel}  wartet auf einen Agenten mit „${need}“\n"] }]
+                            else: [{ set: [out, "${out}${wlabel}  wartet auf einen freien Agenten\n"] }]
+                        - set: [count, { +: [count, 1] }]
+                  - set: [wix, { +: [wix, 1] }]
+            # F106-4: leerer Zustand ist eine Aussage, keine leere Flaeche.
+            - if: { condition: { eq: [count, 0] }, then: [{ return: "Nichts laeuft gerade." }] }
+            - return: out
+
+      # ── Frage 2: Was gibt es? ───────────────────────────────────────────
+      - def:
+          name: jobs
+          access: public
+          static_off: ["str_cmp"]
+          args: [[view, ref<ClusterView>]]
+          return: { type: string, lifetime: producer }
+          body:
+            - if: { condition: { eq: [view.job_defs.len, 0] }, then: [{ return: "Kein Job angelegt." }] }
+            - decl: [out, string, ""]
+            - decl: [jix, i32, 0]
+            - while:
+                condition: { lt: [jix, view.job_defs.len] }
+                body:
+                  - decl: [job, JobDef, { at: [view.job_defs, jix] }]
+                  - decl: [last, string, "noch nie gelaufen"]
+                  - if:
+                      condition: { gt: [job.last_status.len, 0] }
+                      then:
+                        - decl: [secs, i64, { /: [job.last_ms, 1000] }]
+                        - set: [last, "${job.last_status} in ${secs} s"]
+                  - decl: [mark, string, "  "]
+                  - if: { condition: { eq: [job.enabled, 0] }, then: [{ set: [mark, "(aus) "] }] }
+                  - set: [out, "${out}${mark}${job.name}\n   ${last}   ${job.runs_failed}/${job.runs_total} gescheitert\n"]
+                  - set: [jix, { +: [jix, 1] }]
+            - return: out
+
+      # ── Fusszeile: was laeuft GERADE? ──────────────────────────────────
+      # Eigene Methode, weil sie geprueft gehoert: die Fusszeile behauptete bis
+      # 2026-10-15 fest „kein Lauf aktiv" — der Wert war gar nicht angeschlossen,
+      # und wer unten nachsah, bekam immer dieselbe Antwort (User-Pruefauftrag).
+      - def:
+          name: footer_runs
+          access: public
+          static_off: ["str_cmp"]
+          args: [[view, ref<ClusterView>]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [busy, i32, 0]
+            - decl: [waiting, i32, 0]
+            - decl: [first, string, ""]
+            - decl: [fix, i32, 0]
+            - while:
+                condition: { lt: [fix, view.pipelines.len] }
+                body:
+                  - decl: [prun, PipelineRun, { at: [view.pipelines, fix] }]
+                  - if:
+                      condition: { eq: [prun.status, "running"] }
+                      then:
+                        - set: [busy, { +: [busy, 1] }]
+                        - if: { condition: { eq: [first.len, 0] }, then: [{ set: [first, prun.run_id] }] }
+                  # Wartend ist NICHT dasselbe wie laufend: „2 Laeufe aktiv" bei
+                  # zwei haengenden Laeufen verschweigt, dass niemand arbeitet.
+                  - if: { condition: { eq: [prun.status, "queued"] }, then: [{ set: [waiting, { +: [waiting, 1] }] }] }
+                  - set: [fix, { +: [fix, 1] }]
+            - if: { condition: { '&&': [{ eq: [busy, 0] }, { eq: [waiting, 0] }] }, then: [{ return: "kein Lauf aktiv" }] }
+            - if: { condition: { eq: [busy, 0] }, then: [{ return: "${waiting} wartend" }] }
+            - decl: [txt, string, "${busy} Läufe aktiv"]
+            - if: { condition: { eq: [busy, 1] }, then: [{ set: [txt, "${first} läuft"] }] }
+            - if: { condition: { gt: [waiting, 0] }, then: [{ set: [txt, "${txt}, ${waiting} wartend"] }] }
+            - return: txt
+
+      # ── Frage 3: Wer koennte arbeiten? ──────────────────────────────────
+      # F106-3: NIEMALS ohne Namen.  Eine Zahl sagt nicht, wer bereitsteht,
+      # wer haengt und wem eine Stoerung gehoert.
+      - def:
+          name: executors
+          access: public
+          static_off: ["str_cmp"]
+          # Aus der AGENTENLISTE, nicht aus dem Cluster-Schnappschuss: der wird
+          # nur bei Aenderung gepusht und altert im Leerlauf, waehrend die
+          # Agentenliste ihren eigenen, frischen Strom hat.  Zwei Quellen fuer
+          # dieselbe Frage widersprachen sich sichtbar — unten „0/1 verbunden",
+          # in der Zeile „vor 18 s" (gemeldet 2026-10-15).
+          args: [[lst, ref<AgentList>], [now_ms, i64]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [out, string, ""]
+            - decl: [count, i32, 0]
+            - if: { condition: { peq: [lst, null] }, then: [{ return: "Kein Agent verbunden." }] }
+            - decl: [nix, i32, 0]
+            - while:
+                condition: { lt: [nix, lst.agents.len] }
+                body:
+                  - decl: [row, AgentInfo, { at: [lst.agents, nix] }]
+                  # `online` kommt vom SERVER (F104-3).  Selbst zu rechnen hiess:
+                  # die eigene, alternde Kopie befragen — der Client erklaerte
+                  # lebendige Agenten fuer weg (2026-10-15).
+                  - decl: [mark, string, "o "]
+                  - decl: [said, string, "nicht verbunden"]
+                  - if:
+                      condition: { eq: [row.online, 1] }
+                      then:
+                        - set: [mark, "* "]
+                        - set: [said, "verbunden"]
+                      else:
+                        - if:
+                            condition: { eq: [row.status, AgentStatus.connected] }
+                            then: [{ set: [said, "weg seit ${{ call: [<.pres.ago, row.last_seen_ms, now_ms] }}"] }]
+                  - decl: [doing, string, "bereit"]
+                  - if: { condition: { gt: [row.current_run.len, 0] }, then: [{ set: [doing, row.current_run] }] }
+                  - decl: [able, i32, { call: [row.caps.index_of, "steps"] }]
+                  - if: { condition: { lt: [able, 0] }, then: [{ set: [doing, "veraltet"] }] }
+                  - set: [out, "${out}${mark}${row.agent_id}  ${said}  —  ${doing}\n"]
+                  - set: [count, { +: [count, 1] }]
+                  - set: [nix, { +: [nix, 1] }]
+            - if: { condition: { eq: [count, 0] }, then: [{ return: "Kein Agent verbunden." }] }
+            - return: out
+
+      # ── doc/spec/106 G3: die Laeufe EINES Jobs ──────────────────────────
+      # Gefiltert aus demselben Schnappschuss (die Laeufe tragen `job_id`) —
+      # kein zweiter Kanal, keine zweite Quelle (§104.0).
+      - def:
+          name: history
+          access: public
+          static_off: ["str_cmp"]
+          args: [[view, ref<ClusterView>], [job_id, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - if: { condition: { eq: [job_id.len, 0] }, then: [{ return: "Kein Job gewaehlt." }] }
+            - decl: [out, string, ""]
+            - decl: [count, i32, 0]
+            - decl: [hix, i32, 0]
+            - while:
+                condition: { lt: [hix, view.pipelines.len] }
+                body:
+                  - decl: [run, PipelineRun, { at: [view.pipelines, hix] }]
+                  - if:
+                      condition: { eq: [run.job_id, job_id] }
+                      then:
+                        - decl: [took, string, "laeuft"]
+                        - if:
+                            condition: { '&&': [{ gt: [run.ended_ms, 0] }, { gt: [run.started_ms, 0] }] }
+                            then:
+                              - decl: [secs, i64, { /: [{ -: [run.ended_ms, run.started_ms] }, 1000] }]
+                              - set: [took, "${secs} s"]
+                        - set: [out, "${out}#${run.build_number}  ${run.status}  ${took}\n"]
+                        - set: [count, { +: [count, 1] }]
+                  - set: [hix, { +: [hix, 1] }]
+            - if: { condition: { eq: [count, 0] }, then: [{ return: "Noch kein Lauf." }] }
+            - return: out
+
+      # running_count: wie viele Laeufe gerade ARBEITEN (doc/spec/109, Controller-Reiter).
+      # Wartende zaehlen NICHT mit — „2 Laeufe aktiv" bei zwei haengenden Laeufen
+      # verschweigt, dass niemand arbeitet (dieselbe Unterscheidung wie footer_runs).
+      - def:
+          name: running_count
+          access: public
+          static_off: ["str_cmp"]
+          args: [[view, ref<ClusterView>]]
+          return: i32
+          body:
+            - decl: [busy, i32, 0]
+            - decl: [rix, i32, 0]
+            - while:
+                condition: { lt: [rix, view.pipelines.len] }
+                body:
+                  - decl: [prun, PipelineRun, { at: [view.pipelines, rix] }]
+                  - if: { condition: { eq: [prun.status, "running"] }, then: [{ set: [busy, { +: [busy, 1] }] }] }
+                  - set: [rix, { +: [rix, 1] }]
+            - return: busy

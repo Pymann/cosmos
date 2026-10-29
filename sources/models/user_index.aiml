@@ -1,0 +1,17 @@
+# UserIndex — die Liste aller Konten, unter EINEM festen KV-Schluessel.
+#
+# Warum ein Index und nicht "alle Schluessel durchgehen": aiondb kann das nicht.  Range-Scans
+# ueber sortierte Schluessel sind ausdruecklich erst fuer aiondb2 vorgesehen (aiml spec/31
+# §11.2), es gibt also keinen Weg, ein KV aufzuzaehlen.  Ohne Index braeuchte eine
+# Verwaltungsansicht die E-Mail, die sie gerade sucht — womit sie keine Uebersicht mehr ist.
+#
+# EIGENES KV, wie `levels` und `token_meta`: das `users`-KV behaelt seinen
+# Schema-Fingerprint (doc/spec/108 F108-2).  Ein neues Feld an `User` haette jeden
+# bestehenden Blob unlesbar gemacht.
+#
+# Kosten: ein push je Registrierung, O(1).  Die Liste wird nur von der Verwaltung gelesen.
+
+- model:
+    name: UserIndex
+    fields:
+      - [emails, list<string>]

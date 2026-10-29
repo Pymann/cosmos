@@ -1,0 +1,169 @@
+# RPC-Handler der erklaerten Konfiguration und der API-Tokens (doc/spec/111).
+#
+#   config_plan   (CascReq → CascPlan)      nur Admin (Freigabe 1); aendert nichts
+#   config_apply  (CascReq → CascPlan)      nur Admin; fail closed (F100-5)
+#   config_read   (CascReq → CascReadResp)  nur Admin
+#   create_api_token  (ApiTokenReq → ApiTokenMade)  jedes Konto fuer sich
+#   list_api_tokens   (ApiTokenReq → ApiTokenList)  eigene; Admin: alle
+#   revoke_api_token  (ApiTokenReq → ApiTokenMade)  eigene; Admin: alle
+#
+# Warum Admin und keine eigene Rolle: wer die Rollen erklaeren darf, kann sich
+# jede Rolle geben — das ist Freigabe 1, und eine zweite Beschreibung daneben
+# waere eine zweite Wahrheit (F100-11).
+- import: "sources/models/api_token_reqs.aiml"
+- import: "sources/models/api_may.aiml"
+- import: "sources/models/casc_resp.aiml"
+- import: "sources/server/casc_reader.aiml"
+
+- groupmethods:
+    group: CosmosRuntime
+    instances:
+      - instance: config_plan
+        methods:
+          - def:
+              name: run
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, CascReq]
+                - decl: [out, CascPlan]
+                - if:
+                    condition: { neq: [{ call: [session.decode_rpc, rpc, req] }, 0] }
+                    then: [{ call: [out.errors.push, "unlesbare Anfrage"] }, { call: [session.reply_rpc, rpc, "set_result", 0, out] }, { return: [] }]
+                - decl: [why, string, { call: [<.auth.admin_gate, req.token] }]
+                - if:
+                    condition: { gt: [why.len, 0] }
+                    then: [{ call: [out.errors.push, why] }, { call: [session.reply_rpc, rpc, "set_result", 0, out] }, { return: [] }]
+                - decl: [doc, CascDoc, { call: [<.casc.doc_for, req] }]
+                - set: [out, { call: [<.casc.plan, doc] }]
+                - call: [session.reply_rpc, rpc, "set_result", 0, out]
+
+      - instance: config_apply
+        methods:
+          - def:
+              name: run
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, CascReq]
+                - decl: [out, CascPlan]
+                - if:
+                    condition: { neq: [{ call: [session.decode_rpc, rpc, req] }, 0] }
+                    then: [{ call: [out.errors.push, "unlesbare Anfrage"] }, { call: [session.reply_rpc, rpc, "set_result", 0, out] }, { return: [] }]
+                - decl: [why, string, { call: [<.auth.admin_gate, req.token] }]
+                - if:
+                    condition: { gt: [why.len, 0] }
+                    then: [{ call: [out.errors.push, why] }, { call: [session.reply_rpc, rpc, "set_result", 0, out] }, { return: [] }]
+                - decl: [doc, CascDoc, { call: [<.casc.doc_for, req] }]
+                - set: [out, { call: [<.casc.apply, doc] }]
+                - decl: [who, string, { call: [<.auth.email_for_token, req.token] }]
+                - call: [log.info, "[casc] apply durch ${who}: success=${out.success}, ${out.changes.len} Aenderung(en), ${out.errors.len} Fehler"]
+                - call: [session.reply_rpc, rpc, "set_result", 0, out]
+
+      - instance: config_read
+        methods:
+          - def:
+              name: run
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, CascReq]
+                - decl: [out, CascReadResp]
+                - if:
+                    condition: { neq: [{ call: [session.decode_rpc, rpc, req] }, 0] }
+                    then: [{ set: [out.message, "unlesbare Anfrage"] }, { call: [session.reply_rpc, rpc, "set_result", 0, out] }, { return: [] }]
+                - decl: [why, string, { call: [<.auth.admin_gate, req.token] }]
+                - if:
+                    condition: { gt: [why.len, 0] }
+                    then: [{ set: [out.message, why] }, { call: [session.reply_rpc, rpc, "set_result", 0, out] }, { return: [] }]
+                - set: [out.config, { call: [<.casc.current] }]
+                - set: [out.entries, { call: [<.casc.all_entries] }]
+                - set: [out.success, 1]
+                - set: [out.message, "ok"]
+                - call: [session.reply_rpc, rpc, "set_result", 0, out]
+
+      - instance: create_api_token
+        methods:
+          - def:
+              name: run
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, ApiTokenReq]
+                - decl: [out, ApiTokenMade]
+                - if:
+                    condition: { neq: [{ call: [session.decode_rpc, rpc, req] }, 0] }
+                    then: [{ set: [out.message, "unlesbare Anfrage"] }, { call: [session.reply_rpc, rpc, "set_result", 0, out] }, { return: [] }]
+                - decl: [eml, string, { call: [<.auth.email_for_token, req.token] }]
+                - if:
+                    condition: { eq: [eml.len, 0] }
+                    then: [{ set: [out.message, "nicht angemeldet"] }, { call: [session.reply_rpc, rpc, "set_result", 0, out] }, { return: [] }]
+                - set: [out, { call: [<.api_tokens.mint, eml, req.label] }]
+                - call: [log.info, "[api_token] ${out.token_id} fuer ${eml} ('${req.label}')"]
+                - call: [session.reply_rpc, rpc, "set_result", 0, out]
+
+      - instance: list_api_tokens
+        methods:
+          - def:
+              name: run
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, ApiTokenReq]
+                - decl: [out, ApiTokenList]
+                - if:
+                    condition: { neq: [{ call: [session.decode_rpc, rpc, req] }, 0] }
+                    then: [{ set: [out.message, "unlesbare Anfrage"] }, { call: [session.reply_rpc, rpc, "set_result", 0, out] }, { return: [] }]
+                - decl: [eml, string, { call: [<.auth.email_for_token, req.token] }]
+                - if:
+                    condition: { eq: [eml.len, 0] }
+                    then: [{ set: [out.message, "nicht angemeldet"] }, { call: [session.reply_rpc, rpc, "set_result", 0, out] }, { return: [] }]
+                - decl: [all, i32, 0]
+                - if: { condition: { eq: [{ call: [<.auth.clearance_for_email, eml] }, 1] }, then: [{ set: [all, 1] }] }
+                - set: [out.tokens, { call: [<.api_tokens.list_for, eml, all] }]
+                - set: [out.success, 1]
+                - set: [out.message, "ok"]
+                - call: [session.reply_rpc, rpc, "set_result", 0, out]
+
+      - instance: revoke_api_token
+        methods:
+          - def:
+              name: run
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, ApiTokenReq]
+                - decl: [out, ApiTokenMade]
+                - if:
+                    condition: { neq: [{ call: [session.decode_rpc, rpc, req] }, 0] }
+                    then: [{ set: [out.message, "unlesbare Anfrage"] }, { call: [session.reply_rpc, rpc, "set_result", 0, out] }, { return: [] }]
+                - decl: [eml, string, { call: [<.auth.email_for_token, req.token] }]
+                - if:
+                    condition: { eq: [eml.len, 0] }
+                    then: [{ set: [out.message, "nicht angemeldet"] }, { call: [session.reply_rpc, rpc, "set_result", 0, out] }, { return: [] }]
+                - decl: [any, i32, 0]
+                - if: { condition: { eq: [{ call: [<.auth.clearance_for_email, eml] }, 1] }, then: [{ set: [any, 1] }] }
+                - decl: [revoked, i32, { call: [<.api_tokens.revoke, eml, req.token_id, any] }]
+                - set: [out.token_id, req.token_id]
+                - if: { condition: { eq: [revoked, 1] }, then: [{ set: [out.success, 1] }, { set: [out.message, "widerrufen"] }] }
+                - if: { condition: { eq: [revoked, 0] }, then: [{ set: [out.message, "unbekanntes Token"] }] }
+                - if: { condition: { eq: [revoked, 2] }, then: [{ set: [out.message, "fremdes Token — nur Admins duerfen das"] }] }
+                - call: [session.reply_rpc, rpc, "set_result", 0, out]
+
+      - instance: may_call
+        methods:
+          - def:
+              name: run
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, ApiMayReq]
+                - decl: [out, ApiMayResp]
+                - if:
+                    condition: { neq: [{ call: [session.decode_rpc, rpc, req] }, 0] }
+                    then: [{ set: [out.message, "unlesbare Anfrage"] }, { call: [session.reply_rpc, rpc, "set_result", 0, out] }, { return: [] }]
+                # Dasselbe Gate wie beim echten Aufruf: email_for_token prueft die
+                # Rolle gegen `g_current_method` — fuer die Dauer der Frage ist das
+                # die erfragte RPC.
+                - decl: [asked_for, string, g_current_method]
+                - set: [g_current_method, req.method]
+                - decl: [eml, string, { call: [<.auth.email_for_token, req.token] }]
+                - set: [g_current_method, asked_for]
+                - if:
+                    condition: { gt: [eml.len, 0] }
+                    then: [{ set: [out.allowed, 1] }, { set: [out.message, "ok"] }]
+                    else: [{ set: [out.message, "keine Rolle erlaubt ${req.method}"] }]
+                - call: [session.reply_rpc, rpc, "set_result", 0, out]

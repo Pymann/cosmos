@@ -1,0 +1,20 @@
+# Anfrage fuer die Parameter eines Jobs (doc/spec/106 §106.6).
+#
+# Eigene Datei, weil `job_reqs.aiml` mit drei Typen voll ist (aiml spec/49
+# §14: hoechstens drei Typen je Datei).
+- import: "sources/shared/job_params.aiml"
+
+# doc/spec/106 §106.6 (F106-16): geschrieben wird per RPC, gelesen aus dem
+# Schnappschuss.  Die GANZE Liste reist, nicht einzelne Zeilen: so ist der
+# Zustand nach dem Schreiben derselbe wie in der Oberflaeche, und es gibt
+# keine halb angewandte Aenderung.
+- model:
+    name: SetJobParamsReq
+    fields:
+      - [token,  string]
+      - [job_id, string]
+      - [rows,   list<ParamRow>]
+      # doc/spec/101 §101.9 (F101-31): 0 ist normal, groesser ist frueher.
+      # Hier und nicht an `save_job`: die Seite, die ihn ZEIGT, setzt ihn —
+      # sonst schriebe der andere Knopf eine 0 darueber.
+      - [priority, i32]

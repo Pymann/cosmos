@@ -1,0 +1,198 @@
+# CasTrees — Verzeichnis-Bäume im CAS: aufnehmen, lesen, materialisieren
+# (doc/spec/92 §92.2/§92.5).
+#
+# Die Inhaltsadresse eines Baums ist sha256 seiner KANONISCHEN Serialisierung:
+#   Einträge byte-weise nach `name` sortiert, je Eintrag eine Zeile
+#   "<kind> <exec> <id> <name>\n",  kind: f | d | l
+# Die Form steht in der Spec, nicht nur hier — ohne feste Form sind Adressen
+# zwischen Läufen nicht stabil, und dann ist die Wiederholbarkeit wertlos.
+# `name` steht am Ende, weil er Leerzeichen enthalten darf (aber kein \n).
+#
+# Sortiert wird mit list<string>.sort(): das vergleicht per strcmp, also
+# byte-weise und locale-unabhängig (spec/10) — genau was Determinismus braucht.
+
+- import: "sources/models/cas_tree.aiml"
+- import: "sources/server/cas_store.aiml"
+
+- class:
+    name: CasTrees
+    members:
+      # ref<>, nicht ptr<>: der Store gehört dem Aufrufer und lebt länger als
+      # dieses Objekt — eine schwache Rückkante (spec/61 §6.2), kein Besitz.
+      - [store, ref<CasStore>]
+      - [trees, Kv<string:Tree>]
+    methods:
+      - def:
+          name: init
+          access: public
+          args: [[blob_store, ref<CasStore>]]
+          body:
+            - set: [<.store, blob_store]
+            - set: [<.trees, { call: [db.open_kv, "cas_trees", {persist: true}] }]
+
+      # kind_tag: die eine Stelle, an der die Art zu einem Zeichen wird.
+      - def:
+          name: kind_tag
+          access: public
+          args: [[kind, i32]]
+          return: string
+          body:
+            - if: { condition: { eq: [kind, TreeKind.dir] },     then: [{ return: "d" }] }
+            - if: { condition: { eq: [kind, TreeKind.symlink] }, then: [{ return: "l" }] }
+            - return: "f"
+
+      # serialize: kanonische Form eines (bereits sortierten) Baums.
+      - def:
+          name: serialize
+          access: public
+          args: [[tree, Tree]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [out, string, ""]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, tree.entries.len] }
+                body:
+                  - decl: [row, TreeEntry, { at: [tree.entries, idx] }]
+                  - decl: [tag, string, { call: [<.kind_tag, row.kind] }]
+                  - set: [out, "${out}${tag} ${row.exec} ${row.addr} ${row.name}\n"]
+                  - set: [idx, { +: [idx, 1] }]
+            - return: out
+
+      # put_tree: Verzeichnis rekursiv aufnehmen, Rückgabe = tree_id ("" bei Fehler).
+      - def:
+          name: put_tree
+          access: public
+          static_off: ["str_cmp"]
+          args: [[dir_path, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - if: { condition: { eq: [{ call: [io.is_dir, dir_path] }, false] }, then: [{ return: "" }] }
+            - decl: [names, list<string>]
+            - decl: [kinds, list<i32>]
+            - decl: [execs, list<i32>]
+            - decl: [ids,   list<string>]
+            - decl: [kids, list<path>, { call: [io.list_dir, dir_path] }]
+            - decl: [kdx, i32, 0]
+            - while:
+                condition: { lt: [kdx, kids.len] }
+                body:
+                  - decl: [kid, path, { at: [kids, kdx] }]
+                  - decl: [leaf, string, { call: [kid.name] }]
+                  - decl: [full, string, { call: [kid.to_string] }]
+                  - decl: [kind, i32, TreeKind.file]
+                  - decl: [exec, i32, 0]
+                  - decl: [entry_id, string, ""]
+                  # Reihenfolge wichtig: is_symlink ZUERST, denn is_dir/is_file
+                  # folgen dem Link und würden ihn als sein Ziel einordnen.
+                  - if:
+                      condition: { gt: [{ call: [io.is_symlink, full] }, 0] }
+                      then:
+                        - set: [kind, TreeKind.symlink]
+                        - decl: [target, string, { call: [io.read_link, full] }]
+                        - decl: [tbuf, buffer]
+                        - call: [tbuf.alloc, { +: [target.len, 1] }]
+                        - decl: [written, i32, { call: [tbuf.write_string, target] }]
+                        - set: [entry_id, { call: [<.store.put_bytes, tbuf] }]
+                      else:
+                        - if:
+                            condition: { eq: [{ call: [io.is_dir, full] }, true] }
+                            then:
+                              - set: [kind, TreeKind.dir]
+                              - set: [entry_id, { call: [<.put_tree, full] }]
+                            else:
+                              - set: [kind, TreeKind.file]
+                              - if: { condition: { eq: [{ call: [io.can_exec, full] }, true] }, then: [{ set: [exec, 1] }] }
+                              - set: [entry_id, { call: [<.store.put_file, full] }]
+                  - if: { condition: { eq: [entry_id.len, 0] }, then: [{ return: "" }] }
+                  - call: [names.push, leaf]
+                  - call: [kinds.push, kind]
+                  - call: [execs.push, exec]
+                  - call: [ids.push, entry_id]
+                  - set: [kdx, { +: [kdx, 1] }]
+            # Byte-weise nach Namen sortieren und in dieser Reihenfolge aufbauen.
+            - decl: [sorted, list<string>]
+            - call: [sorted.extend, names]
+            - call: [sorted.sort]
+            - decl: [tree, Tree]
+            - decl: [sdx, i32, 0]
+            - while:
+                condition: { lt: [sdx, sorted.len] }
+                body:
+                  - decl: [pick, string, { at: [sorted, sdx] }]
+                  - decl: [orig, i32, { call: [names.index_of, pick] }]
+                  - if:
+                      condition: { ge: [orig, 0] }
+                      then:
+                        - decl: [row, TreeEntry]
+                        - set: [row.name, pick]
+                        - set: [row.kind, { at: [kinds, orig] }]
+                        - set: [row.exec, { at: [execs, orig] }]
+                        - set: [row.addr, { at: [ids, orig] }]
+                        - call: [tree.entries.push, row]
+                  - set: [sdx, { +: [sdx, 1] }]
+            - decl: [canon, string, { call: [<.serialize, tree] }]
+            - decl: [tree_id, string, { call: [hash.sha256, canon] }]
+            - call: [<.trees.set, tree_id, tree]
+            - return: tree_id
+
+      - def:
+          name: get_tree
+          access: public
+          args: [[tree_id, string]]
+          return: Tree
+          body:
+            - decl: [tree, Tree]
+            - if: { condition: { eq: [{ call: [<.trees.has, tree_id] }, 0] }, then: [{ return: tree }] }
+            - set: [tree, { call: [<.trees.get_copy, tree_id] }]
+            - return: tree
+
+      # materialize: Baum im Dateisystem aufbauen.  Dateien per HARDLINK aus dem
+      # Objektspeicher (kein zweiter Datenblock) — deshalb darf das Ergebnis nie
+      # direkt beschrieben werden; dafür ist in Scheibe 2 die overlayfs-upper da.
+      - def:
+          name: materialize
+          access: public
+          static_off: ["str_cmp"]
+          args: [[tree_id, string], [target, string]]
+          return: i32
+          body:
+            - if: { condition: { eq: [{ call: [<.trees.has, tree_id] }, 0] }, then: [{ return: -1 }] }
+            - call: [io.mkdir_all, target]
+            - decl: [tree, Tree, { call: [<.trees.get_copy, tree_id] }]
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, tree.entries.len] }
+                body:
+                  - decl: [row, TreeEntry, { at: [tree.entries, idx] }]
+                  - decl: [dest, string, "${target}/${row.name}"]
+                  - if:
+                      condition: { eq: [row.kind, TreeKind.dir] }
+                      then:
+                        - if: { condition: { neq: [{ call: [<.materialize, row.addr, dest] }, 0] }, then: [{ return: -1 }] }
+                      else:
+                        - if:
+                            condition: { eq: [row.kind, TreeKind.symlink] }
+                            then:
+                              - decl: [lnk_blob, string, { call: [<.store.blob_path, row.addr] }]
+                              - decl: [lnk_target, string, { call: [io.read_file, lnk_blob] }]
+                              - if: { condition: { neq: [{ call: [io.symlink, lnk_target, dest] }, 0] }, then: [{ return: -1 }] }
+                            else:
+                              - decl: [src, string, { call: [<.store.blob_path, row.addr] }]
+                              - if: { condition: { eq: [src.len, 0] }, then: [{ return: -1 }] }
+                              # KEINE Hardlinks (Befund 1, doc/spec/92 §92.5):
+                              # ein Link teilte die Inode mit dem Objekt, also
+                              # aenderte ein Schritt, der seine Arbeitsdatei in
+                              # place bearbeitet, DEN STORE.  Genau das tut ein
+                              # Build-Schritt.  Die fruehere Fassung schuetzte
+                              # nur den Sonderfall "exec-Bit passt nicht" — zu
+                              # eng gedacht: nicht der Modus ist das Problem,
+                              # sondern der geteilte Inhalt.
+                              #
+                              # Weil die Kopie ihre eigene Inode hat, darf das
+                              # exec-Bit immer am Ziel gesetzt werden; damit
+                              # entfaellt die Sonderbehandlung samt io.can_exec.
+                              - if: { condition: { neq: [{ call: [<.store.copy_blocks, src, dest] }, 0] }, then: [{ return: -1 }] }
+                              - if: { condition: { neq: [row.exec, 0] }, then: [{ decl: [rc_x, i32, { call: [io.set_exec, dest, 1] }] }] }
+                  - set: [idx, { +: [idx, 1] }]
+            - return: 0

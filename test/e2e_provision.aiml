@@ -1,0 +1,104 @@
+# Abnahme: der RPC-Weg der Einrichtung (doc/spec/94) — END-TO-END gegen einen
+# laufenden cosmosd.
+#
+# Anlass (2026-10-15): die Einrichtung wurde nebenlaeufig gemacht, und der
+# Handler fragte als Erstes „laeuft schon einer?".  Diese Frage traf auf eine
+# nicht initialisierte Sperre — der SERVER STUERZTE AB (pthread_mutex_lock).
+# Gemerkt hat es der Nutzer, nicht der Test: geprueft war nur die Arbeiter-
+# Klasse (dort kam `prepare` zuerst), nie der Weg ueber den RPC.
+#
+# Geprueft:
+#   1 ohne Fingerprint liefert der Server den Host-Key (Phase 1)
+#   2 mit Fingerprint meldet er „angenommen" SOFORT (running=1, kein Blockieren)
+#   3 waehrend es laeuft, antwortet der Server weiter (provision_status)
+#   4 der Auftrag endet und nennt seinen Ausgang
+#
+# Expected exit code: 0
+
+- import: "test/e2e_runner.aiml"
+- import: "sources/models/provision_reqs.aiml"
+
+- def:
+    name: expect
+    args: [[what, string], [cond, i32]]
+    return: i32
+    body:
+      - if: { condition: { eq: [cond, 1] }, then: [{ print: ["  ok   ${what}"] }, { return: 0 }] }
+      - print: ["  FAIL ${what}"]
+      - return: 1
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      - decl: [envm, map<string:string>, { call: [sys.env] }]
+      - decl: [url, string, "ws://127.0.0.1:8799"]
+      - if: { condition: { gt: [{ call: [envm.contains, "COSMOS_E2E_URL"] }, 0] }, then: [{ set: [url, { call: [envm.get, "COSMOS_E2E_URL"] }] }] }
+      - decl: [ssh_port, i32, 22907]
+      - decl: [runner, ptr<E2eRunner>, { new: E2eRunner }]
+      - if: { condition: { neq: [{ call: [runner.connect, url] }, 1] }, then: [{ print: ["FAIL keine Verbindung"] }, { return: 1 }] }
+      - if: { condition: { neq: [{ call: [runner.login, "prov@e2e.test", "prov-pass-123"] }, 1] }, then: [{ print: ["FAIL Anmeldung"] }, { return: 1 }] }
+
+      # Ein SSH-Gegenueber im Testprozess (aiml spec/32_6 §7).
+      - decl: [srv, ssh_test_server, { call: [ssh.test_listen, ssh_port, "deploy", "pw-prov"] }]
+      - if: { condition: { eq: [srv, null] }, then: [{ print: ["FAIL SSH-Testserver startet nicht"] }, { return: 1 }] }
+      - decl: [srv_thread, thread_handle, { call: [srv.serve_async] }]
+
+      # ── 1) Phase 1: Host-Key ─────────────────────────────────────────────
+      - decl: [req, ProvisionReq]
+      - set: [req.token, runner.token]
+      - set: [req.host, "127.0.0.1"]
+      - set: [req.port, ssh_port]
+      - set: [req.login_user, "deploy"]
+      - set: [req.login_password, "pw-prov"]
+      - set: [req.agent_id, "e2e-knoten"]
+      - set: [req.agent_labels, "e2e,linux"]
+      - decl: [fp_res, ptr<ProvisionResp>, { new: ProvisionResp }]
+      - decl: [got1, i32, { call: [runner.sess.send_and_await, 0, "provision_agent", req, fp_res, 20000] }]
+      - set: [fails, { +: [fails, { call: [expect, "Phase 1 antwortet", { eq: [got1, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und liefert einen Host-Key", { gt: [fp_res.fingerprint.len, 0] }] }] }]
+      - if: { condition: { eq: [fp_res.fingerprint.len, 0] }, then: [{ print: ["   (${fp_res.message})"] }, { return: 1 }] }
+
+      # ── 2) Phase 2: startet NEBENHER ─────────────────────────────────────
+      - set: [req.expected_fp, fp_res.fingerprint]
+      - decl: [start_ms, i64, { call: [time.now] }]
+      - decl: [go_res, ptr<ProvisionResp>, { new: ProvisionResp }]
+      - decl: [got2, i32, { call: [runner.sess.send_and_await, 0, "provision_agent", req, go_res, 20000] }]
+      - decl: [took_ms, i64, { -: [{ call: [time.now] }, start_ms] }]
+      - set: [fails, { +: [fails, { call: [expect, "Phase 2 antwortet", { eq: [got2, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und meldet angenommen (${go_res.message})", { eq: [go_res.running, 1] }] }] }]
+      # Der Aufruf darf NICHT auf die Schritte warten — sonst steht der Server.
+      - set: [fails, { +: [fails, { call: [expect, "der Aufruf kehrt sofort zurueck (${took_ms} ms)", { lt: [took_ms, 3000] }] }] }]
+
+      # ── 3+4) Stand abfragen, bis fertig ──────────────────────────────────
+      - decl: [polls, i32, 0]
+      - decl: [running, i32, 1]
+      - decl: [final_step, string, ""]
+      - decl: [final_msg, string, ""]
+      - while:
+          condition: { '&&': [{ eq: [running, 1] }, { lt: [polls, 120] }] }
+          body:
+            - call: [time.sleep_ms, 500]
+            - decl: [st_req, ProvisionReq]
+            - set: [st_req.token, runner.token]
+            - decl: [st_res, ptr<ProvisionResp>, { new: ProvisionResp }]
+            - decl: [sgot, i32, { call: [runner.sess.send_and_await, 0, "provision_status", st_req, st_res, 4000] }]
+            - if:
+                condition: { eq: [sgot, 1] }
+                then:
+                  - set: [running, st_res.running]
+                  - set: [final_step, st_res.failed_step]
+                  - set: [final_msg, st_res.message]
+                else:
+                  - print: ["  FAIL provision_status ohne Antwort — der Server haengt?"]
+                  - set: [running, 0]
+                  - set: [fails, { +: [fails, 1] }]
+            - set: [polls, { +: [polls, 1] }]
+      - set: [fails, { +: [fails, { call: [expect, "der Server antwortete waehrend der Einrichtung (${polls} Abfragen)", { gt: [polls, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "der Auftrag endet (${final_step}: ${final_msg})", { eq: [running, 0] }] }] }]
+
+      - if: { condition: { eq: [fails, 0] }, then: [{ print: ["PASS e2e_provision"] }, { return: 0 }] }
+      - print: ["FAIL e2e_provision (${fails})"]
+      - return: 1

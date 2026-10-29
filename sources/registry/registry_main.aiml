@@ -1,0 +1,83 @@
+# cosmos-museum — OCI-Layouts zu museum bringen und von dort holen
+# (museum doc/ecosystem.md §2/§3).
+#
+#   cosmos-museum --mode push --layout <dir> --url <museum> --ref <repo>:<tag>
+#                 [--token-file <datei> | --token-env <VAR>] [--artifact-type <typ>]
+#   cosmos-museum --mode pull --layout <dir> --url <museum> --ref <repo>:<tag>|<repo>@sha256:<hex>
+#                 [--token-file <datei>]
+#
+# Das Token kommt aus einer DATEI (oder COSMOS_MUSEUM_TOKEN), nie von der
+# Kommandozeile: die waere fuer jeden Nutzer des Rechners in `ps` lesbar.
+# Ausgabe auf stdout: die Manifest-Digest (eine Zeile) — sonst nichts.
+
+- import: "sources/registry/museum_client.aiml"
+
+- model:
+    name: RegArgs
+    fields:
+      - [mode,          string, ""]
+      - [layout,        string, ""]
+      - [url,           string, ""]
+      - [ref,           string, ""]
+      - [token_file,    string, ""]
+      - [token_env,     string, ""]
+      - [artifact_type, string, ""]
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [args, RegArgs]
+      - call: [sys.arg_dump, args]
+      - if:
+          condition: { '||': [{ eq: [args.layout.len, 0] }, { '||': [{ eq: [args.url.len, 0] }, { eq: [args.ref.len, 0] }] }] }
+          then:
+            - call: [log.error, "cosmos-museum: --mode push|pull --layout <dir> --url <museum> --ref <repo>:<tag> [--token-file f]"]
+            - return: 2
+      - decl: [token, string, ""]
+      - if:
+          condition: { gt: [args.token_file.len, 0] }
+          then:
+            - decl: [raw, string, { call: [io.read_file, args.token_file] }]
+            - set: [token, { call: [raw.trim] }]
+          else:
+            - decl: [envm, map<string:string>, { call: [sys.env] }]
+            - decl: [env_name, string, "COSMOS_MUSEUM_TOKEN"]
+            - if: { condition: { gt: [args.token_env.len, 0] }, then: [{ set: [env_name, args.token_env] }] }
+            - if: { condition: { gt: [{ call: [envm.contains, env_name] }, 0] }, then: [{ set: [token, { call: [envm.get, env_name] }] }] }
+      # <repo>@sha256:<hex> oder <repo>:<tag> — der Tag ist alles nach dem
+      # LETZTEN ':' hinter dem letzten '/', damit "host/a:b" nicht zerfaellt.
+      - decl: [repo, string, args.ref]
+      - decl: [reference, string, "latest"]
+      - decl: [at_pos, i32, { call: [args.ref.index_of, "@"] }]
+      - if:
+          condition: { ge: [at_pos, 0] }
+          then:
+            - set: [repo, { call: [args.ref.substr, 0, at_pos] }]
+            - set: [reference, { call: [args.ref.substr, { +: [at_pos, 1] }] }]
+          else:
+            - decl: [parts, list<string>, { call: [args.ref.split, ":"] }]
+            - if:
+                condition: { gt: [parts.len, 1] }
+                then:
+                  - set: [reference, { call: [parts.get, { -: [parts.len, 1] }] }]
+                  - set: [repo, { call: [args.ref.substr, 0, { -: [{ -: [args.ref.len, reference.len] }, 1] }] }]
+      - decl: [client, ptr<MuseumClient>, { new: MuseumClient }]
+      - call: [client.init, args.url, token, repo]
+      - if:
+          condition: { eq: [args.mode, "push"] }
+          then:
+            - decl: [pushed, string, { call: [client.push, args.layout, reference, args.artifact_type] }]
+            - if: { condition: { eq: [pushed.len, 0] }, then: [{ return: 1 }] }
+            - print: ["${pushed}"]
+            - return: 0
+      - if:
+          condition: { eq: [args.mode, "pull"] }
+          then:
+            - decl: [pulled, string, { call: [client.pull, reference, args.layout, reference] }]
+            - if: { condition: { eq: [pulled.len, 0] }, then: [{ return: 1 }] }
+            - print: ["${pulled}"]
+            - return: 0
+      - call: [log.error, "cosmos-museum: --mode muss push oder pull sein"]
+      - return: 2

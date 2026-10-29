@@ -1,0 +1,36 @@
+# Die erklaerte Konfiguration als EIN Datensatz (doc/spec/111 §111.2) plus
+# das Ergebnis eines `plan` (F100-2).
+#
+# Static-Check (aiml spec/49 §14): 3 models.
+- import: "sources/models/casc_basics.aiml"
+- import: "sources/models/casc_idp.aiml"
+
+- model:
+    name: CascConfig
+    fields:
+      - [roles,   list<CascRole>]
+      - [grants,  list<CascGrant>]
+      - [secrets, list<CascSecret>]
+      - [museum,  CascMuseum]
+      - [ldap,    CascLdap]
+      - [saml,    CascSaml]
+      # 1 = die Rollen gelten (doc/spec/111 §111.3).  0 = wie bisher, nur die
+      # Freigabe-Level.  Wird gesetzt, sobald `roles:` erklaert ist.
+      - [roles_on, i32]
+
+# Eine Zeile eines `plan`: was `apply` tun wuerde.  action: add | change |
+# remove | adopt | disable.
+- model:
+    name: PlanChange
+    fields:
+      - [domain, string]
+      - [action, string]
+      - [target, string]
+      - [detail, string]
+
+- model:
+    name: CascPlan
+    fields:
+      - [success, i32]
+      - [errors,  list<string>]
+      - [changes, list<PlanChange>]

@@ -1,0 +1,23 @@
+# AP1 (doc/spec/90 §AP1.5a Schritt 4): Scrollback/Paging.
+# Der Browser fragt ein Byte-Fenster an; der Server liest NUR dieses Fenster
+# aus der Lauf-Datei (io.open "r" + io.seek + io.read) und gibt es zurück.
+
+- model:
+    name: RunWindowReq
+    fields:
+      - [token,   string]
+      - [run_ref, string]
+      - [stream,  i32]
+      - [offset,  i64]
+      - [len,     i32]
+
+- model:
+    name: RunWindow
+    fields:
+      - [run_ref,     string]
+      - [stream,      i32]
+      - [offset,      i64]
+      - [data,        string]
+      - [next_offset, i64]
+      - [total,       i64]
+      - [done,        i32]

@@ -1,0 +1,165 @@
+# Cosmos control-plane daemon entry point (browser client server: ws/wss auth + cluster read).
+#   COSMOS_BIND      e.g. "wss://0.0.0.0:8765"   (default: ws://0.0.0.0:8765)
+#   COSMOS_TLS_CERT / COSMOS_TLS_KEY  → wss:// (whole traffic TLS)
+#   COSMOS_LOG_FILE  → mirror all log.* into this file (append)
+- import: "sources/server/cosmos_daemon.aiml"
+- import: "sources/models/daemon_cfg.aiml"
+- import: "sources/auth/auth_service.aiml"
+- import: "sources/server/agent_token_store.aiml"
+- import: "sources/server/rt_launcher.aiml"
+
+# doc/spec/108 F108-3: die Freigabe eines Kontos setzen ist eine BETRIEBSHANDLUNG und
+# laeuft STATT des Dienstes — nicht ueber eine RPC, die ein Client erreichen kann.
+#
+#   ./cosmosd --grant-email alice@example.com --grant-level 7
+#
+# Bei gestopptem Dienst auszufuehren: derselbe KV-Speicher von zwei Prozessen offen ist
+# nicht vorgesehen.  Die Handlung wird protokolliert (Konto + Level, kein Geheimnis) —
+# eine Rechtevergabe ohne Spur ist nicht betreibbar (F108-10/F108-12).
+- class:
+    name: DaemonOps
+    members:
+      # Alle drei Betriebshandlungen arbeiten auf DEMSELBEN Speicher — genau
+      # deshalb sind sie Methoden und keine freien Funktionen (der aiml-Check
+      # `same_arg` nennt ein geteiltes Argument eine verkappte Klasse).
+      - [db_dir, path]
+    methods:
+      # grant: Freigabe eines Kontos setzen (doc/spec/108 F108-3).
+      - def:
+          name: run_grant
+          access: public
+          static_off: ["str_cmp"]
+          args: [[eml, string], [lvl, i32]]
+          return: i32
+          body:
+            - decl: [gauth, ptr<AuthService>, { new: AuthService }]
+            - call: [gauth.init, <.db_dir]
+            - decl: [grc, i32, { call: [gauth.grant_level, eml, lvl] }]
+            - if:
+                condition: { eq: [grc, 1] }
+                then: [{ call: [log.error, "[grant] unbekanntes Konto: ${eml}"] }, { return: 1 }]
+            - if:
+                condition: { eq: [grc, 2] }
+                then:
+                  - call: [log.error, "[grant] Level ${lvl} ungueltig — gueltig ist 1..255, und 0 heisst NIEMAND (spec/65 F65-22)"]
+                  - return: 1
+            - call: [log.info, "[grant] ${eml} hat jetzt Freigabe ${lvl} (1=Admin, 255=am staerksten eingeschraenkt)"]
+            - return: 0
+
+      # mint: ein Enrollment-Token praegen.  Das Geheimnis geht EINMAL nach
+      # stdout, nie ins Log — Logs werden geteilt und eingesammelt (doc/spec/90).
+      - def:
+          name: run_mint
+          access: public
+          static_off: ["str_cmp"]
+          args: [[label, string]]
+          return: i32
+          body:
+            - decl: [store, ptr<AgentTokenStore>, { new: AgentTokenStore }]
+            - call: [store.init, <.db_dir]
+            - decl: [made, AgentTokenNew, { call: [store.create, label, "cli"] }]
+            - if:
+                condition: { neq: [made.accepted, 1] }
+                then: [{ call: [log.error, "[mint] Token konnte nicht angelegt werden"] }, { return: 1 }]
+            - call: [log.info, "[mint] Token ${made.token_id} fuer '${label}' angelegt — Geheimnis folgt auf stdout"]
+            - call: [io.write, io.stdout, "${made.secret}\n"]
+            - return: 0
+
+      # add_user: ein Konto anlegen, ohne durch die Registrierungsbremse zu
+      # muessen.  Fuer Proben, CI und die erste Anmeldung auf einem frischen
+      # Server — alles Faelle, in denen kein Browser vorhanden ist.
+      - def:
+          name: run_adduser
+          access: public
+          static_off: ["str_cmp"]
+          args: [[eml, string], [pass, string], [nick, string]]
+          return: i32
+          body:
+            - decl: [auth, ptr<AuthService>, { new: AuthService }]
+            - call: [auth.init, <.db_dir]
+            - decl: [req, RegisterReq]
+            - set: [req.email, eml]
+            - set: [req.password, pass]
+            - decl: [use_nick, string, nick]
+            - if: { condition: { lt: [use_nick.len, 3] }, then: [{ set: [use_nick, "probe-${eml.len}${pass.len}"] }] }
+            - set: [req.display_name, use_nick]
+            # Leere Client-IP: die Bremse prueft nur, WENN eine mitkommt.
+            - decl: [res, AuthResult, { call: [auth.handle_register, req, ""] }]
+            - if:
+                condition: { neq: [res.success, 1] }
+                then: [{ call: [log.error, "[add-user] abgelehnt: ${res.message}"] }, { return: 1 }]
+            - call: [log.info, "[add-user] ${eml} angelegt (Anzeigename ${use_nick})"]
+            - call: [log.info, "[add-user] wirkt erst nach einem Neustart des Servers (doc/spec/110 F110-35)"]
+            - return: 0
+
+      # spawn: einen Agenten im Container starten (doc/spec/110 M7).  Die Pfade
+      # kommen aus der Umgebung, damit dieselbe Binaerdatei auf Entwicklerrechner,
+      # Knoten und Pi laeuft, ohne dass einer einkompiliert ist.
+      - def:
+          name: run_spawn
+          access: public
+          static_off: ["str_cmp"]
+          args: [[agent_id, string], [limit_mb, i32]]
+          return: i32
+          body:
+            - decl: [envm, map<string:string>, { call: [sys.env] }]
+            - decl: [tmpl, string, "deploy/rt_template"]
+            - if: { condition: { gt: [{ call: [envm.contains, "COSMOS_RT_TEMPLATE"] }, 0] }, then: [{ set: [tmpl, { call: [envm.get, "COSMOS_RT_TEMPLATE"] }] }] }
+            - decl: [binary, string, "./cosmos-rt"]
+            - if: { condition: { gt: [{ call: [envm.contains, "COSMOS_RT_BINARY"] }, 0] }, then: [{ set: [binary, { call: [envm.get, "COSMOS_RT_BINARY"] }] }] }
+            - decl: [url, string, "ws://127.0.0.1:8765"]
+            - if: { condition: { gt: [{ call: [envm.contains, "COSMOS_RT_URL"] }, 0] }, then: [{ set: [url, { call: [envm.get, "COSMOS_RT_URL"] }] }] }
+            - decl: [store, ptr<AgentTokenStore>, { new: AgentTokenStore }]
+            - call: [store.init, <.db_dir]
+            - decl: [launcher, ptr<RtLauncher>, { new: RtLauncher }]
+            - call: [launcher.init, tmpl, binary, "logs/rt_runs", url]
+            - if:
+                condition: { eq: [{ call: [launcher.ready] }, 0] }
+                then:
+                  - call: [log.error, "[spawn] Vorlage ${tmpl} oder ${binary} fehlt — tools/make_rt_template.sh"]
+                  - return: 1
+            - decl: [made, RtLaunch, { call: [launcher.spawn, store, agent_id, limit_mb] }]
+            - if: { condition: { neq: [made.alive, 1] }, then: [{ return: 1 }] }
+            - call: [log.info, "[spawn] ${agent_id} laeuft (Bundle ${made.bundle})"]
+            - return: 0
+
+- def:
+    name: main
+    return: i32
+    body:
+      - decl: [db_dir, path, ""]
+      - decl: [dcfg, DaemonCfg]
+      - call: [sys.arg_dump, dcfg]
+      - decl: [ops, ptr<DaemonOps>, { new: DaemonOps }]
+      - set: [ops.db_dir, db_dir]
+      - if:
+          condition: { gt: [dcfg.grant_email.len, 0] }
+          then:
+            - return: [{ call: [ops.run_grant, dcfg.grant_email, dcfg.grant_level] }]
+      - if:
+          condition: { gt: [dcfg.mint_token.len, 0] }
+          then: [{ return: { call: [ops.run_mint, dcfg.mint_token] } }]
+      - if:
+          condition: { gt: [dcfg.add_user.len, 0] }
+          then: [{ return: { call: [ops.run_adduser, dcfg.add_user, dcfg.add_user_pw, dcfg.add_user_nick] } }]
+      - if:
+          condition: { gt: [dcfg.spawn_agent.len, 0] }
+          then: [{ return: { call: [ops.run_spawn, dcfg.spawn_agent, dcfg.spawn_limit_mb] } }]
+      - decl: [envm, map<string:string>, { call: [sys.env] }]
+      - if: { condition: { gt: [{ call: [envm.contains, "COSMOS_LOG_FILE"] }, 0] }, then: [{ call: [log.set_file, { call: [envm.get, "COSMOS_LOG_FILE"] }] }] }
+      - decl: [bind, string, "ws://0.0.0.0:8765"]
+      - if: { condition: { gt: [{ call: [envm.contains, "COSMOS_BIND"] }, 0] }, then: [{ set: [bind, { call: [envm.get, "COSMOS_BIND"] }] }] }
+      - decl: [cert, string, ""]
+      - if: { condition: { gt: [{ call: [envm.contains, "COSMOS_TLS_CERT"] }, 0] }, then: [{ set: [cert, { call: [envm.get, "COSMOS_TLS_CERT"] }] }] }
+      - decl: [key, string, ""]
+      - if: { condition: { gt: [{ call: [envm.contains, "COSMOS_TLS_KEY"] }, 0] }, then: [{ set: [key, { call: [envm.get, "COSMOS_TLS_KEY"] }] }] }
+      - decl: [srv, ptr<CosmosDaemon>, { new: CosmosDaemon }]
+      - call: [srv.init, db_dir, bind]
+      - if:
+          condition: { '&&': [{ gt: [cert.len, 0] }, { gt: [key.len, 0] }] }
+          then:
+            - call: [srv.set_tls, cert, key]
+            - call: [log.info, "[main] TLS enabled (cert=${cert})"]
+      - call: [log.info, "[main] cosmos daemon booting"]
+      - call: [srv.run]
+      - return: 0

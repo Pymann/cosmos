@@ -1,0 +1,137 @@
+# AP1-Handler: Kommando beauftragen + Ausgabe-Relay (doc/spec/90 §AP1.4/§AP1.5a).
+#
+# Kern der RAM-Regel: `command_output` hängt jeden Chunk SOFORT an die
+# Lauf-Datei an und reicht ihn nur transient an den anfragenden Nutzer weiter.
+# Nichts wird serverseitig gesammelt — kein Feld, keine Liste, kein Puffer.
+#
+# Das Kommando selbst wird NICHT geloggt (kann Geheimnisse enthalten, §AP1.2 Punkt 5).
+
+- import: "sources/models/agent_exec.aiml"
+
+# Stufe 2 (spec/58): diese Handler waren Klassen, die die Dienste über
+# Globals erreichten.  Jetzt sind sie Instanzen der CosmosRuntime und ihr
+# `run` steht hier als Gruppen-Methode — Zugriff nur über die deklarierten
+# sees-Kanten.  KEIN Import aus dem Server: die Gruppen-Datei importiert
+# diese Datei (§1.1), umgekehrt gäbe es einen Zyklus.
+
+- groupmethods:
+    group: CosmosRuntime
+    instances:
+      - instance: run_on_agent
+        methods:
+          - def:
+              name: run
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, RunReq]
+                - decl: [ack, RunAck]
+                - set: [ack.accepted, 0]
+                - if:
+                    condition: { neq: [{ call: [session.decode_rpc, rpc, req] }, 0] }
+                    then:
+                      - set: [ack.reason, "decode failed"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, ack]
+                      - return: []
+                - decl: [req_pid, string, { call: [<.auth.pid_for_token, req.token] }]
+                - if:
+                    condition: { eq: [req_pid.len, 0] }
+                    then:
+                      - set: [ack.reason, "unauthorized"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, ack]
+                      - return: []
+                - if:
+                    condition: { eq: [req.command.len, 0] }
+                    then:
+                      - set: [ack.reason, "empty command"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, ack]
+                      - return: []
+                - decl: [apeer, i32, { call: [<.agents.peer_of, req.agent_id] }]
+                - if:
+                    condition: { le: [apeer, 0] }
+                    then:
+                      - set: [ack.reason, "agent not connected"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, ack]
+                      - return: []
+                - decl: [nowm, i64, { call: [time.now] }]
+                - decl: [run_ref, string, "run-${nowm}-${rpc.peer_id}"]
+                - call: [<.runs.begin, run_ref, req.agent_id, req.command, req.cwd]
+                - call: [<.router.assign, run_ref, rpc.peer_id]
+                - call: [<.agents.set_current_run, req.agent_id, run_ref]
+                - decl: [cmd, RunCommand]
+                - set: [cmd.run_ref, run_ref]
+                - set: [cmd.command, req.command]
+                - set: [cmd.cwd, req.cwd]
+                - call: [session.send_rpc, apeer, "run_command", 0, cmd]
+                - set: [ack.accepted, 1]
+                - set: [ack.run_ref, run_ref]
+                - call: [session.reply_rpc, rpc, "set_result", 0, ack]
+                - call: [log.info, "[run_exec] ${run_ref} dispatched to ${req.agent_id} cwd='${req.cwd}'"]
+      - instance: command_output
+        methods:
+          - def:
+              name: run
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [chunk, OutChunk]
+                - if: { condition: { neq: [{ call: [session.decode_rpc, rpc, chunk] }, 0] }, then: [{ return: [] }] }
+                # Nur ein registrierter Agent darf Ausgabe einspeisen.
+                - decl: [bound, string, { call: [<.agents.agent_of_peer, rpc.peer_id] }]
+                - if:
+                    condition: { eq: [bound.len, 0] }
+                    then:
+                      - call: [log.warn, "[run_exec] output from unregistered peer=${rpc.peer_id} dropped"]
+                      - return: []
+                # Und nur ueber SEINEN Lauf (§AP1.6a-2, Befund 3).  "Registrierter
+                # Agent" ist Authentifizierung; ohne diese Zeile konnte ein
+                # uebernommener Agent Ausgabe in FREMDE Laeufe schreiben.
+                # Der Bezeichner muss zum LAUF gehoeren, den dieser Agent haelt:
+                # gleich (AP1-Einzelbefehl) oder mit `<lauf>-` beginnend (eine
+                # STUFE dieses Laufs, doc/spec/103 §103.4e).  Die Schutzwirkung
+                # bleibt (§AP1.6a-2): in fremde Laeufe kann niemand schreiben.
+                - decl: [mine, string, { call: [<.agents.current_run_of, bound] }]
+                - decl: [owns, i32, 0]
+                - if: { condition: { eq: [mine, chunk.run_ref] }, then: [{ set: [owns, 1] }] }
+                - if:
+                    condition: { '&&': [{ eq: [owns, 0] }, { gt: [mine.len, 0] }] }
+                    then:
+                      - if: { condition: { eq: [{ call: [chunk.run_ref.starts_with, "${mine}-"] }, true] }, then: [{ set: [owns, 1] }] }
+                - if:
+                    condition: { eq: [owns, 0] }
+                    then:
+                      - call: [log.warn, "[run_exec] agent ${bound} reported for a run it was not assigned — dropped"]
+                      - return: []
+                # SOFORT persistieren (§AP1.5a) — der Chunk wird nirgends gesammelt.
+                - decl: [total, i64, { call: [<.runs.append, chunk.run_ref, chunk.stream, chunk.chunk] }]
+                - if: { condition: { lt: [total, 0] }, then: [{ call: [log.warn, "[run_exec] append failed for ${chunk.run_ref}"] }] }
+                # Transient an GENAU den anfragenden Nutzer weiterreichen (kein Broadcast).
+                - decl: [dest, i32, { call: [<.router.owner_of, chunk.run_ref] }]
+                - if: { condition: { gt: [dest, 0] }, then: [{ call: [session.send_rpc, dest, "command_output", 0, chunk] }] }
+      - instance: command_result
+        methods:
+          - def:
+              name: run
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [res, RunResult]
+                - if: { condition: { neq: [{ call: [session.decode_rpc, rpc, res] }, 0] }, then: [{ return: [] }] }
+                - decl: [bound, string, { call: [<.agents.agent_of_peer, rpc.peer_id] }]
+                - if:
+                    condition: { eq: [bound.len, 0] }
+                    then:
+                      - call: [log.warn, "[run_exec] result from unregistered peer=${rpc.peer_id} dropped"]
+                      - return: []
+                # Nur der zugewiesene Lauf (§AP1.6a-2, Befund 3) — und zwar VOR
+                # dem Loeschen der Bindung weiter unten, sonst pruefte es gegen
+                # einen bereits geleerten Wert.
+                - decl: [mine, string, { call: [<.agents.current_run_of, bound] }]
+                - if:
+                    condition: { neq: [mine, res.run_ref] }
+                    then:
+                      - call: [log.warn, "[run_exec] agent ${bound} reported a result for a run it was not assigned — dropped"]
+                      - return: []
+                - call: [<.runs.finish, res.run_ref, res.exit_code]
+                - call: [<.agents.set_current_run, bound, ""]
+                - decl: [dest, i32, { call: [<.router.owner_of, res.run_ref] }]
+                - if: { condition: { gt: [dest, 0] }, then: [{ call: [session.send_rpc, dest, "command_result", 0, res] }] }
+                - call: [<.router.release, res.run_ref]
+                - call: [log.info, "[run_exec] ${res.run_ref} finished exit=${res.exit_code}"]

@@ -1,0 +1,89 @@
+# Modelle der Agenten-Einrichtung (doc/spec/94).
+#
+# Static-Check (spec/49 §14): 3 models — am Cap.
+
+# Ein Schritt der Einrichtung.  `command` ist die Zeile auf dem Knoten,
+# `payload` der Inhalt bzw. die lokale Quelldatei.
+#
+# stdin_mode trennt die Verwendungen von stdin streng:
+#   0 = nichts
+#   1 = sudo-Passwort
+#   2 = payload als Text (Profiltext, Token, Dienst-Einheit)
+#   3 = payload ist ein LOKALER Dateipfad, binär blockweise gesendet
+# Passwort UND Inhalt im selben Schritt gibt es NICHT.  Darum wird eine
+# privilegierte Datei in zwei Schritten ausgebracht: Inhalt ohne sudo in eine
+# Stufendatei (Modus 2/3), dann `sudo -S install` an den Zielort (Modus 1).
+# Andernfalls müsste ein Schritt beides über denselben Strom schicken und die
+# Reihenfolge hinge am Verhalten von sudo.
+- model:
+    name: ProvisionStep
+    fields:
+      - [name,       string]
+      - [command,    string]
+      - [payload,    string]
+      - [stdin_mode, i32]
+
+# Ergebnis eines Laufs.  `failed_step` ist der Schritt, an dem abgebrochen
+# wurde ("" = kein Abbruch) — die Oberfläche MUSS ihn nennen können
+# (§94.2 fail closed).
+- model:
+    name: ProvisionResult
+    fields:
+      - [success,     i32]
+      - [failed_step, string]
+      - [message,     string]
+      - [fingerprint, string]
+      - [steps_done,  i32]
+
+# Woran sich Knoten unterscheiden.  Bewusst ALLE Zielpfade und die drei
+# Systembefehle konfigurierbar — nicht als Testschalter, sondern weil die
+# Paketverwaltung offen ist (§94.7) und ein Knoten anders aufgebaut sein kann.
+# Dadurch braucht der Produktionscode KEINE Testverzweigung: ein Test zeigt die
+# Pfade auf ein Wegwerf-Verzeichnis und setzt harmlose Befehle ein.
+- model:
+    name: ProvisionConfig
+    fields:
+      - [host,                string]
+      - [port,                i32]
+      - [login_user,          string]
+      - [service_user,        string]
+      - [install_dir,         string]   # Ziel des Binaries + der Token-Datei
+      - [stage_dir,           string]   # Zwischenablage, ohne Privilegien beschreibbar
+      - [apparmor_dir,        string]
+      - [systemd_dir,         string]
+      - [subuid_file,         string]
+      - [subgid_file,         string]
+      - [sudo_prefix,         string]   # "sudo -S -p '' " bzw. "" ohne Privilegien
+      # Der Reload nach dem Entfernen der Dienst-Einheit.  EIGENES Feld, weil er
+      # vorher fest verdrahtet war und damit in JEDEM Rueckbau-Test auf dem Rechner
+      # des Entwicklers lief — `systemctl daemon-reload` ohne Rechte laesst polkit
+      # nach dem Passwort fragen (gemessen 18.10.2026, auth.log).  Ein Test darf
+      # das Passwort des Entwicklers nicht brauchen.
+      - [service_reload_cmd,  string]   # "-" = nichts tun
+      - [verify_prefix,       string]   # davor, um Schritt 9 als Dienstnutzer zu fahren
+      - [apparmor_reload_cmd, string]   # Knoten-abhaengig wie die beiden darunter
+      - [apparmor_unload_cmd, string]   # Rueckbau: Profil ENTLADEN (§94.5b)
+      - [pkg_install_cmd,     string]
+      - [service_install_cmd, string]
+      - [service_check_cmd,   string]   # laeuft der Dienst wirklich? (Schritt 11)
+      - [service_stop_cmd,    string]   # vorsorglich bei JEDEM Fehlschlag (P2)
+      # Eigentuemer von lib/ + bwrap am Installationsort.  Vorgabe root:root und
+      # das aus einem Grund: bwrap traegt die userns-Berechtigung des AppArmor-
+      # Profils — gehoerte es einem unprivilegierten Nutzer, waere die
+      # Berechtigung uebertragbar (§94.3).  Konfigurierbar nur, weil der
+      # Abnahme-Lauf OHNE Privilegien faehrt und `chown root:root` dort
+      # scheitert; wer das auf einem echten Knoten aendert, hebt die Trennung
+      # auf.  Leer = root:root.
+      # Wie heisst dieser Agent, und was darf er nehmen?  Beides landet in der
+      # Dienst-Einheit (`--agent-id`, `--labels`).  Ohne sie trug jeder
+      # eingerichtete Knoten denselben Standardnamen und keine Etiketten.
+      # Arbeitsverzeichnis des Dienstes.  OHNE das startet systemd ihn in „/",
+      # und der Agent kann seine Schritt-Verzeichnisse nicht anlegen — er wartet
+      # dann ewig auf eine Status-Datei, die niemand schreiben kann.
+      - [work_dir,            string]
+      - [agent_id,            string]
+      - [agent_labels,        string]
+      - [runtime_owner,       string]
+      - [subuid_base,         i32]
+      - [subuid_count,        i32]
+      - [token_label,         string]

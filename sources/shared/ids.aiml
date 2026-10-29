@@ -1,0 +1,59 @@
+# Kennungen, die zu Dateinamen werden (doc/spec/106 F106-9).
+#
+# `save_job` uebernahm die Kennung WOERTLICH aus dem Namen.  Ein Job „my/job"
+# ergab damit `job_id` mit Schraegstrich — und daraus bauen sich Lauf-Kennung,
+# Stufen-Kennung, KV-Schluessel und (seit F103-19) der Name der Protokolldatei.
+# Eine Kennung ist darum keine Beschriftung: sie wird hier auf einen sicheren
+# Zeichensatz gebracht, EINMAL, an der Quelle.
+#
+# Positivliste, keine Suche nach „../": letztere uebersieht Schreibweisen
+# (Kodierung, Symlinks, a/../../b), eine Formpruefung nicht (doc/spec/90
+# §AP1.6a-1).
+
+- class:
+    name: Ids
+    methods:
+      # slug: aus einer Beschriftung eine Kennung.  Erlaubt sind Buchstaben,
+      # Ziffern, `-` und `_`; alles andere wird zu `-`, Wiederholungen fallen
+      # zusammen, Raender werden beschnitten.  Leer heisst "job" (eine Kennung
+      # muss es geben, sonst haette der Lauf keinen Namen).
+      - def:
+          name: slug
+          access: public
+          static_off: ["str_cmp"]
+          args: [[name, string], [fallback, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [ok_chars, string, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"]
+            - decl: [out, string, ""]
+            - decl: [pos, i32, 0]
+            - decl: [last_dash, i32, 0]
+            - while:
+                condition: { lt: [pos, name.len] }
+                body:
+                  - decl: [one, string, { call: [name.substr, pos, 1] }]
+                  - set: [pos, { +: [pos, 1] }]
+                  # Obergrenze: der Name wird ein Dateiname (doc/spec/103 §103.4e).
+                  - if: { condition: { ge: [out.len, 96] }, then: [{ set: [pos, name.len] }] }
+                  - if:
+                      condition: { ge: [{ call: [ok_chars.index_of, one] }, 0] }
+                      then:
+                        - if:
+                            condition: { eq: [one, "-"] }
+                            then:
+                              - if:
+                                  condition: { '&&': [{ eq: [last_dash, 0] }, { gt: [out.len, 0] }] }
+                                  then: [{ set: [out, "${out}-"] }, { set: [last_dash, 1] }]
+                            else:
+                              - set: [out, "${out}${one}"]
+                              - set: [last_dash, 0]
+                      else:
+                        - if:
+                            condition: { '&&': [{ eq: [last_dash, 0] }, { gt: [out.len, 0] }] }
+                            then: [{ set: [out, "${out}-"] }, { set: [last_dash, 1] }]
+            # Abschliessenden Trenner wieder weg: "mein-job-" ist keine Kennung.
+            - if:
+                condition: { '&&': [{ gt: [out.len, 0] }, { eq: [last_dash, 1] }] }
+                then: [{ set: [out, { call: [out.substr, 0, { -: [out.len, 1] }] }] }]
+            - if: { condition: { eq: [out.len, 0] }, then: [{ return: fallback }] }
+            - return: out
