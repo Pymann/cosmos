@@ -279,7 +279,7 @@
             - decl: [lo_a, OciDesc, { at: [man_o.layers, 1] }]
             - decl: [lo_b, OciDesc, { at: [man_o2.layers, 1] }]
             - set: [fails, { +: [fails, { call: [expect, "zweimal geschnitten, ein Digest", { and: [{ eq: [rc13, 0] }, { eq: [lo_a.digest, lo_b.digest] }] }] }] }]
-            # Herkunft: layer.meta → Annotationen cosmos.* (museum §3)
+            # Herkunft: layer.meta → Annotationen cosmos.* (kontor §3)
             - set: [fails, { +: [fails, { call: [expect, "Schicht nennt ihre Stufe", { eq: [{ call: [lo_a.annotations.get, "cosmos.stage"] }, "bauen"] }] }] }]
             - set: [fails, { +: [fails, { call: [expect, "und Bindungen, Agent, Lauf", { and: [{ eq: [{ call: [lo_a.annotations.get, "cosmos.bindings"] }, "arch=amd64"] }, { and: [{ eq: [{ call: [lo_a.annotations.get, "cosmos.agent"] }, "a7"] }, { eq: [{ call: [lo_a.annotations.get, "cosmos.run"] }, "r42"] }] }] }] }] }]
             - decl: [lo_0, OciDesc, { at: [man_o.layers, 0] }]

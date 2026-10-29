@@ -26,7 +26,7 @@
 - import: "sources/models/casc_resp.aiml"
 - import: "sources/models/api_token.aiml"
 - import: "sources/models/api_token_reqs.aiml"
-- import: "sources/models/museum_event.aiml"
+- import: "sources/models/kontor_event.aiml"
 - import: "sources/models/api_views.aiml"
 - import: "sources/models/api_may.aiml"
 - import: "sources/models/sso_reqs.aiml"
@@ -39,7 +39,7 @@
       # Der HTTP-Server laeuft mit einem Faden JE VERBINDUNG (aiml spec/32_2 §3.12);
       # die eine Mirror-Sitzung darf aber nur ein Faden zugleich benutzen — zwei
       # gleichzeitige send_and_await lasen denselben Socket (SIGSEGV in SSL_read,
-      # gemessen in run_e2e_museum.sh: Webhook + Kampagnen-Abfrage).  `serial`
+      # gemessen in run_e2e_kontor.sh: Webhook + Kampagnen-Abfrage).  `serial`
       # nimmt jede Route ganz; cosmosd ist ohnehin der einzige Schreiber.
       - [serial, lock, null, { access: public }]
     methods:
@@ -452,23 +452,23 @@
             - if: { condition: { eq: [local, 1] }, then: [{ call: [xch.redirect, "${relay}#token=${out.token}"] }, { return: [] }] }
             - call: [xch.json, 200, { call: [sys.serialize, out, <.style] }]
 
-      # ---------------------------------------------------------------- museum
+      # ---------------------------------------------------------------- kontor
 
-      # museum_hook: Webhook von museum (museum doc/ecosystem.md §4).  KEIN
+      # kontor_hook: Webhook von kontor (kontor doc/ecosystem.md §4).  KEIN
       # Bearer — die Echtheit belegt die HMAC-Signatur, und die prueft cosmosd.
       - def:
-          name: museum_hook
+          name: kontor_hook
           access: public
           args: [[xch, ref<ApiExchange>]]
           body:
             - if: { condition: { eq: [{ call: [<.up, xch] }, 0] }, then: [{ return: [] }] }
-            - decl: [req, MuseumEventReq]
-            - set: [req.event, { call: [xch.header, "x-museum-event"] }]
-            - set: [req.delivery, { call: [xch.header, "x-museum-delivery"] }]
-            - set: [req.signature, { call: [xch.header, "x-museum-signature-256"] }]
+            - decl: [req, KontorEventReq]
+            - set: [req.event, { call: [xch.header, "x-kontor-event"] }]
+            - set: [req.delivery, { call: [xch.header, "x-kontor-delivery"] }]
+            - set: [req.signature, { call: [xch.header, "x-kontor-signature-256"] }]
             - set: [req.body, { call: [xch.text] }]
-            - decl: [out, ptr<MuseumEventResp>, { new: MuseumEventResp }]
-            - decl: [got, i32, { call: [<.link.sess.send_and_await, 0, "museum_event", req, out, <.link.timeout_ms] }]
+            - decl: [out, ptr<KontorEventResp>, { new: KontorEventResp }]
+            - decl: [got, i32, { call: [<.link.sess.send_and_await, 0, "kontor_event", req, out, <.link.timeout_ms] }]
             - if: { condition: { eq: [{ call: [<.no_answer, xch, got] }, 1] }, then: [{ return: [] }] }
             - decl: [code, i32, 202]
             - if:

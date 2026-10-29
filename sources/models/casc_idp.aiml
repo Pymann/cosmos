@@ -39,12 +39,12 @@
       # das Zertifikat, wer ausstellen darf).
       - [idp_entity_id, string]
 
-# museum (doc/ecosystem.md im museum-Repo).  `webhook_secret` und `token`
+# kontor (doc/ecosystem.md im kontor-Repo).  `webhook_secret` und `token`
 # sind Geheimnis-NAMEN.  `layer_trust`: "same_host" (Vorgabe, doc/spec/110
 # F110-121) oder eine Komma-Liste von Agenten, deren Schichten auch auf
 # anderen Wirten gelten duerfen.
 - model:
-    name: CascMuseum
+    name: CascKontor
     fields:
       - [url,            string]
       - [webhook_secret, string]

@@ -1,7 +1,7 @@
 # ApiExchange — eine HTTP-Anfrage mit ihren Antwort-Helfern (doc/spec/111 §111.8).
 #
 # Fehler sind JSON {"error": "...", "code": "..."} mit passendem Status
-# (museum doc/ecosystem.md §7).
+# (kontor doc/ecosystem.md §7).
 #
 # Static-Check (aiml spec/49 §14): 1 class.
 

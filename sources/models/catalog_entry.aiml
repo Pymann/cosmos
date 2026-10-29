@@ -12,7 +12,7 @@
     fields:
       - [job_id,      string]
       - [name,        string]
-      # Welches exodus-Projekt dieser Job baut.  Die Bruecke zu museum: ein
+      # Welches exodus-Projekt dieser Job baut.  Die Bruecke zu kontor: ein
       # `package.published` nennt Projekte, cosmos startet Jobs (doc/spec/111 §111.6).
       - [project,     string]
       # Woher die Quelle stammt (Pfad relativ zur Katalogwurzel) — fuer
@@ -21,7 +21,7 @@
       - [source_file, string]
       - [interval_s,  i32]
       - [enabled,     i32]
-      # "museum": der Job nimmt an Neubau-Kampagnen teil.
+      # "kontor": der Job nimmt an Neubau-Kampagnen teil.
       - [triggers,    list<string>]
       # "catalog" = gehoert dem Katalog; ein Eintrag, der aus der Erklaerung
       # verschwindet, wird abgeschaltet (F106-6), nicht geloescht (F100-15).

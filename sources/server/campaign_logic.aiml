@@ -1,10 +1,10 @@
-# Rebuild-Kampagnen — der Ablauf (doc/spec/111 §111.6, museum doc/ecosystem.md §5).
+# Rebuild-Kampagnen — der Ablauf (doc/spec/111 §111.6, kontor doc/ecosystem.md §5).
 #
 #   1. `package.published` mit Plan (impact) und KEINE offene Kampagne fuehrt
 #      das Projekt → neue Kampagne, ein Posten je Projekt aus `rebuild_waves`.
 #   2. Ein Posten startet, sobald alle seine `needs` fertig sind (Ausloeser
 #      zaehlt als fertig).  Der Job kommt aus dem Katalog (`project:` und
-#      `triggers: [museum]`, §111.4).
+#      `triggers: [kontor]`, §111.4).
 #   3. Veroeffentlicht ein Projekt einer offenen Kampagne, wird sein Posten
 #      erledigt — es entsteht KEINE zweite Kampagne, die dieselben Projekte
 #      noch einmal baute.
@@ -12,7 +12,7 @@
 #   5. Sind alle `needs` eines Postens byte-gleich geblieben (`unchanged`),
 #      wird er uebersprungen: nichts, was er verbraucht, hat sich geaendert.
 #
-# museum rechnet aus, WAS abhaengt; cosmos entscheidet, WANN es laeuft.
+# kontor rechnet aus, WAS abhaengt; cosmos entscheidet, WANN es laeuft.
 #
 # Kein Static-Check-Zaehler: nur Gruppen-Methoden und zwei Handler.
 
@@ -118,7 +118,7 @@
                                                               condition: { eq: [item.state, "waiting"] }
                                                               then:
                                                                 - set: [item.state, "no_job"]
-                                                                - set: [item.note, "kein Katalog-Job mit project: ${item.project} und triggers: [museum]"]
+                                                                - set: [item.note, "kein Katalog-Job mit project: ${item.project} und triggers: [kontor]"]
                                                         else:
                                                           - decl: [run_id, string, { call: [<.cluster.start_job_now, item.job_id, "Kampagne ${work.campaign_id}"] }]
                                                           - if:
@@ -153,7 +153,7 @@
                 - return: work
 
           # on_published: ein package.published einarbeiten.  Liefert, was
-          # daraus wurde (fuer die Antwort an museum und das Log).
+          # daraus wurde (fuer die Antwort an kontor und das Log).
           - def:
               name: on_published
               static_off: ["str_cmp"]
@@ -253,26 +253,26 @@
                             - call: [<.save, next]
                       - set: [cix, { +: [cix, 1] }]
 
-          # on_event: Signatur, Zustellung, Ereignis (museum doc/ecosystem.md §4).
+          # on_event: Signatur, Zustellung, Ereignis (kontor doc/ecosystem.md §4).
           - def:
               name: on_event
               access: public
               static_off: ["str_cmp"]
-              args: [[req, ref<MuseumEventReq>]]
-              return: { type: MuseumEventResp, lifetime: producer }
+              args: [[req, ref<KontorEventReq>]]
+              return: { type: KontorEventResp, lifetime: producer }
               body:
-                - decl: [out, MuseumEventResp]
+                - decl: [out, KontorEventResp]
                 - decl: [cfg, CascConfig, { call: [<.casc.current] }]
-                - decl: [secret, string, { call: [<.casc.secret_value, cfg.museum.webhook_secret] }]
+                - decl: [secret, string, { call: [<.casc.secret_value, cfg.kontor.webhook_secret] }]
                 - if:
                     condition: { eq: [secret.len, 0] }
                     then:
-                      - set: [out.message, "kein Webhook-Geheimnis erklaert (config.museum.webhook_secret)"]
+                      - set: [out.message, "kein Webhook-Geheimnis erklaert (config.kontor.webhook_secret)"]
                       - return: out
                 - if:
                     condition: { eq: [{ call: [<.verify, secret, req.body, req.signature] }, 0] }
                     then:
-                      - call: [log.warn, "[museum] Zustellung ${req.delivery}: Signatur ungueltig — verworfen"]
+                      - call: [log.warn, "[kontor] Zustellung ${req.delivery}: Signatur ungueltig — verworfen"]
                       - set: [out.message, "Signatur ungueltig"]
                       - return: out
                 - set: [out.success, 1]
@@ -295,19 +295,19 @@
                       - decl: [pub_ev, PublishedEvent, { call: [<.parse_published, req.body] }]
                       - if: { condition: { eq: [pub_ev.name.len, 0] }, then: [{ set: [out.success, 0] }, { set: [out.message, "package.published ohne data.name"] }, { return: out }] }
                       - set: [out.outcome, { call: [<.on_published, pub_ev, req.delivery] }]
-                      - call: [log.info, "[museum] ${pub_ev.name}@${pub_ev.version}: ${out.outcome}"]
+                      - call: [log.info, "[kontor] ${pub_ev.name}@${pub_ev.version}: ${out.outcome}"]
                       - return: out
                 - set: [out.outcome, "ignored"]
                 - return: out
 
-      - instance: museum_event
+      - instance: kontor_event
         methods:
           - def:
               name: run
               args: [[rpc, rpc_event], [session, mirror_session]]
               body:
-                - decl: [req, MuseumEventReq]
-                - decl: [out, MuseumEventResp]
+                - decl: [req, KontorEventReq]
+                - decl: [out, KontorEventResp]
                 - if:
                     condition: { neq: [{ call: [session.decode_rpc, rpc, req] }, 0] }
                     then: [{ set: [out.message, "unlesbare Anfrage"] }, { call: [session.reply_rpc, rpc, "set_result", 0, out] }, { return: [] }]

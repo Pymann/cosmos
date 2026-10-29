@@ -1,0 +1,29 @@
+# kontor_ref_of (sources/shared/kontor_access.aiml): which pipeline targets
+# name an image in kontor — `kontor:<ref>`, and the prefix from before the
+# rename, `museum:<ref>`, so existing pipelines keep working.
+#   AIML_MEM_V3=1 aiml test/test_kontor_ref.aiml
+- import: "sources/shared/kontor_access.aiml"
+
+- def:
+    name: expect
+    args: [[label, string], [got, string], [want, string]]
+    return: i32
+    body:
+      - if: { condition: { eq: [got, want] }, then: [{ print: ["  ok   ${label}"] }, { return: 0 }] }
+      - print: ["  FAIL ${label}: got '${got}' want '${want}'"]
+      - return: 1
+
+- def:
+    name: main
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      - set: [fails, { +: [fails, { call: [expect, "kontor:<repo>:<tag>", { call: [kontor_ref_of, "kontor:demo/app:v1"] }, "demo/app:v1"] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "kontor:<repo>@sha256", { call: [kontor_ref_of, "kontor:demo/app@sha256:ab"] }, "demo/app@sha256:ab"] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "old prefix museum:", { call: [kontor_ref_of, "museum:demo/app:v1"] }, "demo/app:v1"] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "oci: is no kontor target", { call: [kontor_ref_of, "oci:/tmp/layout"] }, ""] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "a plain image name", { call: [kontor_ref_of, "ubuntu-base"] }, ""] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "the word alone", { call: [kontor_ref_of, "kontor"] }, ""] }] }]
+      - if: { condition: { gt: [fails, 0] }, then: [{ print: ["test_kontor_ref FAIL (${fails})"] }, { return: 1 }] }
+      - print: ["test_kontor_ref PASS"]
+      - return: 0

@@ -1,6 +1,6 @@
 {
     "$schema": "exodus.project.config-1.0",
-    "name": "cosmos-museum",
+    "name": "cosmos-kontor",
     "version": "0.1.0",
     "output_type": "executable",
     "sources": [

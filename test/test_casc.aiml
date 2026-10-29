@@ -40,8 +40,8 @@
       - set: [fails, { +: [fails, { call: [expect, "read: 2 roles, roles_on", { call: [bool_i32, { '&&': [{ eq: [doc.config.roles.len, 2] }, { eq: [doc.config.roles_on, 1] }] }] }] }] }]
       - decl: [grant1, CascGrant, { at: [doc.config.grants, 1] }]
       - set: [fails, { +: [fails, { call: [expect, "read: group grant", { call: [bool_i32, { '&&': [{ eq: [grant1.kind, "group"] }, { eq: [grant1.subject, "devs"] }] }] }] }] }]
-      - set: [fails, { +: [fails, { call: [expect, "read: museum url", { call: [bool_i32, { eq: [doc.config.museum.url, "http://127.0.0.1:18081"] }] }] }] }]
-      - set: [fails, { +: [fails, { call: [expect, "read: layer_trust default", { call: [bool_i32, { eq: [doc.config.museum.layer_trust, "same_host"] }] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "read: kontor url", { call: [bool_i32, { eq: [doc.config.kontor.url, "http://127.0.0.1:18081"] }] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "read: layer_trust default", { call: [bool_i32, { eq: [doc.config.kontor.layer_trust, "same_host"] }] }] }] }]
       # 1 explizit + 3 aus dem Verzeichnis
       - set: [fails, { +: [fails, { call: [expect, "read: 4 jobs (got ${doc.jobs.len})", { call: [bool_i32, { eq: [doc.jobs.len, 4] }] }] }] }]
       - decl: [job0, CatalogEntry, { at: [doc.jobs, 0] }]

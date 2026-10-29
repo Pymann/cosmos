@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Abnahme von REST-Gateway, Config as Code, API-Tokens, Rollen und museum-Webhooks
+# Abnahme von REST-Gateway, Config as Code, API-Tokens, Rollen und kontor-Webhooks
 # (doc/spec/111).  Ein Lauf, echte Prozesse: cosmosd + cosmos-api, Anfragen per curl.
 #
 #   ./run_e2e_api.sh             baut cosmosd + cosmos-api und prueft
@@ -82,8 +82,8 @@ hook() {  # hook EVENT DELIVERY JSON [SECRET]
     local secret="${4:-$(cat "$FIX/secrets/hook.secret" | tr -d '\n')}"
     local sig; sig=$(python3 -c "import hmac,hashlib,sys; print(hmac.new(sys.argv[1].encode(), sys.argv[2].encode(), hashlib.sha256).hexdigest())" "$secret" "$3")
     CODE=$(curl -s -o "$WORK/resp" -w "%{http_code}" -X POST \
-        -H "Content-Type: application/json" -H "X-Museum-Event: $1" -H "X-Museum-Delivery: $2" \
-        -H "X-Museum-Signature-256: sha256=$sig" --data-binary "$3" "$API/hooks/museum")
+        -H "Content-Type: application/json" -H "X-Kontor-Event: $1" -H "X-Kontor-Delivery: $2" \
+        -H "X-Kontor-Signature-256: sha256=$sig" --data-binary "$3" "$API/hooks/kontor")
     BODY=$(cat "$WORK/resp")
 }
 
@@ -139,14 +139,14 @@ req GET /jobs "$API_TOK"; expect "jobs per API-Token" 200
 req GET /tokens "$ALICE"; expect "tokens auflisten" 200 "$TOK_ID"
 grep -q 'cosmos_' <<<"$BODY" && { echo "  FAIL Liste zeigt Geheimnis"; FAILS=$((FAILS+1)); } || echo "  ok   Liste ohne Geheimnis"
 
-# museum-Webhooks
-req POST /hooks/museum "" '{}'; expect "Webhook ohne Signatur → 401" 401
-hook ping d-ping-1 '{"event":"ping","delivery":"d-ping-1","timestamp_ms":1,"museum":"http://m","data":{}}'
+# kontor-Webhooks
+req POST /hooks/kontor "" '{}'; expect "Webhook ohne Signatur → 401" 401
+hook ping d-ping-1 '{"event":"ping","delivery":"d-ping-1","timestamp_ms":1,"kontor":"http://m","data":{}}'
 expect "ping" 202 pong
-hook ping d-ping-2 '{"event":"ping","delivery":"d-ping-2","timestamp_ms":1,"museum":"http://m","data":{}}' "falsches-geheimnis-123"
+hook ping d-ping-2 '{"event":"ping","delivery":"d-ping-2","timestamp_ms":1,"kontor":"http://m","data":{}}' "falsches-geheimnis-123"
 expect "falsche Signatur → 401" 401
 IMPACT='{"rebuild_count":2,"rebuild_waves":[["core"],["net"]],"needs":{"core":["zlib-lite"],"net":["core"]},"outdated_pins":[],"up_to_date":[],"cycles":[]}'
-PUB='{"event":"package.published","delivery":"d-pub-1","timestamp_ms":2,"museum":"http://m","data":{"name":"zlib-lite","version":"1.3.1","sha256":"ab","size":3,"unchanged":false,"impact":'"$IMPACT"'}}'
+PUB='{"event":"package.published","delivery":"d-pub-1","timestamp_ms":2,"kontor":"http://m","data":{"name":"zlib-lite","version":"1.3.1","sha256":"ab","size":3,"unchanged":false,"impact":'"$IMPACT"'}}'
 hook package.published d-pub-1 "$PUB"; expect "package.published oeffnet Kampagne" 202 Kampagne
 hook package.published d-pub-1 "$PUB"; expect "gleiche Zustellung → duplicate" 202 duplicate
 req GET /campaigns "$ALICE"; expect "campaigns" 200 '"trigger":"zlib-lite"'
@@ -155,7 +155,7 @@ NET_STATE=$(python3 -c "import json,sys; c=json.loads(sys.stdin.read())['campaig
 [ "$CORE_STATE" = running ] && echo "  ok   core laeuft (Welle 1)" || { echo "  FAIL core=$CORE_STATE"; FAILS=$((FAILS+1)); }
 [ "$NET_STATE" = waiting ] && echo "  ok   net wartet auf core" || { echo "  FAIL net=$NET_STATE"; FAILS=$((FAILS+1)); }
 # core veroeffentlicht byte-gleich → net braucht keinen Neubau.
-PUB2='{"event":"package.published","delivery":"d-pub-2","timestamp_ms":3,"museum":"http://m","data":{"name":"core","version":"2.0.0","sha256":"cd","size":3,"unchanged":true,"impact":null}}'
+PUB2='{"event":"package.published","delivery":"d-pub-2","timestamp_ms":3,"kontor":"http://m","data":{"name":"core","version":"2.0.0","sha256":"cd","size":3,"unchanged":true,"impact":null}}'
 hook package.published d-pub-2 "$PUB2"; expect "core unveraendert" 202 fortgesetzt
 req GET /campaigns "$ALICE"
 python3 -c "

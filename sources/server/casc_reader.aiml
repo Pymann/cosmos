@@ -7,13 +7,13 @@
 #       grants:  [ { grant: { user: alice@example.org, role: operator } },
 #                  { grant: { group: devs, role: viewer } } ]
 #       secrets: [ { secret: { name: hook, file: /etc/cosmos/hook.secret } },
-#                  { secret: { name: mtok, env: COSMOS_MUSEUM_TOKEN } } ]
-#       museum:  { url: "http://museum:8081", webhook_secret: hook, token: mtok }
+#                  { secret: { name: mtok, env: COSMOS_KONTOR_TOKEN } } ]
+#       kontor:  { url: "http://kontor:8081", webhook_secret: hook, token: mtok }
 #       ldap:    { url: "ldap://dir:389", user_dn: "uid={user},ou=people,dc=x" }
 #       saml:    { idp_sso_url: …, idp_cert_file: …, sp_entity_id: …, acs_url: … }
 #   - catalog:
 #       jobs:     [ { job: { name: zlib, source: ci/zlib.aiml, project: zlib-lite,
-#                            triggers: [museum] } } ]
+#                            triggers: [kontor] } } ]
 #       from_dir: [ { path: ci } ]     # jede *.aiml/*.yaml darin ist ein Job
 #
 # Gelesen wird mit `yaml.*` — es ist EIN Leser fuer diese Form, kein zweiter
@@ -199,7 +199,7 @@
           static_off: ["str_cmp"]
           args: [[node, ref<yaml_node>], [out, ref<CascDoc>]]
           body:
-            - decl: [bad_keys_1, list<string>, { call: [<.unknown_keys, node, "roles,grants,secrets,museum,ldap,saml", "config"] }]
+            - decl: [bad_keys_1, list<string>, { call: [<.unknown_keys, node, "roles,grants,secrets,kontor,ldap,saml", "config"] }]
             - call: [out.errors.extend, bad_keys_1]
             # roles
             - decl: [roles, ref<yaml_node>, { call: [yaml.get, node, "roles"] }]
@@ -266,18 +266,18 @@
                       else: [{ set: [sec.source, "env"] }, { set: [sec.ref, s_env] }]
                   - if: { condition: { eq: [sec.ref.len, 0] }, then: [{ call: [out.errors.push, "secret ${sec.name}: 'file:' oder 'env:' fehlt"] }] }
                   - call: [out.config.secrets.push, sec]
-            # museum
-            - decl: [mus, ref<yaml_node>, { call: [yaml.get, node, "museum"] }]
+            # kontor
+            - decl: [mus, ref<yaml_node>, { call: [yaml.get, node, "kontor"] }]
             - if:
                 condition: { neq: [{ call: [yaml.kind, mus] }, yaml.null] }
                 then:
-                  - decl: [bad_keys_5, list<string>, { call: [<.unknown_keys, mus, "url,webhook_secret,token,layer_trust", "museum"] }]
+                  - decl: [bad_keys_5, list<string>, { call: [<.unknown_keys, mus, "url,webhook_secret,token,layer_trust", "kontor"] }]
                   - call: [out.errors.extend, bad_keys_5]
-                  - set: [out.config.museum.url, { call: [<.text_of, mus, "url"] }]
-                  - set: [out.config.museum.webhook_secret, { call: [<.text_of, mus, "webhook_secret"] }]
-                  - set: [out.config.museum.token, { call: [<.text_of, mus, "token"] }]
-                  - set: [out.config.museum.layer_trust, { call: [<.text_of, mus, "layer_trust"] }]
-            - if: { condition: { eq: [out.config.museum.layer_trust.len, 0] }, then: [{ set: [out.config.museum.layer_trust, "same_host"] }] }
+                  - set: [out.config.kontor.url, { call: [<.text_of, mus, "url"] }]
+                  - set: [out.config.kontor.webhook_secret, { call: [<.text_of, mus, "webhook_secret"] }]
+                  - set: [out.config.kontor.token, { call: [<.text_of, mus, "token"] }]
+                  - set: [out.config.kontor.layer_trust, { call: [<.text_of, mus, "layer_trust"] }]
+            - if: { condition: { eq: [out.config.kontor.layer_trust.len, 0] }, then: [{ set: [out.config.kontor.layer_trust, "same_host"] }] }
             # ldap
             - decl: [ldn, ref<yaml_node>, { call: [yaml.get, node, "ldap"] }]
             - if:
