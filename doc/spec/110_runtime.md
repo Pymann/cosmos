@@ -1490,7 +1490,10 @@ Zwei Anläufe waren nötig, und beide stehen oben: das Bind-Ziel gab es im Abbil
   Eine Pipeline, die etwas baut und weitergeben will, legt das Ergebnis darum in die Wurzel
   (`aiml_vom_base` → Stufe `aiml_ablegen`: Compiler und Laufzeitbibliothek nach `/opt/aiml`,
   dazu der Pfad, den fremde Projekte fest eintragen, als Symlink).  Der `push:` schneidet dann
-  nach DIESER Stufe, nicht nach dem Bau.
+  nach DIESER Stufe, nicht nach dem Bau.  Seit aiml spec/68 legt `aiml_ablegen` eine **venv** an
+  (`aiml venv /opt/aiml`: `bin/aiml`, `lib/libaiml.so`, `lib/aiml/`, `env`); die Schicht braucht
+  damit weder `ld.so.conf.d` noch den Symlink — den Wirtspfad verdrahtet die Pipeline, die ihn
+  verlangt (`9rooms_vom_stapel`: `compiler_verdrahten`).
 - **F110-113: Ein Layout auf Platte IST ein bekanntes Abbild.**  Die Einreichung prüfte
   `image:` nur gegen `COSMOS_RT_IMAGES` und gegen die `push:`-Ziele DERSELBEN Pipeline.  Eine
   zweite Pipeline, die auf dem Ergebnis einer ersten aufbaut (`image: "oci:deploy/oci/…"`),
