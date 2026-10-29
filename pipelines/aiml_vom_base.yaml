@@ -20,7 +20,7 @@
     # Wohin das Ergebnis geht (aiml spec/62 §18, F62-122): ein OCI-Layout auf
     # Platte.  `from:` nennt die STUFE, deren Dateisystem abgelegt wird — ein
     # Abbild ist ein Dateisystem, und das gehoert der Stufe (F62-71).
-    # Geschnitten wird NACH `aiml_ablegen`, nicht nach `aiml_bauen`: der Bau
+    # Geschnitten wird NACH `aiml_ablegen` (die venv), nicht nach `aiml_bauen`: der Bau
     # liegt unter /ws, und /ws ist eine EINHAENGUNG (doc/spec/110 F110-104/111)
     # — sie gehoert dem Lauf, nicht dem Abbild, und erscheint im Schnitt
     # darum zu Recht nicht.  Erst `aiml_ablegen` legt den fertigen Compiler in
@@ -101,22 +101,20 @@
           # von einem Haenger nicht zu unterscheiden.
           run: "set -e; cd /ws/aiml; export PATH=/opt/venv/bin:$PATH AIML_MEM_V3=1; exodus build --all 2>&1 | tee /ws/build.log | grep --line-buffered -E 'compiling |linking |ERROR|error:' || true; echo '== nicht baubar (mit Grund) =='; grep -E '_run_config.*ERROR' /ws/build.log | sed -E 's/.*for //; s/: \\[Errno 2\\] No such file or directory: /  → fehlt: /' | head -5; echo '== gebaut =='; grep -E 'linking' /ws/build.log | sed -E 's/.*linking //' | tr '\\n' ' '; echo; ls -lh out/aiml/aiml out/libaiml/libaiml.so"
 
-      # Den fertigen Compiler in die WURZEL legen — nur so reist er im Abbild
-      # mit (doc/spec/110 F110-112).  Zwei Dateien reichen: das Binary und die
-      # Laufzeitbibliothek; fremde Projekte verlangen genau diese beiden Pfade
-      # (51× bzw. 48× in den exodus-*.json von 9rooms).
-      #
-      # Der SYMLINK auf den Wirtspfad ist kein Schoenheitsfehler, sondern die
-      # ehrliche Haelfte: Projekte tragen den Pfad ihres Autors fest in ihren
-      # Konfigurationen, und ein Abbild, das sie bauen soll, muss ihn anbieten.
-      # Die Alternative waere, in jeder fremden Datei herumzuschreiben — das
-      # waere die Aenderung, die man spaeter nicht mehr findet.
+      # Die aiml-venv in die WURZEL legen — nur so reist sie im Abbild mit
+      # (doc/spec/110 F110-112).  `aiml venv` (aiml spec/68) legt das ganze
+      # Layout an: bin/aiml, lib/libaiml.so, lib/aiml/ fuer Pakete und `env`.
+      # Mehr braucht die Schicht nicht: bin/aiml findet lib/ ueber
+      # RUNPATH $ORIGIN/../lib, also weder ein Eintrag in ld.so.conf.d noch ein
+      # Symlink auf einen Wirtspfad (F68-40).  Wer Pfade fest eintraegt (9rooms),
+      # verdrahtet sie in SEINER Pipeline (9rooms_vom_stapel: compiler_verdrahten).
       - stage:
           name: aiml_ablegen
           timeout: 600000
-          run: "set -e; install -D /ws/aiml/out/aiml/aiml /opt/aiml/out/aiml/aiml; install -D /ws/aiml/out/libaiml/libaiml.so /opt/aiml/out/libaiml/libaiml.so; echo '/opt/aiml/out/libaiml' > /etc/ld.so.conf.d/aiml.conf; ldconfig; HOSTDIR=/media/nikolai/95a208ef-ffa2-478b-abdd-ff394baa6a76/projects/python/test; mkdir -p $HOSTDIR; ln -sfn /opt/aiml $HOSTDIR/aiml; ls -lh /opt/aiml/out/aiml/aiml /opt/aiml/out/libaiml/libaiml.so; /opt/aiml/out/aiml/aiml --version 2>&1 | head -2 || true"
+          run: "set -e; /ws/aiml/out/aiml/aiml venv /opt/aiml; . /opt/aiml/env; ls -lh $AIML $AIML_VENV/lib/libaiml.so; readelf -d $AIML | grep -E 'RUNPATH' || true; cat $AIML_VENV/env"
 
       - stage:
           name: nachweis
           timeout: 300000
-          run: "set -e; cd /ws/aiml; printf -- '- def:\\n    name: main\\n    return: i32\\n    body:\\n      - print: [\"hallo aus dem frisch gebauten aiml\"]\\n      - return: 0\\n' > /tmp/hallo.aiml; ./out/aiml/aiml /tmp/hallo.aiml"
+          # Aus der venv, nicht aus dem Bau: `aiml` kommt aus PATH (aiml spec/68 F68-21).
+          run: "set -e; . /opt/aiml/env; printf -- '- def:\\n    name: main\\n    return: i32\\n    body:\\n      - print: [\"hallo aus der aiml-venv\"]\\n      - return: 0\\n' > /tmp/hallo.aiml; cd /tmp; command -v aiml; aiml /tmp/hallo.aiml"

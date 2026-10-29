@@ -7,7 +7,7 @@
 # das Schneiden (2,7 GB durch tar+gzip) und das Auslegen auf der anderen Seite.
 #
 # Was der Unterbau mitbringt: die apt-Pakete, /opt/venv mit exodus — und, wenn
-# der andere Lauf die Stufe `aiml_ablegen` hatte, den Compiler unter /opt/aiml.
+# der andere Lauf die Stufe `aiml_ablegen` hatte, die aiml-venv unter /opt/aiml.
 # Der GEBAUTE Compiler liegt sonst im Arbeitsplatz jenes Laufs; der ist von
 # hier aus sichtbar, weil der Arbeitsbereich des Wirts in jedem Container
 # unter /work haengt (doc/spec/110 F110-110).  Beide Faelle sind unten
@@ -30,15 +30,17 @@
           timeout: 120000
           run: "set -e; echo '== Wurzel =='; cat /etc/os-release | head -2; echo '== aus dem Unterbau =='; ls -d /opt/venv /opt/aiml 2>/dev/null || true; git --version; gcc --version | head -1; /opt/venv/bin/exodus --help | head -3; echo '== Arbeitsbereich des Wirts =='; ls /work | head -5"
 
-      # Den Compiler FINDEN, nicht vermuten: erst in der Wurzel (dort liegt er,
-      # wenn `aiml_ablegen` lief), sonst im Arbeitsplatz des anderen Laufs.
-      # Der Symlink auf den Wirtspfad ist noetig, weil die exodus-*.json von
-      # 9rooms ihn 51× fest eintragen — eine Kopie dieser Dateien zu pflegen
-      # waere die Aenderung, die man spaeter nicht mehr findet.
+      # Den Compiler FINDEN, nicht vermuten: erst die aiml-venv in der Wurzel
+      # (dort liegt sie, wenn `aiml_ablegen` lief — aiml spec/68), sonst der Bau
+      # im Arbeitsplatz des anderen Laufs.  Die Wirtspfade sind noetig, weil die
+      # exodus-*.json von 9rooms sie 51× fest eintragen — eine Kopie dieser
+      # Dateien zu pflegen waere die Aenderung, die man spaeter nicht mehr
+      # findet.  Sie gehoeren darum HIERHER, nicht in die venv-Schicht (F68-40):
+      # zwei Verweise in die venv, sonst nichts.
       - stage:
           name: compiler_verdrahten
           timeout: 300000
-          run: "set -e; SRC=/opt/aiml; [ -x $SRC/out/aiml/aiml ] || SRC=/work/aiml-vom-Base-Image-5/ws/aiml; [ -x $SRC/out/aiml/aiml ] || { echo \"kein gebauter Compiler gefunden (weder /opt/aiml noch /work/<lauf>/ws/aiml)\" >&2; exit 1; }; echo \"Compiler: $SRC\"; HOSTDIR=/media/nikolai/95a208ef-ffa2-478b-abdd-ff394baa6a76/projects/python/test; mkdir -p $HOSTDIR; ln -sfn $SRC $HOSTDIR/aiml; ls -lh $HOSTDIR/aiml/out/aiml/aiml $HOSTDIR/aiml/out/libaiml/libaiml.so; echo $SRC/out/libaiml > /etc/ld.so.conf.d/aiml.conf; ldconfig; $HOSTDIR/aiml/out/aiml/aiml --version 2>&1 | head -2 || true"
+          run: "set -e; HOSTDIR=/media/nikolai/95a208ef-ffa2-478b-abdd-ff394baa6a76/projects/python/test; mkdir -p $HOSTDIR; [ -L $HOSTDIR/aiml ] && rm $HOSTDIR/aiml; if [ -f /opt/aiml/env ]; then . /opt/aiml/env; mkdir -p $HOSTDIR/aiml/out/aiml $HOSTDIR/aiml/out/libaiml; ln -sfn $AIML $HOSTDIR/aiml/out/aiml/aiml; ln -sfn $AIML_VENV/lib/libaiml.so $HOSTDIR/aiml/out/libaiml/libaiml.so; echo \"Compiler: venv $AIML_VENV\"; else SRC=/work/aiml-vom-Base-Image-5/ws/aiml; [ -x $SRC/out/aiml/aiml ] || { echo \"kein Compiler gefunden (weder die venv /opt/aiml noch /work/<lauf>/ws/aiml)\" >&2; exit 1; }; ln -sfn $SRC $HOSTDIR/aiml; echo $SRC/out/libaiml > /etc/ld.so.conf.d/aiml.conf; ldconfig; echo \"Compiler: $SRC (Bau eines frueheren Laufs)\"; fi; ls -lhL $HOSTDIR/aiml/out/aiml/aiml $HOSTDIR/aiml/out/libaiml/libaiml.so"
 
       # Der Unterbau kann eine venv mit EDITIERBAREM exodus tragen (`pip -e`):
       # dann steht in ihr nur ein Verweis auf /ws/exodus — und /ws gehoert dem
