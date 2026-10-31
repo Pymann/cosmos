@@ -7,7 +7,7 @@
         "sources/runtime/test_oci.aiml"
     ],
     "compiler": {
-        "name": "/media/nikolai/95a208ef-ffa2-478b-abdd-ff394baa6a76/projects/python/test/aiml/out/aiml/aiml",
+        "name": "$AIML",
         "lang_standard": "17",
         "flags": []
     },
@@ -21,7 +21,7 @@
         ],
         "library_paths": [
             "/media/nikolai/95a208ef-ffa2-478b-abdd-ff394baa6a76/projects/python/test/cosmos/runtime/shim",
-            "/media/nikolai/95a208ef-ffa2-478b-abdd-ff394baa6a76/projects/python/test/aiml/out/libaiml"
+            "$AIML_VENV/lib"
         ],
         "flags": [
             "-Wl,-rpath,/media/nikolai/95a208ef-ffa2-478b-abdd-ff394baa6a76/projects/python/test/cosmos/runtime/shim"

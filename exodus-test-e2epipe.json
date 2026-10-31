@@ -7,14 +7,14 @@
     "test/e2e_pipeline_run.aiml"
   ],
   "compiler": {
-    "name": "/media/nikolai/95a208ef-ffa2-478b-abdd-ff394baa6a76/projects/python/test/aiml/out/aiml/aiml",
+    "name": "$AIML",
     "lang_standard": "17",
     "flags": []
   },
   "linker": {
     "name": "g++",
     "flags": [
-      "-Wl,-rpath,/media/nikolai/95a208ef-ffa2-478b-abdd-ff394baa6a76/projects/python/test/aiml/out/libaiml"
+      "-Wl,-rpath,$ORIGIN/../lib"
     ],
     "libraries": [
       "aiml",
@@ -24,7 +24,7 @@
       "dl"
     ],
     "library_paths": [
-      "/media/nikolai/95a208ef-ffa2-478b-abdd-ff394baa6a76/projects/python/test/aiml/out/libaiml"
+      "$AIML_VENV/lib"
     ]
   },
   "artifact_in_cwd": true,

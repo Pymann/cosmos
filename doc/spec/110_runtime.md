@@ -1019,14 +1019,19 @@ aiml_bauen                   287s    aiml-asan · aiml-tests · aiml (80 MB) · 
 nachweis                       0     „hallo aus dem frisch gebauten aiml"
 ```
 
-- **F110-69: `exodus deps install` ist ein Stub.**  aiml deklariert ~140 apt-Pakete in
+- **F110-69: der apt-Cache wird verlinkt, nicht geladen.**  aiml deklariert ~140 apt-Pakete in
   seiner `exodus.json` und sucht deren Header unter
   `__exodus_cache/apt/<paket>/<arch>/<version>/payload`.  Wer das Projekt frisch klont, hat
-  diesen Cache nicht — und es gibt **kein Kommando**, ihn herzustellen: `deps` meldet
-  „not implemented" (im Commit: `pass`), `pkg add` lädt genau EIN Paket.  Bis exodus das
-  kann, stellt die Pipeline den Cache selbst her: die apt-Stufe installiert dieselben
-  Pakete ins System, und je Paket zeigt ein Symlink `payload -> /`.  Das ist ehrlicher als
-  eine Kopie — es gibt nur eine Fassung dieser Dateien.
+  diesen Cache nicht.  Die Pipeline stellt ihn selbst her: die apt-Stufe installiert dieselben
+  Pakete ins System, und je Paket zeigt ein Symlink `payload -> /`.  Das ist ehrlicher als eine
+  Kopie — es gibt nur eine Fassung dieser Dateien.
+  **Korrektur (2026-10-30):** der ursprüngliche Satz „es gibt kein Kommando, ihn herzustellen"
+  war falsch.  `exodus pkg install` **ohne** Namen installiert ALLE deklarierten apt- **und**
+  git-Pakete in den Cache (`PackageManager._install`, Filter nur bei genanntem Namen); nur
+  `pkg add` lädt wirklich genau eines.  Ein Stub ist allein `exodus deps` („not implemented",
+  rc 2) — ein zweiter, leerer Befehl neben dem, der die Arbeit tut.  Der Symlink bleibt die
+  Wahl dieser Stufe (kein zweiter Download); wer den Cache ohne System-apt will, ruft
+  `exodus pkg install`.
 - **F110-70: Ein Bau wird am ERGEBNIS beurteilt, nicht am Rückgabewert.**  `exodus build
   --all` endet hier mit 1, und zwar zu Recht: zwei Repro-Konfigurationen tragen einen
   absoluten Host-Pfad, und der wasm-Lauf braucht emsdk (eine git-Abhängigkeit, die ebenfalls

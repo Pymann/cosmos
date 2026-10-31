@@ -1,0 +1,129 @@
+# Das ganze Oekosystem vom nackten Ubuntu-Base an: aiml bauen, die drei
+# Werkzeuge damit bauen, alles testen, in kontor veroeffentlichen — und dann,
+# als Probe, eine FRISCHE aiml-venv anlegen und die Pakete aus diesem kontor
+# installieren.  Die letzte Stufe ist der Beweis, dass die Kette traegt.
+#
+# Die Wurzel des Containers gehoert diesem Lauf (doc/spec/110 F110-61): was eine
+# Stufe installiert, findet die naechste vor.  /ws ist eine EINHAENGUNG und
+# gehoert dem Lauf, nicht dem Abbild (F110-104/111) — darum legt
+# `aiml_ablegen` die venv nach /opt.
+#
+# aiml, exodus und cosmos kommen aus /src (lokale Spiegel, COSMOS_RT_SRC);
+# ufo und kontor von GitHub, weil sie dort leben.
+- pipeline:
+    name: trio_vom_base
+    image: ubuntu-base
+    push:
+      - { from: werkzeuge_ablegen, to: "oci:deploy/oci/aiml-trio", tag: "nightly" }
+    steps:
+
+      - stage:
+          name: basis_zeigen
+          timeout: 120000
+          run: "set -e; cat /etc/os-release | head -2; mount | grep -E ' / | /ws ' | head -3; df -h / /ws | tail -2; id"
+
+      - stage:
+          name: apt_installieren
+          timeout: 2400000
+          # Zusaetzlich zu aimls Baubedarf: xvfb + x11-utils + mesa fuer die
+          # Display-Tests des Korpus (run_all_tests.sh prueft `tty -s` UND
+          # xdpyinfo), slapd + xmlsec1 fuer kontors identity.sh, skopeo fuer
+          # kontors ecosystem.sh, curl fuer die Veroeffentlichung.
+          run: "set -e; export DEBIAN_FRONTEND=noninteractive; apt-get update; apt-get install -y --no-install-recommends -o Dpkg::Use-Pty=0 ca-certificates curl git build-essential cmake ninja-build python3 python3-venv python3-pip pkg-config zlib1g-dev libssl-dev libyaml-cpp-dev llvm-18-dev libclang-18-dev libbrotli-dev libzstd-dev liblz4-dev libzip-dev libassimp-dev libgl-dev libglew-dev libglfw3-dev libglu1-mesa-dev libvulkan-dev libglm-dev libpng-dev libwebp-dev libstb-dev libopenblas-dev libxtst-dev libcap-dev libseccomp-dev libssh-dev libldap2-dev libxmlsec1-dev xvfb x11-utils mesa-utils libgl1-mesa-dri slapd ldap-utils xmlsec1 skopeo util-linux; echo '== da =='; git --version; curl --version | head -1; llvm-config-18 --version; Xvfb -help 2>&1 | head -1; skopeo --version"
+
+      - stage:
+          name: exodus_einbauen
+          timeout: 900000
+          # Fest eingebaut, nicht editierbar (`-e`): ein Verweis auf /ws waere
+          # ein Verweis ins Leere, sobald die Einhaengung weg ist.
+          run: "set -e; python3 -m venv /opt/venv; /opt/venv/bin/pip install --quiet --upgrade pip wheel; rm -rf /ws/exodus; git clone --depth 1 file:///src/exodus /ws/exodus; git -C /ws/exodus log -1 --format='exodus %h %s'; cd /ws/exodus; /opt/venv/bin/pip install --quiet .; /opt/venv/bin/exodus --help | head -3"
+
+      - stage:
+          name: aiml_klonen
+          timeout: 1800000
+          run: "set -e; rm -rf /ws/aiml; git clone file:///src/test/aiml /ws/aiml; git -C /ws/aiml log -1 --format='aiml %h %s'; du -sh /ws/aiml"
+
+      - stage:
+          name: abhaengigkeiten_holen
+          timeout: 1800000
+          # aiml deklariert seine Systempakete selbst (exodus.json,
+          # apt_packages) und sucht sie unter
+          # __exodus_cache/apt/<paket>/<arch>/<version>/payload.  Genau das
+          # fuellt `exodus pkg install`: apt-get download + dpkg-deb -x in den
+          # Cache.  (Frueher stand hier ein python3-Schnipsel, der `payload`
+          # auf / verlinkte — geboren aus dem Irrtum, `exodus deps install` sei
+          # der Installierer.  Der Installierer ist `pkg`.)
+          run: "set -e; cd /ws/aiml; export PATH=/opt/venv/bin:$PATH; exodus pkg install; echo '== im Cache =='; ls __exodus_cache/apt | head -10; ls __exodus_cache/apt | wc -l"
+
+      - stage:
+          name: aiml_bauen
+          requires: [git, "gcc>=13", python3, llvm-config-18]
+          timeout: 7200000
+          # Gebaut wird ALLES, geurteilt wird am ERGEBNIS: drei Konfigurationen
+          # sind hier nicht baubar und sagen das auch (zwei Repro-Faelle mit
+          # Host-Pfad, wasm braucht emsdk).  Die Summenzeile von `build --all`
+          # nennt jede Konfiguration mit ihrem errorlevel.
+          run: "set -e; cd /ws/aiml; export PATH=/opt/venv/bin:$PATH AIML_MEM_V3=1; exodus build --all 2>&1 | tee /ws/aiml_build.log | grep --line-buffered -E 'compiling |linking |errorlevel|summary|error:' || true; ls -lh out/aiml/aiml out/libaiml/libaiml.so"
+
+      - stage:
+          name: aiml_ablegen
+          timeout: 600000
+          # Die venv in die WURZEL, nur so reist sie im Abbild mit (F110-112).
+          run: "set -e; /ws/aiml/out/aiml/aiml venv /opt/aiml; . /opt/aiml/env; ls -lh $AIML $AIML_VENV/lib/libaiml.so; readelf -d $AIML | grep RUNPATH; command -v aiml"
+
+      - stage:
+          name: aiml_testen
+          timeout: 7200000
+          # Der ganze Korpus, mit Display: run_all_tests.sh laeuft die
+          # Display-Tests nur, wenn `tty -s` gilt UND xdpyinfo den Schirm
+          # findet — `script -qec` gibt das Terminal, Xvfb den Schirm.  Die
+          # zwei Tests, die auf einen Menschen warten, bleiben ohne --manual
+          # draussen.
+          run: "set -e; cd /ws/aiml; export PATH=/opt/venv/bin:$PATH AIML_MEM_V3=1; Xvfb :99 -screen 0 1280x1024x24 > /ws/xvfb.log 2>&1 & sleep 2; export DISPLAY=:99; xdpyinfo -display :99 | head -2; script -qec './run_all_tests.sh --no-build' /dev/null 2>&1 | tail -40"
+
+      - stage:
+          name: werkzeuge_klonen
+          timeout: 1800000
+          run: "set -e; rm -rf /ws/ufo /ws/kontor /ws/cosmos; git clone --depth 1 https://github.com/Pymann/ufo /ws/ufo; git clone --depth 1 https://github.com/Pymann/kontor /ws/kontor; git clone file:///src/test/cosmos /ws/cosmos; for r in ufo kontor cosmos; do git -C /ws/$r log -1 --format=\"$r %h %s\"; done"
+
+      - stage:
+          name: werkzeuge_bauen
+          timeout: 7200000
+          # Jedes Werkzeug wird von dem Compiler gebaut, neben dem es liegen
+          # wird (aiml spec/68 F68-53), und `install` legt es in die venv.
+          # Was gebaut wird, sagt das Repo selbst (aiml.tool.json).
+          run: "set -e; . /opt/aiml/env; export PATH=/opt/venv/bin:$PATH AIML_CACHE=/ws/toolcache; for t in ufo kontor cosmos; do echo \"== $t ==\"; aiml venv /opt/aiml install $t --path /ws/$t; done; aiml venv /opt/aiml list"
+
+      - stage:
+          name: werkzeuge_ablegen
+          timeout: 300000
+          # Die Stufe, deren Dateisystem ins Abbild geschnitten wird: hier
+          # liegt die venv mit Compiler, Laufzeit UND Werkzeugen in der Wurzel.
+          run: "set -e; . /opt/aiml/env; ls -lh /opt/aiml/bin; for p in /opt/aiml/bin/*; do readelf -d $p 2>/dev/null | sed -n \"s|.*(RUNPATH).*\\[|$p |p\" | cut -c1-120; done; du -sh /opt/aiml"
+
+      - stage:
+          name: werkzeuge_testen
+          timeout: 7200000
+          # Getestet wird, was gebaut wurde: die Programme aus der venv, nicht
+          # der Compiler, der die Quellen liest (KONTOR_BIN, UFO).
+          run: "set -e; . /opt/aiml/env; export PATH=/opt/venv/bin:$PATH AIML_MEM_V3=1; echo '== ufo =='; cd /ws/ufo; UFO=/opt/aiml/bin/ufo tests/interop.sh | tail -3; UFO=/opt/aiml/bin/ufo tests/layer.sh | tail -3; UFO=/opt/aiml/bin/ufo AIML=/opt/aiml/bin/aiml tests/venv_layer.sh | tail -3; echo '== kontor =='; cd /ws/kontor; AIML_BIN=/opt/aiml/bin/aiml KONTOR_BIN=/opt/aiml/bin/kontor tests/run_all.sh | tail -8; echo '== cosmos =='; cd /ws/cosmos; ./run_tests.sh 2>&1 | tail -12"
+
+      - stage:
+          name: kontor_und_probe
+          timeout: 10800000
+          # Veroeffentlichen und Zurueckholen in EINER Stufe: der Server laeuft
+          # nur, solange diese Stufe laeuft (ein Hintergrundprozess ueberlebt
+          # keine Stufengrenze, und soll es nicht).  Der Server ist der, der
+          # gerade gebaut und getestet wurde; seine Daten liegen auf /ws
+          # (Laufdaten, nicht Abbild).
+          #
+          # Das Token wird hier erzeugt und wieder weggeworfen.  Echte
+          # Geheimnisse gehoeren in die Geheimnis-Verwaltung der Pipeline, die
+          # es noch nicht gibt (doc/spec/96) — ein Wegwerf-Token fuer einen
+          # Server auf 127.0.0.1 braucht sie nicht.
+          #
+          # Die Probe am Ende ist der Punkt der ganzen Pipeline: eine FRISCHE
+          # venv, die von diesem Lauf nichts weiss, holt die Werkzeuge aus
+          # kontor — Quellpaket herunterladen, auspacken, mit ihrem EIGENEN
+          # Compiler bauen, einsetzen (aiml spec/68 §6.1, F68-66).
+          run: "set -e; export PATH=/opt/venv/bin:$PATH; mkdir -p /ws/kontor-data; head -c 48 /dev/urandom | sha256sum | cut -d' ' -f1 > /ws/kontor.token; chmod 600 /ws/kontor.token; /opt/aiml/bin/kontor 8081 /ws/kontor-data > /ws/kontor.log 2>&1 & KPID=$!; trap 'kill $KPID 2>/dev/null' EXIT; for i in $(seq 150); do curl -fs -o /dev/null http://127.0.0.1:8081/api/health && break; sleep 0.2; done; curl -s http://127.0.0.1:8081/api/health; echo; export KONTOR_TOKEN=$(cat /ws/kontor.token); for t in ufo kontor cosmos; do /ws/cosmos/tools/kontor_publish.sh /ws/$t http://127.0.0.1:8081; done; echo '== kontors Graph =='; curl -s http://127.0.0.1:8081/api/v1/graph; echo; echo '== frische venv aus kontor =='; export AIML_CACHE=/ws/kontorcache; /opt/aiml/bin/aiml venv /opt/aiml-aus-kontor; /opt/aiml-aus-kontor/bin/aiml venv /opt/aiml-aus-kontor install --all --kontor http://127.0.0.1:8081; echo '== was drin ist =='; /opt/aiml-aus-kontor/bin/aiml venv /opt/aiml-aus-kontor list; ls -lh /opt/aiml-aus-kontor/bin; echo '== und es laeuft ohne Umgebung =='; env -i /opt/aiml-aus-kontor/bin/ufo 2>&1 | head -2; for p in /opt/aiml-aus-kontor/bin/*; do env -i ldd $p | grep -q 'libaiml.so => /opt/aiml-aus-kontor/bin/../lib' && echo \"$p findet seine Laufzeit\"; done; rm -f /ws/kontor.token"

@@ -17,7 +17,11 @@ export AIONDB_PATH="${AIONDB_PATH:-$PWD/aiondb}"; mkdir -p "$AIONDB_PATH" logs
 MODE="${1:---run}"
 case "$MODE" in
   --build)
-    source ../../exvenv/bin/activate
+    # In einem Container liegt exodus woanders und steht schon auf PATH.
+    [ -f ../../exvenv/bin/activate ] && source ../../exvenv/bin/activate
+    # aiml spec/68: die Konfigurationen nehmen Compiler und Laufzeit aus einer
+    # venv ($AIML, $AIML_VENV) — die Standard-venv, falls keine aktiv ist.
+    [ -n "${AIML:-}" ] || [ ! -f ../../aimlvenv/env ] || . ../../aimlvenv/env
     exodus build -c exodus-cosmosd.json && exodus build -c exodus-static.json && exodus build -c exodus-client.json ;;
   --systemd)
     mkdir -p deploy/systemd

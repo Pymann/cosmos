@@ -313,8 +313,10 @@ Neue Programme: `cosmos-api` (`exodus-api.json`), `cosmos-kontor` (`exodus-konto
 - **`from_code:`** (spec/100 §100.6) fehlt, siehe F111-5.
 - **LDAP/SAML** brauchen den aiml-Zweig `feature/identity-builtins-memv3` (libldap,
   xmlsec1).  `memberOf` als Gruppen-Attribut setzt das memberof-Overlay im Verzeichnis voraus.
-- **Schicht-Annotationen** (`cosmos.stage`, `cosmos.bindings`, …) setzt cosmos-oci noch nicht;
-  das Artefakt trägt bisher nur den `artifactType`.
+- ~~**Schicht-Annotationen** (`cosmos.stage`, `cosmos.bindings`, …) setzt cosmos-oci noch nicht~~
+  — **stimmt nicht mehr** (geprüft 2026-10-31): `rt_oci.aiml` schreibt jeden Schlüssel aus
+  `layer.meta` als `cosmos.<schlüssel>` in die Annotationen, `agent_step.aiml` füllt `layer.meta`,
+  und `test_oci.aiml` prüft es.  Der Eintrag stand hier, nachdem es umgesetzt war.
 - Beim Holen und Hochladen wird eine Schicht einmal ganz gelesen (Hash-Prüfung) — für
   mehrere GB große Schichten wäre ein Strom-Hash besser.
 

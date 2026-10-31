@@ -5,14 +5,14 @@
     "output_type": "shared_lib",
     "sources": ["sources/console/console_offer.aiml"],
     "compiler": {
-        "name": "/media/nikolai/95a208ef-ffa2-478b-abdd-ff394baa6a76/projects/python/test/aiml/out/aiml/aiml",
+        "name": "$AIML",
         "lang_standard": "17",
         "flags": []
     },
     "linker": {
         "name": "g++",
         "libraries": ["aiml", "pthread", "dl"],
-        "library_paths": ["/media/nikolai/95a208ef-ffa2-478b-abdd-ff394baa6a76/projects/python/test/aiml/out/libaiml"]
+        "library_paths": ["$AIML_VENV/lib"]
     },
     "artifact_in_cwd": true,
     "optimization": "0",

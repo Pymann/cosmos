@@ -46,6 +46,17 @@ Später kann daraus werden:
 
 ## Start
 
+Die Projektkonfigurationen nehmen Compiler und Laufzeit aus einer **aiml-venv**
+(`$AIML`, `$AIML_VENV/lib`; aiml spec/68 F68-23) — gebaut wird also mit dem
+Compiler, neben dem das Programm liegen wird, nicht ueber einen Pfad in einen
+fremden Baubaum.  Die `run_*.sh` aktivieren `../../aimlvenv` von selbst, wenn
+keine venv aktiv ist; von Hand:
+
+```bash
+aiml venv ../../aimlvenv        # einmal, mit dem gebauten Compiler
+. ../../aimlvenv/env
+```
+
 ```bash
 source ../../exvenv/bin/activate
 exodus build -c exodus-server.json && ./server          # oder: ./run.sh --build

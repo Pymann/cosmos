@@ -32,7 +32,7 @@
     "assets"
   ],
   "compiler": {
-    "name": "/media/nikolai/95a208ef-ffa2-478b-abdd-ff394baa6a76/projects/python/test/aiml/out/aiml/aiml"
+    "name": "$AIML"
   },
   "linker": {
     "name": "__exodus_cache/git/emsdk/current/upstream/emscripten/emcc",

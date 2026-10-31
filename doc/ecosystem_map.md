@@ -158,7 +158,7 @@ flowchart LR
     aimlc -->|"aiml venv"| venv
     venv -->|"Schicht /opt/aiml"| overlay
     libaiml -->|"in agent · cosmosd · kontor · ufo"| agent
-    rel -.->|"exodus deps install (geplant)"| exrepo
+    rel -.->|"exodus pkg install (apt/conan/git)"| exrepo
 
     %% ── Identität ───────────────────────────────────────────
     cosmosd -->|"⟨bind/search⟩"| ldap
@@ -250,7 +250,7 @@ flowchart LR
         t1(["Compiler + Laufzeit bauen<br/>exodus build"])
         t2(["venv anlegen / aktualisieren<br/>aiml venv &lt;dir&gt;"])
         t3(["Paket importieren<br/>@name/… aus Tabelle"])
-        t4(["Abhängigkeiten installieren<br/>exodus deps install (geplant)"])
+        t4(["Abhängigkeiten installieren<br/>exodus pkg install (apt/conan/git)"])
     end
 
     dev --- c1 & c2 & c5 & c4 & c7 & c8 & c9 & u1 & u2 & u3 & u9 & t3
@@ -642,10 +642,43 @@ flowchart TB
     end
     w3 -->|"package.published"| camp(["Rebuild-Kampagne (Diagramm 6)"])
 
-    future["aiml-exodus (in aiml)<br/>build · link · deps install"]
+    future["aiml-exodus (in aiml)<br/>build · link · pkg install"]
     venv -.->|"ersetzt Python-exodus ab dem zweiten Bau"| future
     future -.->|"Pakete nach lib/aiml/"| venv
 ```
+
+### 10.1 Die ganze Kette in einem Lauf — `pipelines/trio_vom_base.yaml`
+
+`aiml_vom_base` endet bei der venv.  `trio_vom_base` geht weiter und schliesst den Kreis: es baut
+die drei Werkzeuge **mit** dieser venv, testet sie, veroeffentlicht sie in kontor — und legt dann
+eine **frische** venv an, die sich dieselben Werkzeuge aus kontor holt.  Die letzte Stufe ist der
+Zweck des Laufs: sie beweist, dass eine Maschine mit nichts als einer venv und einer URL zum
+vollstaendigen Werkzeugkasten kommt.
+
+```mermaid
+flowchart TB
+    base[("ubuntu-base")] --> a1
+    subgraph T["Pipeline trio_vom_base"]
+        direction TB
+        a1["apt · exodus einbauen"] --> a2["abhaengigkeiten_holen<br/>exodus pkg install"]
+        a2 --> a3["aiml_bauen<br/>exodus build --all"]
+        a3 --> a4["aiml_ablegen<br/>aiml venv /opt/aiml"]
+        a4 --> a5["aiml_testen<br/>Xvfb + script -qec: der ganze Korpus"]
+        a5 --> a6["werkzeuge_bauen<br/>aiml venv install ufo|kontor|cosmos --path"]
+        a6 --> a7["werkzeuge_testen<br/>UFO= · KONTOR_BIN= · run_tests.sh"]
+        a7 --> a8["kontor_und_probe"]
+    end
+    a6 --> tb[["/opt/aiml mit bin/ufo · bin/kontor · bin/cosmosd …"]]
+    a8 --> k[("kontor auf 127.0.0.1:8081<br/>/exodus/&lt;name&gt;/&lt;version&gt;/")]
+    a8 -->|"tools/kontor_publish.sh<br/>git ls-files → tar.gz (reproduzierbar)"| k
+    k -->|"aiml venv install --all --kontor<br/>(aiml spec/68 §6.1, F68-66)"| frisch[["/opt/aiml-aus-kontor<br/>aus Quellpaketen selbst gebaut"]]
+    tb -->|"push: from werkzeuge_ablegen"| oci2[["oci:deploy/oci/aiml-trio:nightly"]]
+```
+
+Was kontor traegt, ist **Quelle**, nicht Binaercode (aiml spec/68 F68-60): sein Pfad hat
+`<name>/<version>` und keine Stelle fuer eine Architektur, und die venv kann bauen.  Der Abzug
+nimmt, was unter Versionskontrolle steht (`git ls-files`) — Baureste und Laufdaten gehoeren nicht
+in ein Quellpaket, und eine Ausschlussliste weiss das nie so gut wie git.
 
 ---
 
@@ -691,11 +724,17 @@ flowchart LR
 
 ## Offene Punkte, die in den Diagrammen gestrichelt sind
 
-- `exodus deps install` (Pakete aus kontor in eine Tabelle) — heute ein Stub; kommt mit
-  aiml-exodus.
+- Die **aiml-Pakettabelle** (`aiml.packages.json`, aiml spec/21 §3.1) schreibt `aiml venv …
+  install` — aus git und seit 2026-10-31 auch aus kontor (spec/68 §6.1).  `exodus pkg install`
+  bleibt bei apt/conan/git; `exodus deps` ist ein leerer Stub (rc 2).  Offen ist nur noch, wer von
+  beiden das Thema **besitzt**: solange spec/21 §3.1 „exodus pkg install" verspricht und der
+  Compiler in seiner Fehlermeldung dorthin zeigt, sagen Spec und Umsetzung Verschiedenes.
 - `from_code:` im Katalog (F111-5).
-- Schicht-Annotationen (`cosmos.stage`, `cosmos.bindings`, …) setzt cosmos-oci noch nicht
-  (spec/111 §111.11).
+- Der **Schritt-Cache hängt nicht im Lauf-Pfad**: `ActionCache` und `StepRunner` sind gebaut,
+  getestet und in `server_state` angelegt, aber `StepScheduler` baut nie einen `StepDef`, und
+  außer `test_step_runner.aiml` ruft niemand `StepRunner`.  Damit ist spec/92 §92.2 und spec/96
+  §96.6 (nachschlagen → überspringen → aufzeichnen) bisher Papier, und F106-22 (Parameter als
+  Schlüsselmaterial) ist eine Folge davon, keine eigene Lücke.
 - `ufo layer commit` direkt als Stufe eines cosmos-Laufs: die Bausteine sind da (ufo
   `tests/venv_layer.sh` zeigt den Weg), cosmos verdrahtet ihn noch nicht selbst.
 - Fremde Schichten als Cache-Treffer: erst mit Signaturen (F110-121).

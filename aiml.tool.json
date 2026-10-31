@@ -1,0 +1,19 @@
+{
+    "$schema": "aiml.tool-1.0",
+    "name": "cosmos",
+    "version": "0.1.0",
+    "configs": [
+        "exodus-cosmosd.json",
+        "exodus-api.json",
+        "exodus-kontor-client.json",
+        "runtime/exodus-rt.json",
+        "runtime/exodus-rt-oci.json"
+    ],
+    "programs": [
+        "cosmosd",
+        "cosmos-api",
+        "cosmos-kontor",
+        "cosmos-rt",
+        "cosmos-oci"
+    ]
+}

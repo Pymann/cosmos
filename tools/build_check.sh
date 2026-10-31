@@ -14,7 +14,11 @@
 #    hier ein FEHLER, kein Hinweis.  Heilmittel: `rm -rf out/<ziel>` und neu bauen.
 set -uo pipefail
 cd "$(dirname "$0")/.."
-source ../../exvenv/bin/activate
+# In einem Container liegt exodus woanders und steht schon auf PATH.
+[ -f ../../exvenv/bin/activate ] && source ../../exvenv/bin/activate
+# aiml spec/68: die Konfigurationen nehmen Compiler und Laufzeit aus einer
+# venv ($AIML, $AIML_VENV) — die Standard-venv, falls keine aktiv ist.
+[ -n "${AIML:-}" ] || [ ! -f ../../aimlvenv/env ] || . ../../aimlvenv/env
 out=$(exodus build -c "$1" 2>&1); rc=$?
 if [ $rc -ne 0 ]; then
     echo "BUILD FAILED ($1) rc=$rc"

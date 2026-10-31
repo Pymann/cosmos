@@ -20,7 +20,11 @@ WORK="$PWD/.e2e_console"; rm -rf "$WORK"; mkdir -p "$WORK/deploy/clearance"
 # geteiltes Modell aendert, muss ALLE Sprecher dieses RPC neu bauen — also tut es das
 # Skript.  Mit --no-build laesst es sich ueberspringen.
 if [ "${1:-}" != "--no-build" ]; then
-    source ../../exvenv/bin/activate
+    # In einem Container liegt exodus woanders und steht schon auf PATH.
+    [ -f ../../exvenv/bin/activate ] && source ../../exvenv/bin/activate
+    # aiml spec/68: die Konfigurationen nehmen Compiler und Laufzeit aus einer
+    # venv ($AIML, $AIML_VENV) — die Standard-venv, falls keine aktiv ist.
+    [ -n "${AIML:-}" ] || [ ! -f ../../aimlvenv/env ] || . ../../aimlvenv/env
     for cfg in exodus-cosmosd.json exodus-console-offer.json exodus-test-cadmin.json; do
         exodus build -c "$cfg" || { echo "BUILD FAILED $cfg"; exit 1; }
     done

@@ -13,7 +13,11 @@ LOGS="$PWD/logs"
 
 if [ "${1:-}" != "--run-only" ]; then
     # shellcheck disable=SC1091
-    source ../../exvenv/bin/activate
+    # In einem Container liegt exodus woanders und steht schon auf PATH.
+    [ -f ../../exvenv/bin/activate ] && source ../../exvenv/bin/activate
+    # aiml spec/68: die Konfigurationen nehmen Compiler und Laufzeit aus einer
+    # venv ($AIML, $AIML_VENV) — die Standard-venv, falls keine aktiv ist.
+    [ -n "${AIML:-}" ] || [ ! -f ../../aimlvenv/env ] || . ../../aimlvenv/env
     for cfg in exodus-cosmosd.json exodus-agent.json exodus-test-enroll.json exodus-test-e2epipe.json; do
         echo "=== building $cfg ==="
         exodus build -c "$cfg" || { echo "BUILD FAILED: $cfg"; exit 1; }
