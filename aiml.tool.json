@@ -9,6 +9,9 @@
         "runtime/exodus-rt.json",
         "runtime/exodus-rt-oci.json"
     ],
+    "libraries": [
+        "runtime/shim/librt_shim.so"
+    ],
     "programs": [
         "cosmosd",
         "cosmos-api",

@@ -10,6 +10,11 @@
 #
 # aiml, exodus und cosmos kommen aus /src (lokale Spiegel, COSMOS_RT_SRC);
 # ufo und kontor von GitHub, weil sie dort leben.
+#
+# Dauer: Stunden, und zwar jedes Mal — der Schritt-Cache haengt noch nicht im
+# Lauf-Pfad (doc/ecosystem_map.md, Offene Punkte), also baut jeder Lauf alles
+# neu.  Die Zeit steckt in aiml_bauen, aiml_testen (ganzer Korpus) und
+# werkzeuge_testen (cosmos' Suite uebersetzt pro Test).
 - pipeline:
     name: trio_vom_base
     image: ubuntu-base

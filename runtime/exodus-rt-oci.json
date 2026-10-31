@@ -23,7 +23,7 @@
             "$AIML_VENV/lib"
         ],
         "flags": [
-            "-Wl,-rpath,/media/nikolai/95a208ef-ffa2-478b-abdd-ff394baa6a76/projects/python/test/cosmos/runtime/shim"
+            "-Wl,-rpath,$ORIGIN/../lib:$ORIGIN/runtime/shim"
         ]
     },
     "artifact_in_cwd": true,
