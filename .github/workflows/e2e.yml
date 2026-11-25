@@ -1,0 +1,82 @@
+name: E2E
+
+# The acceptance runs (run_e2e*.sh): real processes -- cosmosd, cosmos-api,
+# agents, a test sshd, a throwaway slapd -- talking over sockets.  They were
+# never part of CI, and four of them had drifted from the code they accept
+# (2026-11-25).  One job per suite, so a red one names itself.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      aiml_release:
+        description: "aiml release tag to build with (empty = newest release, else newest green aiml CI run)"
+        required: false
+        default: ""
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    name: ${{ matrix.suite }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        suite:
+          - run_e2e.sh
+          - run_e2e_provision.sh
+          - run_e2e_api.sh
+          - run_e2e_console.sh
+          - run_e2e_pipeline.sh
+          - run_e2e_identity.sh
+          - run_e2e_chaos.sh
+    env:
+      AIML_CACHE: ${{ github.workspace }}/__aiml_cache
+      AIML_MEM_V3: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      # bubblewrap: the step sandbox (doc/spec/91).  slapd, ldap-utils,
+      # xmlsec1: the directory and the IdP of run_e2e_identity.sh.
+      - name: System packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends g++ libssl-dev curl jq \
+            libldap-dev xmlsec1 slapd ldap-utils bubblewrap
+          # Ubuntu 24.04 keeps unprivileged user namespaces behind AppArmor;
+          # bwrap needs one for every step.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          # slapd's packaged profile keeps it out of the test's directory.
+          if [ -f /etc/apparmor.d/usr.sbin.slapd ]; then
+            sudo ln -sf /etc/apparmor.d/usr.sbin.slapd /etc/apparmor.d/disable/
+            sudo apparmor_parser -R /etc/apparmor.d/usr.sbin.slapd || true
+          fi
+
+      - name: Download aiml
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AIML_RELEASE: ${{ github.event.inputs.aiml_release || vars.AIML_RELEASE }}
+        run: bash .github/ci/setup-aiml.sh "$RUNNER_TEMP/aimlvenv"
+
+      # Every script builds what it needs with the active venv (aiml build).
+      # The console offer library is the one artifact none of them builds.
+      - name: Build the console offer library
+        if: matrix.suite == 'run_e2e_console.sh'
+        run: aiml build -c exodus-console-offer.json
+
+      - name: ${{ matrix.suite }}
+        run: timeout 2400 bash "${{ matrix.suite }}"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-logs-${{ matrix.suite }}
+          path: logs/
+          if-no-files-found: ignore
