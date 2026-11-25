@@ -20,7 +20,7 @@ Environment=COSMOS_AGENT_URL=ws://127.0.0.1:8770
 Environment=COSMOS_AGENT_ID=kontor-server
 Environment=COSMOS_AGENT_LABELS=kontor-server,x86_64,linux
 EnvironmentFile=/etc/cosmos/cosmos.env
-ExecStartPre=/opt/cosmos/bin/agent --verify-isolation --bwrap-path /opt/cosmos/bin/bwrap
+ExecStartPre=/opt/cosmos/bin/agent --verify-isolation 1 --bwrap-path /opt/cosmos/bin/bwrap
 ExecStart=/opt/cosmos/bin/agent --exec-url ${COSMOS_AGENT_URL} --agent-id ${COSMOS_AGENT_ID} --labels ${COSMOS_AGENT_LABELS} --agent-token-file /var/lib/cosmos-agent/agent.token --bwrap-path /opt/cosmos/bin/bwrap --work-root /var/lib/cosmos-agent/steps
 Restart=on-failure
 RestartSec=10

@@ -247,7 +247,7 @@ fi
 
 # ------------------------------------------------------------------ 10. Agent
 step "10. Agent: erst Nachweis, dann Start (doc/spec/94 Schritt 9)"
-probe="$(cd "$ADATA" && runuser -u cosmos-agent -- env AIML_MEM_V3=1 "$OPT/bin/agent" --verify-isolation --bwrap-path "$OPT/bin/bwrap" 2>&1 || true)"
+probe="$(cd "$ADATA" && runuser -u cosmos-agent -- env AIML_MEM_V3=1 "$OPT/bin/agent" --verify-isolation 1 --bwrap-path "$OPT/bin/bwrap" 2>&1 || true)"
 grep -q ISOLATION_OK <<<"$probe" || die "Isolation traegt nicht — der Agent wird NICHT gestartet:
 $probe"
 ok "Isolation traegt"
