@@ -104,11 +104,11 @@
 
       - decl: [old_tmo, SubmitCheck, { call: [submit.check, "- pipeline:\n    name: demo\n    steps:\n      - stage:\n          name: one\n          timeout_s: 5\n          run: \"true\"\n", ""] }]
       - set: [fails, { +: [fails, { call: [expect, "`timeout_s:` wird abgelehnt", { eq: [old_tmo.accepted, 0] }] }] }]
-      - set: [fails, { +: [fails, { call: [expect, "und nennt die Millisekunden", { ge: [{ call: [old_tmo.message.index_of, "MILLISEKUNDEN"] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und nennt die Millisekunden", { ge: [{ call: [old_tmo.message.index_of, "F62-40"] }, 0] }] }] }]
 
       - decl: [old_params, SubmitCheck, { call: [submit.check, "- pipeline:\n    name: demo\n    params:\n      arch: [x86_64]\n    steps: []\n", ""] }]
       - set: [fails, { +: [fails, { call: [expect, "params als Abbildung wird abgelehnt", { eq: [old_params.accepted, 0] }] }] }]
-      - set: [fails, { +: [fails, { call: [expect, "und nennt die Listenform", { ge: [{ call: [old_params.message.index_of, "LISTE"] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und nennt die Listenform", { ge: [{ call: [old_params.message.index_of, "F62-1"] }, 0] }] }] }]
 
       # Typ der Achse: er zaehlt, sobald Rumpf-Schritte kommen (F62-1).
       - decl: [bad_type, SubmitCheck, { call: [submit.check, "- pipeline:\n    name: demo\n    params:\n      - [arch, wurst, [x86_64]]\n    steps: []\n", ""] }]

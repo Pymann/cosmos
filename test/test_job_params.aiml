@@ -78,6 +78,12 @@
     return: i32
     body:
       - decl: [fails, i32, 0]
+      # Der Wirt muss `ubuntu-base` kennen (doc/spec/110 F110-72), sonst weist
+      # die Pruefung die Pipeline wegen des Abbilds ab statt wegen der
+      # Parameter.  Gesetzt im Test selbst, nicht vom Rechner geerbt: auf einem
+      # frischen Rechner (CI) ist COSMOS_RT_IMAGES leer.  Der Pfad wird hier
+      # nie gelesen, nur der Name.
+      - call: [sys.setenv, "COSMOS_RT_IMAGES", "ubuntu-base=/nonexistent/rt_image"]
       - decl: [submit, ptr<PipelineSubmit>, { new: PipelineSubmit }]
 
       - decl: [bag, JobParams]

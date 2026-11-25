@@ -33,9 +33,25 @@
             - decl: [raw, string, { call: [cenv.get, "COSMOS_ROOT"] }]
             - set: [root, "${raw}"]
 
+      # Der Compiler der Kind-Skripte: `$AIML` (aiml spec/68 F68-21), sonst der
+      # der venv, sonst `aiml` vom PATH — nie ein Pfad in einen Baubaum.  Der
+      # feste `${root}/../aiml/out/aiml/aiml` fand ihn nur neben einem
+      # aiml-Checkout; in CI lief jedes Kind-Skript ins Leere.
+      - decl: [aiml_bin, string, "aiml"]
+      - if:
+          condition: { gt: [{ call: [cenv.contains, "AIML_VENV"] }, 0] }
+          then:
+            - decl: [venv_raw, string, { call: [cenv.get, "AIML_VENV"] }]
+            - set: [aiml_bin, "${venv_raw}/bin/aiml"]
+      - if:
+          condition: { gt: [{ call: [cenv.contains, "AIML"] }, 0] }
+          then:
+            - decl: [aiml_raw, string, { call: [cenv.get, "AIML"] }]
+            - set: [aiml_bin, "${aiml_raw}"]
+
       - decl: [runner, ptr<ConsoleRunner>, { new: ConsoleRunner }]
       - call: [runner.init_with,
-               "${root}/../aiml/out/aiml/aiml",
+               aiml_bin,
                "${root}/deploy/clearance/console_exports.txt",
                "${root}/deploy/clearance/console_preamble.aiml",
                "${root}/libcosmos_console_offer.so",
