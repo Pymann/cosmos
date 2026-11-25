@@ -96,7 +96,10 @@ cp --update=none "$PKG"/lib/*.so* "$VENV/lib/"
 # installed with apt.  On the runner the tarball's copies play that part.
 if [ -n "${GITHUB_ACTIONS:-}" ]; then
     sudo mkdir -p /usr/local/lib/aiml-bundle
-    sudo find "$PKG/lib" -maxdepth 1 -name 'lib*.so*' ! -name 'libaiml.so' -exec cp -L {} /usr/local/lib/aiml-bundle/ \;
+    # `install`, not `cp`: it replaces a file instead of writing into it, so a
+    # second run does not overwrite libraries that running processes (sudo
+    # itself) have mapped -- that segfaulted (cosmos doc/spec/112 §112.7).
+    sudo find "$PKG/lib" -maxdepth 1 -name 'lib*.so*' ! -name 'libaiml.so' -exec install -m 0644 {} /usr/local/lib/aiml-bundle/ \;
     echo /usr/local/lib/aiml-bundle | sudo tee /etc/ld.so.conf.d/aiml-bundle.conf > /dev/null
     sudo ldconfig
 fi

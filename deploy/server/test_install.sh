@@ -103,7 +103,8 @@ second="$(sudo cosmosctl run "$JOB" | tail -1)"
 st="$(wait_run "$second")"
 check "zweiter Lauf done (war: $st)" [ "$st" = "done" ]
 check "kein zweiter PUT des Tarballs" [ "$(grep -c '\.tar\.gz ' "$WORK/kontor/puts.log" 2>/dev/null || echo 0)" = "$puts_before" ]
-sudo cosmosctl log "$second" 2>/dev/null | grep -q 'nichts zu tun\|schon' && ok "Lauf meldet: kontor aktuell" || fail "Lauf meldet nicht, dass kontor aktuell ist"
+log2="$(sudo cosmosctl log "$second" 2>&1)"   # erst ganz lesen: grep -q schloesse die Pipe (pipefail)
+if grep -q 'nichts zu tun' <<<"$log2"; then ok "Lauf meldet: kontor aktuell"; else fail "Lauf meldet nicht, dass kontor aktuell ist"; echo "$log2" | tail -n 20; fi
 
 echo "== 6. setup-aiml.sh aus kontor (F112-14, STRICT)"
 if env -u GITHUB_ENV -u GITHUB_PATH AIML_KONTOR_URL="$KURL" AIML_KONTOR_STRICT=1 \
