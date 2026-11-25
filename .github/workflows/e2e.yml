@@ -80,3 +80,54 @@ jobs:
           name: e2e-logs-${{ matrix.suite }}
           path: logs/
           if-no-files-found: ignore
+
+  # kontor and cosmos together (doc/spec/111 §111.6/§111.9): webhooks,
+  # rebuild campaigns, OCI push and pull.  kontor is a private repository:
+  # secret KONTOR_READ_TOKEN (contents: read on Pymann/kontor) lets the job
+  # check it out -- the same secret ufo's CI asks for.  Without it the job
+  # says so and passes.
+  e2e-kontor:
+    name: run_e2e_kontor.sh
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      AIML_CACHE: ${{ github.workspace }}/__aiml_cache
+      AIML_MEM_V3: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout kontor
+        id: kontor
+        env:
+          TOKEN: ${{ secrets.KONTOR_READ_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then echo "::notice::KONTOR_READ_TOKEN not set, run_e2e_kontor.sh skipped"; exit 0; fi
+          git clone -q --depth 1 "https://x-access-token:${TOKEN}@github.com/Pymann/kontor.git" "$RUNNER_TEMP/kontor"
+          echo "dir=$RUNNER_TEMP/kontor" >> "$GITHUB_OUTPUT"
+
+      - name: System packages
+        if: steps.kontor.outputs.dir != ''
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends g++ libssl-dev curl jq libldap-dev xmlsec1
+
+      - name: Download aiml
+        if: steps.kontor.outputs.dir != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AIML_RELEASE: ${{ github.event.inputs.aiml_release || vars.AIML_RELEASE }}
+        run: bash .github/ci/setup-aiml.sh "$RUNNER_TEMP/aimlvenv"
+
+      - name: run_e2e_kontor.sh
+        if: steps.kontor.outputs.dir != ''
+        env:
+          KONTOR_DIR: ${{ steps.kontor.outputs.dir }}
+        run: timeout 2400 bash run_e2e_kontor.sh
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-logs-run_e2e_kontor.sh
+          path: logs/
+          if-no-files-found: ignore
