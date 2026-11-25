@@ -183,22 +183,36 @@ Ablage in kontor (generisches Repository):
 
 ## 112.6 Die Runner: `setup-aiml.sh` liest kontor
 
+**Nachtrag 2026-11-25:** aiml legt sein Bündel inzwischen **selbst** in kontor ab (aiml
+`ci.yml`, „Put the bundle into kontor"): eine venv (`bin/ lib/ env`, ohne Hülle) unter
+
+```
+/generic/aiml/<commit-sha>/aiml-x86_64-linux.tar.gz
+/generic/aiml/<v*-tag>/aiml-x86_64-linux.tar.gz      (nur Tag-Läufe)
+/generic/aiml/latest/aiml-x86_64-linux.tar.gz        (jeder Tag-Lauf schiebt ihn weiter)
+```
+
+Das ist die Form, die die Runner lesen — **eine** Ablage, **ein** Leser.  Die Spiegel-Pipeline
+(§112.5) schreibt in einen eigenen Namensraum (`aiml/<fassung>/…`, `aiml/latest.env`) und
+kommt dieser Ablage nicht in die Quere; sie ist damit verzichtbar geworden (§112.9).
+
 Neue Quelle **vor** den beiden bisherigen, nur wenn `AIML_KONTOR_URL` gesetzt ist:
 
-1. **kontor**: mit `AIML_RELEASE` die Fassung `aiml/<tag>/…`, sonst `aiml/latest.env`; Tarball
-   und `.sha256` laden, prüfen.  Braucht nur `curl` (kein `gh`, kein GitHub-Token).
-   `AIML_KONTOR_CA` (PEM-**Inhalt**, für ein selbstsigniertes Zertifikat) und
-   `AIML_KONTOR_TOKEN` (nur nötig, wenn kontor anonymes Lesen abschaltet) sind optional.
+1. **kontor**: Schlüssel `AIML_RELEASE` (Tag oder Commit), sonst `latest`; das Bündel laden und
+   gegen die Prüfsumme prüfen, die kontor im Kopf `X-Checksum-Sha256` mitschickt.  Braucht nur
+   `curl` (kein `gh`, kein GitHub-Token).  `AIML_KONTOR_CA` (PEM-**Inhalt**; kontor hat eine
+   eigene CA) und `AIML_KONTOR_TOKEN` (nur nötig, wenn kontor anonymes Lesen abschaltet).
 2. Release, 3. CI-Lauf — unverändert.
 
 - **F112-14: Fällt kontor aus, fällt der Runner zurück** (`::warning::`), statt rot zu werden:
   kontor ist eine Abkürzung, keine neue Abhängigkeit jedes Builds.  Mit `AIML_KONTOR_STRICT=1`
   scheitert er stattdessen (für die Abnahme, §112.7).
-- **F112-15: `latest.env` wird gelesen, nicht ausgeführt.**  Die Datei kommt aus dem Netz; das
-  Skript nimmt nur `version=` und `tarball=`, prüft sie gegen `^[A-Za-z0-9._-]+$` und
-  `source`t nie.
-- In GitHub: Repository-Variable `AIML_KONTOR_URL` (z. B. `https://151.80.143.81:8443`), bei
-  selbstsigniertem Zertifikat `AIML_KONTOR_CA`.  Ohne Variable bleibt alles wie bisher.
+- **F112-15: Was aus dem Netz kommt, wird geprüft, nicht geglaubt.**  Der Schlüssel muss
+  `^[A-Za-z0-9._-]+$` sein; eine Antwort ohne Prüfsumme oder mit falscher gilt als Ausfall.
+- In GitHub: die Secrets **`KONTOR_URL`** und **`KONTOR_CA`** — dieselben Namen wie in
+  `Pymann/aiml`.  Das Schreib-Token `KONTOR_TOKEN` bekommen die Leser **nicht**.  Ohne Secrets
+  bleibt alles wie bisher.
+- Dieselbe Datei liegt in cosmos, kontor und ufo (`.github/ci/setup-aiml.sh`).
 
 ## 112.7 Abnahme (`deploy/server/test_install.sh`, CI-Job `server-setup`)
 
@@ -238,5 +252,6 @@ gebaut wird auf dem Runner nichts mit cosmos.
   abzuwägen.
 - **Weitere Blobs**: dieselbe Form (`kontor-blob put`) trägt auch Bauergebnisse von kontor, ufo
   und cosmos; dafür braucht es nur weitere Pipelines im Katalog.
-- `setup-aiml.sh` liegt in kontor und ufo als eigene Kopie; die kontor-Quelle muss dort
-  nachgezogen werden, damit auch deren Runner aus kontor lesen.
+- **Spiegel-Pipeline abschalten?**  Seit aiml selbst nach kontor liefert (§112.6), ist
+  `aiml_nach_kontor` doppelt.  Sie bleibt, bis entschieden ist, ob cosmos weiter einen
+  zweiten Weg vorhält.

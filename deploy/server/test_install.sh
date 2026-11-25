@@ -107,13 +107,25 @@ log2="$(sudo cosmosctl log "$second" 2>&1)"   # erst ganz lesen: grep -q schloes
 if grep -q 'nichts zu tun' <<<"$log2"; then ok "Lauf meldet: kontor aktuell"; else fail "Lauf meldet nicht, dass kontor aktuell ist"; echo "$log2" | tail -n 20; fi
 
 echo "== 6. setup-aiml.sh aus kontor (F112-14, STRICT)"
+# Die Ablage, die aiml's eigene CI in kontor fuellt ("Put the bundle into
+# kontor"): generic/aiml/latest/aiml-x86_64-linux.tar.gz, eine venv (bin lib
+# env) ohne Huelle.  Gebaut wie dort, aus dem eben gespiegelten Tarball.
+if [ -f "${latest:-}" ]; then
+    bdir="$(mktemp -d)"; mkdir "$bdir/venv"
+    tar -xzf "$WORK/kontor/generic/$tb" -C "$bdir/venv" --strip-components=1
+    printf '%s\n' "# aiml venv" > "$bdir/venv/env"
+    mkdir -p "$WORK/kontor/generic/aiml/latest"
+    tar -czf "$WORK/kontor/generic/aiml/latest/aiml-x86_64-linux.tar.gz" -C "$bdir/venv" bin lib env
+    rm -rf "$bdir"
+fi
 if env -u GITHUB_ENV -u GITHUB_PATH AIML_KONTOR_URL="$KURL" AIML_KONTOR_STRICT=1 \
         bash "$ROOT/.github/ci/setup-aiml.sh" "$WORK/venv2" > "$WORK/setup.log" 2>&1; then
-    check "Quelle war kontor" grep -q "^aiml: kontor $KURL" "$WORK/setup.log"
+    check "Quelle war kontor (latest)" grep -q "^aiml: kontor $KURL (latest, sha256 " "$WORK/setup.log"
     check "venv aus kontor fertig" [ -x "$WORK/venv2/bin/aiml" ]
 else
     fail "setup-aiml.sh aus kontor"; tail -n 20 "$WORK/setup.log"
 fi
+check "unbekannter Schluessel → STRICT scheitert" bash -c "! env -u GITHUB_ENV -u GITHUB_PATH AIML_KONTOR_URL='$KURL' AIML_KONTOR_STRICT=1 AIML_RELEASE=v0.0.0-gibtsnicht bash '$ROOT/.github/ci/setup-aiml.sh' '$WORK/venv4' >/dev/null 2>&1"
 check "kontor aus → Rueckfall mit Warnung" bash -c "env -u GITHUB_ENV -u GITHUB_PATH AIML_KONTOR_URL=http://127.0.0.1:1 bash '$ROOT/.github/ci/setup-aiml.sh' '$WORK/venv3' 2>&1 | grep -q 'falling back to GitHub'"
 
 echo "== 7. Was ein Schritt sieht (F112-2, F112-6)"

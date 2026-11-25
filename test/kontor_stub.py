@@ -41,9 +41,11 @@ def target(path):
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
-    def reply(self, code, body=b"", ctype="application/json"):
+    def reply(self, code, body=b"", ctype="application/json", digest=""):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
+        if digest:  # wie kontor: send_blob setzt x-checksum-sha256
+            self.send_header("x-checksum-sha256", digest)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         if self.command != "HEAD":
@@ -56,7 +58,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if dest is None or not os.path.isfile(dest):
             return self.reply(404, b'{"error":"not found","code":"not_found"}')
         with open(dest, "rb") as f:
-            self.reply(200, f.read(), "application/octet-stream")
+            body = f.read()
+        self.reply(200, body, "application/octet-stream", hashlib.sha256(body).hexdigest())
 
     do_HEAD = do_GET
 

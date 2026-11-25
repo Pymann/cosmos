@@ -155,25 +155,22 @@ sudo cosmosctl run cat-aiml_nach_kontor
 
 ## 8. Die GitHub-Runner auf kontor umstellen
 
-In **jedem** Repository, dessen CI aiml lädt (cosmos, kontor, ufo): Settings → Secrets and
-variables → Actions → **Variables** → *New repository variable*:
+aiml legt sein Bündel samt Bibliotheken bei jedem Lauf selbst in kontor ab
+(`/generic/aiml/latest/aiml-x86_64-linux.tar.gz`).  Damit die Runner von cosmos, kontor und ufo
+es von dort nehmen, brauchen diese Repositories dieselben **Secrets** wie `Pymann/aiml`
+(Settings → Secrets and variables → Actions → *New repository secret*):
 
 | Name | Wert |
 |---|---|
-| `AIML_KONTOR_URL` | `https://151.80.143.81:8443` |
-| `AIML_KONTOR_CA` | nur bei selbstsigniertem Zertifikat: der **Inhalt** der `.crt`-Datei (`-----BEGIN CERTIFICATE-----` …) |
+| `KONTOR_URL` | `https://151.80.143.81:8443` |
+| `KONTOR_CA` | der **Inhalt** der CA-Datei von kontor (`-----BEGIN CERTIFICATE-----` …) |
 
-Im nächsten CI-Lauf steht im Schritt *Download aiml*: `aiml: kontor https://151.80.143.81:8443
-(git-…)`.  Ist kontor nicht erreichbar, lädt der Runner wie bisher von GitHub und warnt
-(`::warning::`) — rot wird der Build deswegen nicht.
+Das Schreib-Token `KONTOR_TOKEN` gehört **nicht** dazu — die Runner lesen nur.  Im nächsten
+CI-Lauf steht im Schritt *Download aiml*: `aiml: kontor https://151.80.143.81:8443 (latest,
+sha256 …)`.  Ist kontor nicht erreichbar, lädt der Runner wie bisher von GitHub und warnt.
 
-Hinweise:
-- kontor muss anonymes Lesen erlauben (Vorgabe `auth.anonymous: reader`).  Hast du es
-  abgeschaltet, ein `reader`-Token als **Secret** `AIML_KONTOR_TOKEN` anlegen und im Workflow
-  durchreichen.
-- Port 8443 muss für GitHub erreichbar sein — ist er, wenn kontor heute schon von außen geht.
-- Die kontor-Quelle steckt bisher nur in cosmos' `setup-aiml.sh`; kontor und ufo haben eine
-  eigene Kopie, die noch nachgezogen werden muss.
+Hat kontor anonymes Lesen abgeschaltet (`auth.anonymous: none`), zusätzlich ein Token mit der
+Rolle `reader` als Secret `AIML_KONTOR_TOKEN`.
 
 ## 9. Bedienen
 
