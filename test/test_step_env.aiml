@@ -113,7 +113,11 @@
       - set: [fails, { +: [fails, { call: [expect, "die Stufen-Nummer kommt aus der Kennung", { eq: [{ call: [work.stage_index, "run-7-lane-2"] }, 2] }] }] }]
       - set: [fails, { +: [fails, { call: [expect, "eine Kennung ohne Nummer hat keine Schicht", { lt: [{ call: [work.stage_index, "nurname"] }, 0] }] }] }]
       - decl: [lroot, string, { call: [work.layer_root, "run-7"] }]
-      - set: [fails, { +: [fails, { call: [expect, "die Schichten liegen im Arbeitsbereich des LAUFS (F110-94)", { eq: [lroot, "steps/run-7/layers"] }] }] }]
+      # Die Arbeitswurzel ist absolut (der Standard `steps` gilt fuer das
+      # Verzeichnis des Agenten): bwrap und overlayfs bekommen diese Pfade.
+      - decl: [test_cwd, path, { call: [path.cwd] }]
+      - decl: [wroot, string, "${test_cwd}/steps"]
+      - set: [fails, { +: [fails, { call: [expect, "die Schichten liegen im Arbeitsbereich des LAUFS (F110-94)", { eq: [lroot, "${wroot}/run-7/layers"] }] }] }]
 
       # Drei Stufen haben gelegt; Stufe 2 sieht 1 und 0 — juengste zuerst,
       # danach "/", so liest overlayfs.
@@ -130,9 +134,9 @@
       - call: [io.mkdir_all, "steps/run-alt/layers/0/upper"]
       - call: [io.mkdir_all, "steps/run-alt/layers/1/upper"]
       - decl: [mit_basis, string, { call: [work.lower_chain, "run-7", 1, "run:run-alt"] }]
-      - set: [fails, { +: [fails, { call: [expect, "die eigene Schicht steht vor dem Unterbau", { eq: [mit_basis, "steps/run-7/layers/0/upper:steps/run-alt/layers/1/upper:steps/run-alt/layers/0/upper:/"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "die eigene Schicht steht vor dem Unterbau", { eq: [mit_basis, "${wroot}/run-7/layers/0/upper:${wroot}/run-alt/layers/1/upper:${wroot}/run-alt/layers/0/upper:/"] }] }] }]
       - decl: [ohne_basis, string, { call: [work.lower_chain, "run-7", 1, "run:gibtesnicht"] }]
-      - set: [fails, { +: [fails, { call: [expect, "ein unbekannter Unterbau fuegt nichts hinzu", { eq: [ohne_basis, "steps/run-7/layers/0/upper:/"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "ein unbekannter Unterbau fuegt nichts hinzu", { eq: [ohne_basis, "${wroot}/run-7/layers/0/upper:/"] }] }] }]
       - call: [io.remove_all, "steps/run-alt"]
 
       - decl: [tossed, i32, { call: [work.drop_from, "run-7", 1] }]

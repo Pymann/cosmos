@@ -78,6 +78,17 @@
             - set: [<.boxed, in_container]
             - set: [<.work_root, "steps"]
             - if: { condition: { gt: [work_root.len, 0] }, then: [{ set: [<.work_root, work_root] }] }
+            # Absolut machen: bwrap bekommt die Schritt-Verzeichnisse als
+            # Quelle von --bind, und ein relativer Pfad gilt dort fuer das
+            # Verzeichnis, in dem bwrap gestartet wird — nicht fuer das des
+            # Agenten (gemessen 2026-11-25 mit dem Standard `steps`: „Can't find
+            # source path steps/<lauf>/<stufe>", jeder Schritt endete mit 1).
+            - decl: [root_rel, path, <.work_root]
+            - if:
+                condition: { eq: [{ call: [root_rel.is_absolute] }, false] }
+                then:
+                  - decl: [agent_cwd, path, { call: [path.cwd] }]
+                  - set: [<.work_root, "${agent_cwd}/${<.work_root}"]
             - decl: [root_path, path, <.work_root]
             - call: [io.mkdir_all, root_path]
             - if:
