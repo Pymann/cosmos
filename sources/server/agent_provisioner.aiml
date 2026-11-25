@@ -478,6 +478,7 @@
             - set: [cfg.service_user, { call: [<.env_or, "COSMOS_PROV_SERVICE_USER", cfg.service_user] }]
             - set: [cfg.work_dir, { call: [<.env_or, "COSMOS_PROV_WORK_DIR", cfg.work_dir] }]
             - set: [cfg.install_dir, { call: [<.env_or, "COSMOS_PROV_INSTALL_DIR", cfg.install_dir] }]
+            - set: [cfg.runtime_owner, { call: [<.env_or, "COSMOS_PROV_RUNTIME_OWNER", cfg.runtime_owner] }]
             - set: [cfg.stage_dir, { call: [<.env_or, "COSMOS_PROV_STAGE_DIR", cfg.stage_dir] }]
             - set: [cfg.apparmor_dir, { call: [<.env_or, "COSMOS_PROV_APPARMOR_DIR", cfg.apparmor_dir] }]
             - set: [cfg.systemd_dir, { call: [<.env_or, "COSMOS_PROV_SYSTEMD_DIR", cfg.systemd_dir] }]
