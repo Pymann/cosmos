@@ -58,10 +58,9 @@ aiml venv ../../aimlvenv        # einmal, mit dem gebauten Compiler
 ```
 
 ```bash
-source ../../exvenv/bin/activate
-exodus build -c exodus-server.json && ./server          # oder: ./run.sh --build
-exodus build -c exodus-controller.json
-exodus build -c exodus-agent.json
+aiml build -c exodus-server.json && ./server            # oder: ./run.sh --build
+aiml build -c exodus-controller.json                    # aiml spec/68 §7, ohne exodus
+aiml build -c exodus-agent.json
 ./controller --port 19870 --job-id job-1 --command "echo hi; sleep 2" --exit-when-done &
 ./agent --port 19870 --agent-id agent-1
 ```

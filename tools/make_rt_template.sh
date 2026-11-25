@@ -7,7 +7,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 OUT="${1:-deploy/rt_template}"
 [ -f deploy/runtime.tar.gz ] || { echo "FEHLER: deploy/runtime.tar.gz fehlt — erst deploy/collect_runtime.sh" >&2; exit 1; }
-[ -f agent ] || { echo "FEHLER: ./agent fehlt — erst exodus build -c exodus-agent.json" >&2; exit 1; }
+[ -f agent ] || { echo "FEHLER: ./agent fehlt — erst aiml build -c exodus-agent.json" >&2; exit 1; }
 
 rm -rf "$OUT"
 mkdir -p "$OUT"/{usr/bin,usr/lib,usr/lib64,proc,dev,tmp,work,etc,run/systemd/resolve}

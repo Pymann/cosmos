@@ -21,15 +21,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
-      EXODUS_CACHE: ${{ github.workspace }}/__exodus_cache
       AIML_CACHE: ${{ github.workspace }}/__aiml_cache
       AIML_MEM_V3: "1"
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"   # exodus: requires-python >= 3.12
 
       - name: System packages
         run: |
@@ -45,22 +40,14 @@ jobs:
           AIML_RELEASE: ${{ github.event.inputs.aiml_release || vars.AIML_RELEASE }}
         run: bash .github/ci/setup-aiml.sh "$RUNNER_TEMP/aimlvenv"
 
-      - name: Install Exodus
-        run: |
-          python -m pip install -q "git+https://github.com/Pymann/exodus.git"
-          exodus --help > /dev/null
-
-      # cosmos has no exodus.json of its own, and `exodus pkg install` reads
-      # only that one; the configs CI builds pin no apt packages (only
-      # pipe3d and ui-shot do, which need a display and are not built here).
-
       # The programs a venv install places (aiml.tool.json "configs"), plus
       # the console offer library test_console loads (doc/spec/108).
       - name: Build
         run: |
-          for cfg in $(python3 -c 'import json; print(" ".join(json.load(open("aiml.tool.json"))["configs"]))') exodus-console-offer.json; do
-            echo "::group::exodus build -c $cfg"
-            exodus build -c "$cfg" -j "$(nproc)"
+          # aiml spec/68 §7: built by the venv's compiler — no exodus, no Python.
+          for cfg in $(jq -r '.configs[]' aiml.tool.json) exodus-console-offer.json; do
+            echo "::group::aiml build -c $cfg"
+            aiml build -c "$cfg"
             echo "::endgroup::"
           done
 

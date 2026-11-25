@@ -17,7 +17,7 @@ BASE="${1:-deploy/rt_base}"
 OUT="${2:-deploy/rt_image}"
 [ -d "$BASE" ]                   || { echo "FEHLER: $BASE fehlt — tools/make_base_rootfs.sh" >&2; exit 1; }
 [ -f deploy/runtime.tar.gz ]     || { echo "FEHLER: deploy/runtime.tar.gz fehlt — deploy/collect_runtime.sh" >&2; exit 1; }
-[ -f agent ]                     || { echo "FEHLER: ./agent fehlt — exodus build -c exodus-agent.json" >&2; exit 1; }
+[ -f agent ]                     || { echo "FEHLER: ./agent fehlt — aiml build -c exodus-agent.json" >&2; exit 1; }
 
 rm -rf "$OUT"
 cp -a "$BASE" "$OUT"

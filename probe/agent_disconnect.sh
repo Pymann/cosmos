@@ -12,9 +12,8 @@ ROOT=$PWD
 
 if [ "${1:-}" = "--build" ]; then
     # shellcheck disable=SC1091
-    source ../../exvenv/bin/activate
-    exodus build -c exodus-controller.json || exit 2
-    exodus build -c exodus-agent.json || exit 2
+    aiml build -c exodus-controller.json || exit 2
+    aiml build -c exodus-agent.json || exit 2
 fi
 
 PORT=${PORT:-19870}

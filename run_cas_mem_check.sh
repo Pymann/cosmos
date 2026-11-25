@@ -30,13 +30,11 @@ mkdir -p "$LOGS"
 
 if [ "${1:-}" != "--run-only" ]; then
     # shellcheck disable=SC1091
-    # In einem Container liegt exodus woanders und steht schon auf PATH.
-    [ -f ../../exvenv/bin/activate ] && source ../../exvenv/bin/activate
     # aiml spec/68: die Konfigurationen nehmen Compiler und Laufzeit aus einer
     # venv ($AIML, $AIML_VENV) — die Standard-venv, falls keine aktiv ist.
     [ -n "${AIML:-}" ] || [ ! -f ../../aimlvenv/env ] || . ../../aimlvenv/env
     echo "=== building exodus-test-casmem.json ==="
-    exodus build -c exodus-test-casmem.json || { echo "BUILD FAILED"; exit 1; }
+    aiml build -c exodus-test-casmem.json || { echo "BUILD FAILED"; exit 1; }
 fi
 [ -x ./test_cas_mem ] || { echo "missing ./test_cas_mem — ohne --run-only starten"; exit 1; }
 

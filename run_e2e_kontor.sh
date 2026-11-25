@@ -27,13 +27,11 @@ KONTOR="http://127.0.0.1:$M_PORT"
 [ -f "$KONTOR_DIR/kontor.aiml" ] || { echo "kontor nicht gefunden: $KONTOR_DIR (KONTOR_DIR setzen)"; exit 2; }
 
 if [ "${1:-}" != "--no-build" ]; then
-    # In einem Container liegt exodus woanders und steht schon auf PATH.
-    [ -f ../../exvenv/bin/activate ] && source ../../exvenv/bin/activate
     # aiml spec/68: die Konfigurationen nehmen Compiler und Laufzeit aus einer
     # venv ($AIML, $AIML_VENV) — die Standard-venv, falls keine aktiv ist.
     [ -n "${AIML:-}" ] || [ ! -f ../../aimlvenv/env ] || . ../../aimlvenv/env
     for cfg in exodus-cosmosd.json exodus-api.json exodus-kontor-client.json; do
-        exodus build -c "$cfg" || { echo "BUILD FAILED $cfg"; exit 1; }
+        aiml build -c "$cfg" || { echo "BUILD FAILED $cfg"; exit 1; }
     done
 fi
 cp "${COSMOSD_BIN:-cosmosd}" "$WORK/cosmosd"; cp "${COSMOS_API_BIN:-cosmos-api}" "$WORK/cosmos-api"

@@ -22,7 +22,7 @@ LIB="$AIML_DIR/out/libaiml/libaiml.so"
 AGENT="$HERE/agent"
 
 [ -f "$LIB" ]   || { echo "FEHLER: $LIB fehlt — erst 'exodus build --all' in aiml" >&2; exit 1; }
-[ -f "$AGENT" ] || { echo "FEHLER: $AGENT fehlt — erst 'exodus build --all' in cosmos" >&2; exit 1; }
+[ -f "$AGENT" ] || { echo "FEHLER: $AGENT fehlt — erst 'aiml build -c exodus-agent.json' in cosmos" >&2; exit 1; }
 
 # Aufbau des Buendels = Aufbau auf dem Knoten:
 #   <install_dir>/bwrap        der Sandkasten (eigene Kopie, s.u.)
