@@ -19,7 +19,7 @@
             "dl"
         ],
         "library_paths": [
-            "/media/nikolai/95a208ef-ffa2-478b-abdd-ff394baa6a76/projects/python/test/cosmos/runtime/shim",
+            "runtime/shim",
             "$AIML_VENV/lib"
         ],
         "flags": [
