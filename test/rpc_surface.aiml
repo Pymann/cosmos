@@ -379,6 +379,35 @@
             - set: [out.fingerprint, res.fingerprint]
             - set: [out.steps_done, res.steps_done]
             - set: [out.token_id, res.token_id]
+            # Phase 2 laeuft nebenher (doc/spec/94): die Antwort sagt nur
+            # „angenommen", das Ergebnis kommt ueber provision_status.
+            - decl: [polls, i32, 0]
+            - decl: [running, i32, res.running]
+            - while:
+                condition: { '&&': [{ eq: [running, 1] }, { lt: [polls, 240] }] }
+                body:
+                  - call: [time.sleep_ms, 250]
+                  - decl: [st_req, ProvisionReq]
+                  - set: [st_req.token, <.token]
+                  - decl: [st_res, ptr<ProvisionResp>, { new: ProvisionResp }]
+                  - decl: [sgot, i32, { call: [<.sess.send_and_await, 0, "provision_status", st_req, st_res, 4000] }]
+                  - if:
+                      condition: { neq: [sgot, 1] }
+                      then:
+                        - set: [<.fails, { +: [<.fails, 1] }]
+                        - print: ["  FAIL provision_status: keine Antwort"]
+                        - return: out
+                  - set: [running, st_res.running]
+                  - set: [out.success, st_res.success]
+                  - set: [out.failed_step, st_res.failed_step]
+                  - set: [out.message, st_res.message]
+                  - set: [out.steps_done, st_res.steps_done]
+                  - set: [polls, { +: [polls, 1] }]
+            - if:
+                condition: { eq: [running, 1] }
+                then:
+                  - set: [<.fails, { +: [<.fails, 1] }]
+                  - print: ["  FAIL provision: nach 60 s laeuft die Einrichtung noch"]
             - return: out
 
       # agent_token_still_valid: steht das Token noch als NICHT widerrufen in

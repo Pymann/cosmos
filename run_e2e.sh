@@ -58,6 +58,7 @@ mkdir -p "$WORK/prov"
 export COSMOS_AGENT_BINARY="./agent"
 export COSMOS_PROV_INSTALL_DIR="$WORK/prov/opt"
 export COSMOS_PROV_STAGE_DIR="$WORK/prov/stage"
+export COSMOS_PROV_WORK_DIR="$WORK/prov/agentwork"   # nie /var/lib/cosmos-agent des Rechners
 export COSMOS_PROV_APPARMOR_DIR="$WORK/prov/apparmor.d"
 export COSMOS_PROV_SYSTEMD_DIR="$WORK/prov/systemd"
 export COSMOS_PROV_SUBUID_FILE="$WORK/prov/subuid"
@@ -72,6 +73,12 @@ export COSMOS_PROV_CHECK_CMD="true"
 export COSMOS_PROV_STOP_CMD="-"
 export COSMOS_PROV_RELOAD_CMD="true"   # kein `systemctl daemon-reload` auf dem Entwicklerrechner
 export COSMOS_PROV_EXEC_URL="$URL"
+# Die Laufzeit, die install_runtime auspackt (doc/spec/94 Schritt 5): eine leere
+# lib/ und ein bwrap-Platzhalter genuegen, gehoeren dem aufrufenden Nutzer.
+mkdir -p "$WORK/prov/rt/lib" && : > "$WORK/prov/rt/bwrap"
+tar -czf "$WORK/prov/runtime.tar.gz" -C "$WORK/prov/rt" lib bwrap
+export COSMOS_AGENT_RUNTIME="$WORK/prov/runtime.tar.gz"
+export COSMOS_PROV_RUNTIME_OWNER="$(id -un):$(id -gn)"
 
 COSMOS_SEED_DEMO=1 COSMOS_BIND="$URL" ./cosmosd > "$LOGS/e2e_cosmosd.log" 2>&1 &
 DAEMON_PID=$!

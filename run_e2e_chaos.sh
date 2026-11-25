@@ -16,6 +16,9 @@ set -uo pipefail
 cd "$(dirname "$0")"
 PORT="${PORT:-8803}"
 URL="ws://127.0.0.1:${PORT}"
+# Der Sandkasten (doc/spec/91), wie in run_e2e_pipeline.sh.
+BWRAP="${COSMOS_BWRAP:-$(command -v bwrap || echo /opt/cosmos/bwrap)}"
+[ -x "$BWRAP" ] || { echo "[chaos] FAIL — kein bwrap (apt install bubblewrap, oder COSMOS_BWRAP)"; exit 1; }
 WORK="$PWD/.e2e_chaos"
 LOGS="$PWD/logs"
 
@@ -50,7 +53,7 @@ start_server() {
     return 1
 }
 start_agent() {
-    COSMOS_AGENT_TOKEN="$TOKEN" ./agent --exec-url "$URL" --agent-id agent-e2e --labels e2e \
+    COSMOS_AGENT_TOKEN="$TOKEN" ./agent --exec-url "$URL" --agent-id agent-e2e --labels e2e --bwrap-path "$BWRAP" \
         >> "$LOGS/e2echaos_agent.log" 2>&1 &
     APID=$!
 }
@@ -100,7 +103,7 @@ else echo "[chaos] FAIL Fall B (rc=$RB)"; tail -12 "$LOGS/e2echaos_runB.log"; FA
 echo "[chaos] Fall C: Agent waehrend eines LAUFENDEN Schritts toeten"
 : > "$LOGS/e2echaos_agentC.log"
 kill "$APID" 2>/dev/null; wait "$APID" 2>/dev/null
-COSMOS_AGENT_TOKEN="$TOKEN" ./agent --exec-url "$URL" --agent-id agent-e2e --labels e2e \
+COSMOS_AGENT_TOKEN="$TOKEN" ./agent --exec-url "$URL" --agent-id agent-e2e --labels e2e --bwrap-path "$BWRAP" \
     >> "$LOGS/e2echaos_agentC.log" 2>&1 &
 APID=$!
 COSMOS_STEP_SLEEP=6 COSMOS_E2E_URL="$URL" ./e2e_pipeline_run > "$LOGS/e2echaos_runC.log" 2>&1 &
@@ -109,7 +112,7 @@ sleep 6                      # die erste Stufe schlaeft gerade
 kill -9 "$APID" 2>/dev/null; wait "$APID" 2>/dev/null
 echo "[chaos]   Agent im Schritt getoetet"
 sleep 1
-COSMOS_AGENT_TOKEN="$TOKEN" ./agent --exec-url "$URL" --agent-id agent-e2e --labels e2e \
+COSMOS_AGENT_TOKEN="$TOKEN" ./agent --exec-url "$URL" --agent-id agent-e2e --labels e2e --bwrap-path "$BWRAP" \
     >> "$LOGS/e2echaos_agentC.log" 2>&1 &
 APID=$!
 echo "[chaos]   Agent wieder da ($APID)"
@@ -151,7 +154,7 @@ else echo "[chaos] FAIL Fall C: Ausgabe ${DUPES}x im Protokoll — die Offsets g
 echo "[chaos] Fall D: Rechner-Neustart — Agent UND Schritt werden getoetet"
 : > "$LOGS/e2echaos_agentD.log"
 kill "$APID" 2>/dev/null; wait "$APID" 2>/dev/null
-COSMOS_AGENT_TOKEN="$TOKEN" ./agent --exec-url "$URL" --agent-id agent-e2e --labels e2e \
+COSMOS_AGENT_TOKEN="$TOKEN" ./agent --exec-url "$URL" --agent-id agent-e2e --labels e2e --bwrap-path "$BWRAP" \
     >> "$LOGS/e2echaos_agentD.log" 2>&1 &
 APID=$!
 COSMOS_STEP_SLEEP=12 COSMOS_E2E_URL="$URL" ./e2e_pipeline_run > "$LOGS/e2echaos_runD.log" 2>&1 &
@@ -179,7 +182,7 @@ else
     # ein zu frueher Griff loescht eine Datei, die gleich wiederkommt.
     rm -f steps/*/*/status
     T0=$SECONDS
-    COSMOS_AGENT_TOKEN="$TOKEN" ./agent --exec-url "$URL" --agent-id agent-e2e --labels e2e \
+    COSMOS_AGENT_TOKEN="$TOKEN" ./agent --exec-url "$URL" --agent-id agent-e2e --labels e2e --bwrap-path "$BWRAP" \
         >> "$LOGS/e2echaos_agentD.log" 2>&1 &
     APID=$!
     echo "[chaos]   Agent wieder da ($APID)"

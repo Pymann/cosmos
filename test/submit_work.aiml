@@ -29,7 +29,7 @@
       - set: [src, "${src}    steps:\n"]
       - set: [src, "${src}      - stage:\n"]
       - set: [src, "${src}          name: sagen\n"]
-      - set: [src, "${src}          runs_on: container\n"]
+      - set: [src, "${src}          agent: container\n"]
       - set: [src, "${src}          steps:\n"]
       - set: [src, "${src}            - step:\n"]
       - set: [src, "${src}                name: hallo\n"]

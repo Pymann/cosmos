@@ -54,8 +54,12 @@ echo "[e2epipe] Token erzeugt (Geheimnis nicht geloggt)"
 
 # Etikett `e2e`: der Lauf hat eine Stufe mit `label: e2e`, die NUR dieser Agent
 # nehmen darf — damit prueft die Abnahme die Zuteilung mit, nicht nur das Laufen.
+# Der Sandkasten (doc/spec/91): die mitgelieferte Kopie unter /opt/cosmos gibt es
+# nur auf einem eingerichteten Knoten, hier tut es das bwrap des Rechners.
+BWRAP="${COSMOS_BWRAP:-$(command -v bwrap || echo /opt/cosmos/bwrap)}"
+[ -x "$BWRAP" ] || { echo "[e2epipe] FAIL — kein bwrap (apt install bubblewrap, oder COSMOS_BWRAP)"; exit 1; }
 COSMOS_AGENT_TOKEN="$AGENT_TOKEN" \
-    ./agent --exec-url "$URL" --agent-id agent-e2e --labels e2e > "$LOGS/e2epipe_agent.log" 2>&1 &
+    ./agent --exec-url "$URL" --agent-id agent-e2e --labels e2e --bwrap-path "$BWRAP" > "$LOGS/e2epipe_agent.log" 2>&1 &
 AGENT_PID=$!
 echo "[e2epipe] agent pid $AGENT_PID (labels=e2e)"
 

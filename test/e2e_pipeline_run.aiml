@@ -11,7 +11,7 @@
 #   2 run_job liefert eine Nummer und einen Lauf
 #   3 der Agent HOLT sich die Schritte (claim) und meldet sie zurueck
 #   4 der Lauf erreicht "done", alle Stufen "done"
-#   5 `runs_on:` trifft ein Etikett UND die Kennung eines Agenten (F103-3)
+#   5 `agent:` (frueher `runs_on:`, aiml spec/62 §18.5) trifft ein Etikett UND die Kennung eines Agenten (F103-3)
 #
 # Expected exit code: 0
 
@@ -63,7 +63,7 @@
       - set: [src, "${src}          run: \"echo stufe-eins; sleep ${hold_s}\"\n"]
       - set: [src, "${src}      - stage:\n"]
       - set: [src, "${src}          name: zwei\n"]
-      - set: [src, "${src}          runs_on: e2e\n"]
+      - set: [src, "${src}          agent: e2e\n"]
       - set: [src, "${src}          run: \"echo stufe-zwei\"\n"]
       # Die KENNUNG des Agenten als Etikett: so nagelt man einen Schritt auf
       # genau einen Rechner, ohne ihm erst ein eigenes Etikett zu geben.
@@ -74,7 +74,7 @@
       - set: [src, "${src}          run: \"env\"\n"]
       - set: [src, "${src}      - stage:\n"]
       - set: [src, "${src}          name: drei\n"]
-      - set: [src, "${src}          runs_on: agent-e2e\n"]
+      - set: [src, "${src}          agent: agent-e2e\n"]
       - set: [src, "${src}          run: \"echo stufe-drei\"\n"]
       - return: src
 
