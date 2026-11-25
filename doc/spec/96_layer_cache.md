@@ -231,15 +231,15 @@ der Server hört auf, Schritte herauszugeben.
   Das ist dieselbe Tabelle, die der Cache ohnehin hält — ein Resume nach Controller-Neustart ist
   deshalb kein Sonderfall, und eine Lane darf auf einem **anderen** Knoten weiterlaufen.
 
-**Knotenwahl.**  `runs_on` (aiml F62-47) trifft auf das vorhandene `required_label` von
-`PipelineStage` (§1.5) — kein neues Konzept, nur pro Lane aufgelöst.  Weil `runs_on` Parameter
-interpolieren darf (`runs_on: "${arch}"`), kann **eine Lane mehrere Knoten überspannen**.
+**Knotenwahl.**  `agent:` (aiml F62-146, früher `runs_on:`) trifft auf das vorhandene `required_label` von
+`PipelineStage` (§1.5) — kein neues Konzept, nur pro Lane aufgelöst.  Weil `agent:` Parameter
+interpolieren darf (`agent: "${arch}"`), kann **eine Lane mehrere Knoten überspannen**.
 
 - **F96-15** Überspannt eine Lane Knoten, muss der `output_tree` des Vorgängerschritts auf dem
   Zielknoten vorliegen.  Damit ist die inhaltsadressierte Übertragung aus §96.2 **Pflicht**, nicht
   Optimierung (aiml F62-48) — und die Affinität aus §96.2 wird von einer Sparmaßnahme zum
   Normalfall: der Server bevorzugt einen Knoten, der die Eingabe schon hat.
-- **F96-16** `runs_on` ist **kein** Schlüsselbestandteil (aiml F62-49).  Wo ein Schritt lief, darf
+- **F96-16** `agent:` ist **kein** Schlüsselbestandteil (aiml F62-49).  Wo ein Schritt lief, darf
   seinen Schlüssel nicht ändern, sonst zerfällt der Cache pro Maschine.  Folge für die Knoten-
   Verwaltung: was am Knoten das Ergebnis beeinflusst (Architektur, Toolchain), muss als Parameter
   oder `host:`-Wert deklariert sein — ein Label allein trägt diese Information nicht.
@@ -266,7 +266,7 @@ eine fehlende Verdrahtung in einem vorhandenen Mechanismus, kein neues Teilsyste
 - **A96-10** Ein Lauf wird an einem Schritt angehalten, der Controller neu gestartet, dann
   fortgesetzt: der Lauf bleibt angehalten (F96-13), setzt nach der Freigabe fort und führt die
   bereits erledigten Schritte **nicht** erneut aus.
-- **A96-11** Eine Lane mit `runs_on: "${arch}"` über zwei Knoten überträgt nur die Blobs, die dem
+- **A96-11** Eine Lane mit `agent: "${arch}"` über zwei Knoten überträgt nur die Blobs, die dem
   Zielknoten fehlen (zusammen mit A96-5 nachweisbar).
 
 ## 96.13 `run_pipeline` — einreichen, prüfen, ausfalten

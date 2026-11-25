@@ -47,7 +47,7 @@ einer Wand abliest.  In der Szene ist das unmittelbar nutzbar.
 ## 97.3 Die teuren Kanten sichtbar machen
 
 Eine `needs`-Kante **innerhalb** einer Stufe ist gratis: gleiche Maschine, gleiches Verzeichnis.
-Eine Kante **über** eine Stufengrenze, deren `runs_on` sich unterscheidet, ist der Punkt, an dem
+Eine Kante **über** eine Stufengrenze, deren `agent:` sich unterscheidet, ist der Punkt, an dem
 ein `output_tree` übertragen werden muss (aiml F62-48, §96.11 F96-15).
 
 - **F97-7** Kanten werden nach Kosten unterschieden dargestellt: stufeninterne Übergabe,

@@ -24,7 +24,7 @@ das eine ändert sich beim Schreiben, das andere jede Sekunde.
 ### Agenten
 | Spalte | Inhalt | Warum |
 |---|---|---|
-| `agent` | Kennung/Label | das, was man in `runs_on` schreibt |
+| `agent` | Kennung/Label | das, was man in `agent:` schreibt |
 | `zustand` | `verbunden` / `still` / `weg` | Farbe: grün / gelb / rot |
 | `letzter Takt` | Sekunden seit Heartbeat | ein Agent „weg" ohne Zeitangabe ist nicht nachvollziehbar |
 | `Schritt` | was er gerade tut, sonst `—` | verbindet Agent und Lauf |

@@ -412,7 +412,7 @@ mitbringen — nicht das Compiler-Binary, denn die Bibliothek enthält den Compi
 Warum ein Bundle und nicht übersetzter Code: der Schlüssel eines Schritts **ist** der Hash seines
 Quelltexts (`spec/62` §8).  Würde übersetzter Code wandern, wären das ausgeführte und das
 geschlüsselte Artefakt zwei verschiedene Dinge.  Außerdem müsste der Controller für jede
-Knoten-Architektur übersetzen — genau das, was `runs_on: "${arch}"` vermeidet.  Ein Bundle trägt
+Knoten-Architektur übersetzen — genau das, was `agent: "${arch}"` vermeidet.  Ein Bundle trägt
 seine Abhängigkeiten transitiv und ist damit von sich aus vollständig.
 
 Folge für die Vertrauensgrenze: der Art nach keine Änderung (ein Knoten, der Schritte annimmt,

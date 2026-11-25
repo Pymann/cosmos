@@ -80,9 +80,8 @@ Ein `PipelineRun` ist ein Durchlauf einer Integrationspipeline über geordnete S
 | `stage_kind` | `enum StageKind` | `git` \| `build` \| `test` \| `deploy` (erweiterbar) |
 | `state` | `enum StageState` | `pending` \| `running` \| `paused` \| `done` — Lebenszyklus (§96.10) |
 | `status` | `enum StepStatus` | Ergebnis, gültig ab `done` — sechs Werte (§96.10); ersetzt `StageStatus` |
-| ~~`required_label`~~ | `string` | **abgelöst** von `runs_on` (gleiche Rolle, darf Parameter interpolieren) |
 | ~~`script_ref`~~ | `string` | **abgelöst** von `steps`: der Rumpf ist aiml-Code im Schritt, kein Skript-Verweis (aiml `spec/62` §5.1) |
-| `runs_on` | `string` | Label-Ausdruck für die Knotenwahl, darf Parameter interpolieren (aiml `spec/62` F62-47); ersetzt `required_label` |
+| `required_label` | `string` | **WER** den Schritt nimmt: ein Etikett oder eine Agenten-Kennung, aus `agent:` der Stufe bzw. der Pipeline (aiml `spec/62` F62-146, bis 2026-10-25 `runs_on:`); darf Parameter interpolieren |
 | `per` | `enum StagePer` | `lane` \| `once` — einmal je Lane oder einmal für den ganzen Lauf (F62-58) |
 | `on_fail` | `enum FailReach` | `lane` \| `pipeline` \| `continue` (F62-39) |
 | `timeout_ms` | `i64` | Grenze für die ganze Stufe (F62-40); 0 = keine |
@@ -90,7 +89,7 @@ Ein `PipelineRun` ist ein Durchlauf einer Integrationspipeline über geordnete S
 | `steps` | `list<PipelineStep>` | geordnete Schritte dieser Stufe (§1.5a) |
 
 Die Stufe ist die **Einheit der Lokalität**: ein Workspace je (Lane, Stufe), ein Knoten je Stufe
-(aiml F62-60).  Deshalb sitzt `runs_on` hier und nicht am Schritt, und deshalb ist eine
+(aiml F62-60).  Deshalb sitzt `agent:` hier und nicht am Schritt, und deshalb ist eine
 `needs`-Kante **über** eine Stufengrenze die Stelle, an der ein `output_tree` übertragen werden
 muss (§96.11, F96-15).
 

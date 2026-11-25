@@ -85,7 +85,7 @@ Variablen als `k=v`, nach Schlüssel sortiert (byteweise).
 **Die UMGEBUNG gehört in den Schlüssel (Befund 5, 2026-10-21).**  `image_digest` fehlte, und
 damit traf ein Eintrag aus `ubuntu-base` auch in `debian-base`: derselbe Befehl, dasselbe
 Material, derselbe Schlüssel — ein falscher Treffer, der am Ergebnis nicht zu sehen ist.  Die
-Umgebung ist Schlüsselmaterial (aiml spec/62 §18, F62-66/67); das Etikett (`runs_on:`) ist es
+Umgebung ist Schlüsselmaterial (aiml spec/62 §18, F62-66/67); das Etikett (`agent:`) ist es
 nie (F62-49), denn WO ein Knoten steht, ändert das Ergebnis nicht.  Im Schlüssel steht die
 **Digest** des Abbilds, nicht sein Name oder Pfad (F62-130) — ein Name bewegt sich, der Inhalt
 nicht.  `""` heißt „gegen den Rechner", und das ist auch eine Umgebung.  Geprüft in

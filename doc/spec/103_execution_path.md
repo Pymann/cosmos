@@ -58,16 +58,16 @@ schon da und bleibt netzlos prüfbar.
 
 ### F103-3a: Wer darf einen Schritt nehmen? — drei Stufen, eine Regel
 
-Im Job-Quelltext (spec/62) steht die Auswahl als `runs_on:` (F62-47):
+Im Job-Quelltext (spec/62) steht die Auswahl als `agent:` (F62-146; bis 2026-10-25 `runs_on:`, F62-47):
 
 ```yaml
 - pipeline:
     name: nightly
-    runs_on: linux            # Vorgabe fuer ALLE Stufen
+    agent: linux              # Vorgabe fuer ALLE Stufen
     steps:
       - stage:
           name: build
-          runs_on: builder-1  # schlaegt die Vorgabe — Etikett ODER Agenten-Kennung
+          agent: builder-1    # schlaegt die Vorgabe — Etikett ODER Agenten-Kennung
           run: "make"
 ```
 

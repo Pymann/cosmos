@@ -1367,13 +1367,13 @@ hier in einem Stück, was ein Betreiber setzt und was ein Autor schreibt.
       - stage:
           name: aiml_bauen
           requires: [git, "gcc>=13", python3]           # was die Umgebung mitbringen muss
-          runs_on: x86_64                               # WO (Etikett, optional)
+          agent: x86_64                                 # WER (Etikett, optional; F110-127)
           resources: { cpu: 8, mem: "12G" }             # WIEVIEL Maschine (§110.34)
           shares: [{ name: ablage, to: /mnt/out, mode: rw }]   # WOMIT arbeiten (§110.35)
           run: "…"
 ```
 
-- **F110-81: Fünf Fragen, fünf Wörter.**  `image:` = worin, `runs_on:` = wo, `requires:` =
+- **F110-81: Fünf Fragen, fünf Wörter.**  `image:` = worin, `agent:` = wer (bis F110-127 `runs_on:`), `requires:` =
   was mitgebracht werden muss, `resources:` = wieviel Maschine, `shares:` = womit gearbeitet
   wird.  Sie sind verschieden, und keines vertritt ein anderes: die
   Umgebung ist Schlüsselmaterial (aiml F62-67), das Etikett nie (F62-49), die Vorbedingung

@@ -85,12 +85,12 @@ fand auch nichts, wenn er nachsah.  Beides gilt für den Knopf **und** den Zeitp
 Die Sprachseite ist aiml `spec/62`.  Dieser Abschnitt sagt, **welcher Ausschnitt davon heute
 wirklich geparst und ausgeführt wird** — denn bis zum 15.10.2026 wich die Implementierung an
 vier Stellen ab, ohne dass es irgendwo stand, und widersprach dabei auch `doc/spec/01` §1.5
-(dort steht `runs_on` längst als Ersatz für `required_label`).
+(dort ist `required_label` das Feld, das `agent:` füllt).
 
 ```yaml
 - pipeline:
     name: demo_build
-    runs_on: linux                 # Vorgabe für alle Stufen (F62-47); optional
+    agent: linux                   # Vorgabe für alle Stufen (F62-146); optional
     timeout: 1800000               # ms, Vorgabe für alle Stufen (F62-40); optional
     params:                        # optional; ohne params hat die Pipeline eine Lane
       - [arch, string, [x86_64, arm64]]
@@ -100,13 +100,13 @@ vier Stellen ab, ohne dass es irgendwo stand, und widersprach dabei auch `doc/sp
     steps:                         # Liste von STUFEN (F62-57)
       - stage:
           name: build
-          runs_on: builder-1       # schlägt die Pipeline-Vorgabe
+          agent: builder-1         # schlägt die Pipeline-Vorgabe
           timeout: 300000          # ms, schlägt die Pipeline-Vorgabe
           run: "make -j4"          # cosmos-Übergangsform, siehe unten
 ```
 
 **Die vier Abweichungen sind beseitigt** (15.10.2026): `stages:` heisst `steps:`, `label:`
-heisst `runs_on:`, `timeout_s:` heisst `timeout:` und zählt **Millisekunden**, und `params`
+heisst `runs_on:` (seit 25.10.2026 `agent:`, aiml F62-146), `timeout_s:` heisst `timeout:` und zählt **Millisekunden**, und `params`
 ist die typisierte Liste `[name, typ, domäne]` statt einer Abbildung.  Die alten Schlüssel
 werden **nicht** zusätzlich akzeptiert: zwei Schreibweisen für dieselbe Sache sind genau die
 Redundanz, die später niemand mehr auflöst.  Stattdessen nennt die Fehlermeldung die alte
@@ -137,7 +137,7 @@ Darum steht `run:` **hier**, als Form des Hosts, mit Ablaufdatum:
 Damit die Grenze benannt ist und nicht entdeckt werden muss: `parallel`, `per`, `needs`,
 `cache`, `on_fail`, `retry`, `pause_before`, `resolve`, `host`, `args`, `exec_defaults` und
 `return` werden am **Schritt** geprüft, aber von der Ausführung noch nicht beachtet; am
-**Stufen**-Eintrag kennt der Ausfalter `name`, `runs_on`, `timeout` und `run`.
+**Stufen**-Eintrag kennt der Ausfalter `name`, `agent`, `timeout` und `run`.
 
 ## 106.4 Die RPCs
 

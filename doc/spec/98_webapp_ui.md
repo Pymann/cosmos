@@ -61,7 +61,7 @@ Aber **nicht** über `yaml.parse`:
   fummelig.  cosmos bildet dann nur noch `kind → Farbe` ab — das ist die eine Sache, die wirklich
   Produktgeschmack ist.
 - **F98-6** Zusätzlich zu den YAML-Token hebt cosmos die **Pipeline-Schlüsselwörter** hervor
-  (`pipeline`, `params`, `stage`, `step`, `cache`, `on_fail`, `runs_on`, `resolve`, …, aiml
+  (`pipeline`, `params`, `stage`, `step`, `cache`, `on_fail`, `agent`, `resolve`, …, aiml
   `spec/62`).  Das ist eine Liste von Namen über den YAML-Token, kein zweiter Lexer.
 
 ## 98.4 Kompilations-Ausgabe: muss auf den Server
