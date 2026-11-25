@@ -131,7 +131,9 @@ stage_pruefen() {
     [ -f "$WS/blob_da" ] && { say "Tarball liegt schon in kontor — schon geprueft"; exit 0; }
     local tarball pkg probe rc missing; tarball="$(get tarball)"; safe "$tarball"
     rm -rf "$DL/x"; mkdir -p "$DL/x"
-    tar -xzf "$DL/$tarball" -C "$DL/x"
+    # --no-same-owner: im Sandkasten ist nur EINE Kennung abgebildet; die
+    # Eigentuemer aus dem Archiv lassen sich nicht setzen (tar endet sonst mit 2).
+    tar --no-same-owner -xzf "$DL/$tarball" -C "$DL/x"
     pkg="$DL/x/${tarball%.tar.gz}"
     [ -x "$pkg/bin/aiml" ] && [ -f "$pkg/lib/libaiml.so" ] || die "$tarball hat kein bin/aiml und lib/libaiml.so"
     missing="$(ldd "$pkg/bin/aiml" "$pkg/lib/libaiml.so" | grep 'not found' || true)"
