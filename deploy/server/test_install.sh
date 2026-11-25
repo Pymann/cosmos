@@ -28,7 +28,8 @@ check() { local what="$1"; shift; if "$@"; then ok "$what"; else fail "$what"; f
 diagnose() {
     echo "::group::Diagnose"
     sudo journalctl -u cosmosd -u cosmos-api -u cosmos-agent --no-pager -n 200 || true
-    sudo sh -c 'for f in /var/lib/cosmos/run_logs/*; do echo "=== $f"; tail -n 40 "$f"; done' 2>/dev/null || true
+    sudo sh -c 'ls -la /var/lib/cosmos /var/lib/cosmos/run_logs; for f in /var/lib/cosmos/run_logs/*; do echo "=== $f"; tail -n 40 "$f"; done' 2>&1 || true
+    sudo sh -c 'for f in /var/lib/cosmos-agent/steps/*/*/err; do [ -s "$f" ] || continue; echo "=== $f"; tail -n 20 "$f"; done' 2>&1 || true
     echo "--- kontor-Ersatz"; tail -n 40 "$WORK/stub.log" 2>/dev/null || true
     echo "::endgroup::"
 }
