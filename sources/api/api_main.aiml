@@ -1,7 +1,12 @@
 # cosmos-api — REST-Gateway vor cosmosd (doc/spec/111 §111.8).
 #
 #   cosmos-api                      (Umgebung: COSMOS_API_PORT=8090,
+#                                    COSMOS_API_HOST=0.0.0.0,
 #                                    COSMOS_API_UPSTREAM=ws://127.0.0.1:9100)
+#
+# COSMOS_API_HOST: an welcher Adresse das Gateway horcht.  Das Gateway spricht
+# HTTP ohne TLS; auf einem Server mit oeffentlicher Adresse gehoert es auf
+# 127.0.0.1 (doc/spec/112 F112-4), nicht auf alle Schnittstellen.
 #
 # Routen (alle JSON; Token per `Authorization: Bearer <token>`):
 #   GET    /api/v1/health
@@ -293,16 +298,18 @@
           then:
             - decl: [port_txt, string, { call: [envm.get, "COSMOS_API_PORT"] }]
             - set: [port, { call: [port_txt.to_int] }]
+      - decl: [host, string, "0.0.0.0"]
+      - if: { condition: { gt: [{ call: [envm.contains, "COSMOS_API_HOST"] }, 0] }, then: [{ set: [host, { call: [envm.get, "COSMOS_API_HOST"] }] }] }
       - decl: [upstream, string, "ws://127.0.0.1:9100"]
       - if: { condition: { gt: [{ call: [envm.contains, "COSMOS_API_UPSTREAM"] }, 0] }, then: [{ set: [upstream, { call: [envm.get, "COSMOS_API_UPSTREAM"] }] }] }
       - set: [g_api, { new: ApiGateway }]
       - call: [g_api.init, upstream]
       - decl: [srv, http_server_handle]
-      - set: [srv, { call: [http.server, "0.0.0.0", port] }]
+      - set: [srv, { call: [http.server, host, port] }]
       - if:
           condition: { eq: [srv, null] }
           then:
-            - call: [log.error, "cosmos-api: Port ${port} nicht bindbar"]
+            - call: [log.error, "cosmos-api: ${host}:${port} nicht bindbar"]
             - return: 1
       - call: [srv.set_max_body, 16777216]
       - call: [srv.set_timeout, 120]
@@ -332,7 +339,7 @@
       - call: [srv.route, "POST", "/api/v1/hooks/kontor", on_kontor_hook]
       - call: [srv.route, "GET", "/api/v1/sso/saml/login", on_sso_login]
       - call: [srv.route, "POST", "/api/v1/sso/saml/acs", on_sso_acs]
-      - call: [log.info, "cosmos-api: http://0.0.0.0:${port}/api/v1 → ${upstream}"]
+      - call: [log.info, "cosmos-api: http://${host}:${port}/api/v1 → ${upstream}"]
       - call: [srv.start]
       - call: [log.error, "cosmos-api: beendet"]
       - return: 1

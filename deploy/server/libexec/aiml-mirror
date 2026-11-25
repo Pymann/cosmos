@@ -1,0 +1,183 @@
+#!/bin/bash
+# aiml-mirror — die Stufen der Pipeline `aiml_nach_kontor` (doc/spec/112 §112.5).
+#
+#   aiml-mirror quelle      neueste Fassung bestimmen; hat kontor sie schon?
+#   aiml-mirror holen       Tarball + .sha256 von GitHub laden und pruefen
+#   aiml-mirror pruefen     auspacken, ldd, Rauchtest (exit 42)
+#   aiml-mirror hochladen   Tarball, .sha256 und ZULETZT aiml/latest.env nach kontor
+#   aiml-mirror aufraeumen  Download weg
+#
+# Quelle, wie .github/ci/setup-aiml.sh: das neueste Release, das KEIN Entwurf
+# ist und einen Linux-Tarball hat (oder AIML_RELEASE), sonst das Artefakt
+# aiml-linux-x86_64 des neuesten gruenen CI-Laufs auf master.
+#
+# Zwischenstand liegt im Arbeitsplatz des Laufs (/ws, doc/spec/110 F110-111);
+# jede Stufe liest ihn von dort.  Konfiguration (alles optional):
+#   /etc/cosmos-agent/aiml.env      AIML_REPO=Pymann/aiml  AIML_BRANCH=master  AIML_RELEASE=
+#   /etc/cosmos-agent/github.token  GitHub-Token, nur lesend (CI-Artefakte brauchen eines)
+set -euo pipefail
+
+WS="${AIML_MIRROR_WS:-/ws}"
+CONF="${AIML_MIRROR_CONF:-/etc/cosmos-agent/aiml.env}"
+BLOB="${KONTOR_BLOB:-/usr/local/libexec/cosmos/kontor-blob}"
+conf() { [ -r "$CONF" ] && sed -n "s/^$1=//p" "$CONF" | tail -1; }
+REPO="${AIML_REPO:-$(conf AIML_REPO)}";       REPO="${REPO:-Pymann/aiml}"
+BRANCH="${AIML_BRANCH:-$(conf AIML_BRANCH)}"; BRANCH="${BRANCH:-master}"
+PIN="${AIML_RELEASE:-$(conf AIML_RELEASE)}"
+GH_TOKEN_FILE="${GITHUB_TOKEN_FILE:-$(conf GITHUB_TOKEN_FILE)}"
+GH_TOKEN_FILE="${GH_TOKEN_FILE:-/etc/cosmos-agent/github.token}"
+API="${GITHUB_API_URL:-https://api.github.com}"
+
+STATE="$WS/quelle.env"
+DL="$WS/dl"
+say() { echo "[aiml-mirror] $*"; }
+die() { echo "[aiml-mirror] FEHLER: $*" >&2; exit 1; }
+# Gelesen, nicht ausgefuehrt (F112-15): nur bekannte Schluessel.
+get() { sed -n "s/^$1=//p" "$STATE" | tail -1; }
+safe() { [[ "$1" =~ ^[A-Za-z0-9._-]+$ ]] || die "unerwarteter Name '$1'"; }
+
+HDR="$(mktemp)"; trap 'rm -f "$HDR"' EXIT; chmod 600 "$HDR"
+: > "$HDR"
+if [ -r "$GH_TOKEN_FILE" ] && [ -s "$GH_TOKEN_FILE" ]; then
+    printf 'Authorization: Bearer %s\n' "$(tr -d '\r\n' < "$GH_TOKEN_FILE")" > "$HDR"
+fi
+gh_api() { curl -fsS --retry 3 --connect-timeout 15 -H @"$HDR" \
+    -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "$API/$1"; }
+gh_get() { curl -fsSL --retry 3 --connect-timeout 15 -H @"$HDR" "$@"; }
+
+skip_if_unchanged() {
+    if [ -f "$WS/unveraendert" ]; then say "kontor ist aktuell ($(get version)) — nichts zu tun"; exit 0; fi
+}
+
+stage_quelle() {
+    mkdir -p "$WS"; rm -f "$STATE" "$WS/unveraendert" "$WS/blob_da"
+    local rels rel version tarball source
+    if [ -n "$PIN" ]; then
+        rels="[$(gh_api "repos/$REPO/releases/tags/$PIN")]" || die "Release $PIN nicht gefunden"
+    else
+        rels="$(gh_api "repos/$REPO/releases?per_page=20")" || rels="[]"
+    fi
+    rel="$(jq -c '[.[] | select(.draft == false)
+                  | {tag: .tag_name,
+                     assets: [.assets[] | select(.name | test("^aiml-.*-linux-x86_64\\.tar\\.gz(\\.sha256)?$")) | {name, url}]}
+                  | select((.assets | length) == 2)][0] // empty' <<<"$rels")"
+    if [ -n "$rel" ]; then
+        version="$(jq -r .tag <<<"$rel")"; safe "$version"
+        tarball="aiml-$version-linux-x86_64.tar.gz"
+        source="release:$version"
+        {
+            echo "kind=release"
+            echo "asset_tar=$(jq -r --arg n "$tarball" '.assets[] | select(.name == $n) | .url' <<<"$rel")"
+            echo "asset_sum=$(jq -r --arg n "$tarball.sha256" '.assets[] | select(.name == $n) | .url' <<<"$rel")"
+        } > "$STATE"
+    else
+        [ -z "$PIN" ] || die "Release $PIN hat keinen Linux-Tarball"
+        local run sha id art
+        run="$(gh_api "repos/$REPO/actions/workflows/ci.yml/runs?branch=$BRANCH&status=success&per_page=1")" \
+            || die "CI-Laeufe von $REPO nicht lesbar (GitHub-Token in $GH_TOKEN_FILE?)"
+        id="$(jq -r '.workflow_runs[0].id // empty' <<<"$run")"
+        sha="$(jq -r '.workflow_runs[0].head_sha // empty' <<<"$run")"
+        [ -n "$id" ] || die "kein gruener CI-Lauf auf $BRANCH in $REPO"
+        art="$(gh_api "repos/$REPO/actions/runs/$id/artifacts" \
+            | jq -r '.artifacts[] | select(.name == "aiml-linux-x86_64" and .expired == false) | .archive_download_url' | head -1)"
+        [ -n "$art" ] || die "CI-Lauf $id hat kein Artefakt aiml-linux-x86_64"
+        version="git-${sha:0:7}"; safe "$version"
+        tarball="aiml-$version-linux-x86_64.tar.gz"
+        source="ci:$REPO/actions/runs/$id ($sha)"
+        { echo "kind=ci"; echo "artifact=$art"; } > "$STATE"
+    fi
+    { echo "version=$version"; echo "tarball=$tarball"; echo "source=$source"; } >> "$STATE"
+    say "Quelle: $source → $tarball"
+
+    # Hat kontor diese Fassung schon (F112-11)?
+    local latest; latest="$(mktemp)"
+    if "$BLOB" has "aiml/$version/$tarball.sha256"; then
+        touch "$WS/blob_da"
+        if "$BLOB" get aiml/latest.env "$latest" 2>/dev/null \
+            && [ "$(sed -n 's/^version=//p' "$latest")" = "$version" ]; then
+            touch "$WS/unveraendert"
+            say "kontor hat $version schon, und aiml/latest.env zeigt darauf"
+        else
+            say "kontor hat $version, aiml/latest.env zeigt woanders hin — nur der Zeiger wird neu"
+        fi
+    else
+        say "kontor hat $version noch nicht"
+    fi
+    rm -f "$latest"
+}
+
+stage_holen() {
+    skip_if_unchanged
+    [ -f "$WS/blob_da" ] && { say "Tarball liegt schon in kontor — kein Download"; exit 0; }
+    local tarball; tarball="$(get tarball)"; safe "$tarball"
+    rm -rf "$DL"; mkdir -p "$DL"
+    case "$(get kind)" in
+        release)
+            gh_get -H "Accept: application/octet-stream" -o "$DL/$tarball" "$(get asset_tar)"
+            gh_get -H "Accept: application/octet-stream" -o "$DL/$tarball.sha256" "$(get asset_sum)" ;;
+        ci)
+            gh_get -o "$DL/artifact.zip" "$(get artifact)"
+            unzip -q -o "$DL/artifact.zip" -d "$DL"; rm -f "$DL/artifact.zip" ;;
+        *) die "quelle.env unvollstaendig — lief die Stufe quelle?" ;;
+    esac
+    [ -f "$DL/$tarball" ] && [ -f "$DL/$tarball.sha256" ] \
+        || die "erwartet $tarball und $tarball.sha256, bekommen: $(ls "$DL" | tr '\n' ' ')"
+    (cd "$DL" && sha256sum -c "$tarball.sha256") || die "Pruefsumme stimmt nicht"
+    say "geladen: $tarball ($(stat -c%s "$DL/$tarball") Bytes)"
+}
+
+stage_pruefen() {
+    skip_if_unchanged
+    [ -f "$WS/blob_da" ] && { say "Tarball liegt schon in kontor — schon geprueft"; exit 0; }
+    local tarball pkg probe rc missing; tarball="$(get tarball)"; safe "$tarball"
+    rm -rf "$DL/x"; mkdir -p "$DL/x"
+    tar -xzf "$DL/$tarball" -C "$DL/x"
+    pkg="$DL/x/${tarball%.tar.gz}"
+    [ -x "$pkg/bin/aiml" ] && [ -f "$pkg/lib/libaiml.so" ] || die "$tarball hat kein bin/aiml und lib/libaiml.so"
+    missing="$(ldd "$pkg/bin/aiml" "$pkg/lib/libaiml.so" | grep 'not found' || true)"
+    [ -z "$missing" ] || die "auf diesem Rechner fehlen Bibliotheken: $missing"
+    probe="$(mktemp -d)"
+    printf -- '- call: [sys.exit, 42]\n' > "$probe/smoke.aiml"
+    set +e; (cd "$probe" && "$pkg/bin/aiml" smoke.aiml); rc=$?; set -e
+    rm -rf "$probe" "$DL/x"
+    [ "$rc" -eq 42 ] || die "Rauchtest endete mit $rc, erwartet 42"
+    say "Rauchtest gruen (exit 42)"
+}
+
+stage_hochladen() {
+    skip_if_unchanged
+    local version tarball sum
+    version="$(get version)"; tarball="$(get tarball)"; safe "$version"; safe "$tarball"
+    if [ ! -f "$WS/blob_da" ]; then
+        "$BLOB" put "$DL/$tarball" "aiml/$version/$tarball"
+        "$BLOB" put "$DL/$tarball.sha256" "aiml/$version/$tarball.sha256"
+        sum="$(cut -d' ' -f1 "$DL/$tarball.sha256")"
+    else
+        "$BLOB" get "aiml/$version/$tarball.sha256" "$WS/remote.sha256"
+        sum="$(cut -d' ' -f1 "$WS/remote.sha256")"; rm -f "$WS/remote.sha256"
+    fi
+    # Der Zeiger ZULETZT (F112-10).
+    {
+        echo "version=$version"
+        echo "tarball=aiml/$version/$tarball"
+        echo "sha256=$sum"
+        echo "source=$(get source)"
+        echo "mirrored=$(date -u +%FT%TZ)"
+    } > "$WS/latest.env"
+    "$BLOB" put "$WS/latest.env" aiml/latest.env
+    say "aiml/latest.env → $version"
+}
+
+stage_aufraeumen() {
+    rm -rf "$DL" "$WS/latest.env"
+    say "aufgeraeumt"
+}
+
+case "${1:-}" in
+    quelle) stage_quelle ;;
+    holen) stage_holen ;;
+    pruefen) stage_pruefen ;;
+    hochladen) stage_hochladen ;;
+    aufraeumen) stage_aufraeumen ;;
+    *) echo "usage: aiml-mirror quelle|holen|pruefen|hochladen|aufraeumen" >&2; exit 2 ;;
+esac

@@ -4,23 +4,72 @@
 # $AIML_VENV/lib (F68-23).
 #
 # Source of the binary, first that works:
+#   0. kontor, when AIML_KONTOR_URL is set (cosmos doc/spec/112 §112.6): the
+#      tarball cosmos mirrored there -- aiml/<AIML_RELEASE>/... when a release
+#      is pinned, else the one aiml/latest.env names.  Needs curl only.
+#        AIML_KONTOR_CA      PEM text of kontor's certificate (self-signed)
+#        AIML_KONTOR_TOKEN   only if kontor refuses anonymous reads
+#        AIML_KONTOR_STRICT  1 = fail instead of falling back to GitHub
 #   1. the release named by AIML_RELEASE (e.g. v1.0.2.4), else the newest
 #      published release, prereleases included (drafts are not visible here);
 #   2. the aiml-linux-x86_64 artifact of the newest green CI run on master.
 # The tarball comes with its .sha256 and is checked against it.
 #
-# Usage: setup-aiml.sh <venv-dir>      (needs GH_TOKEN for the gh CLI)
+# Usage: setup-aiml.sh <venv-dir>      (1. and 2. need GH_TOKEN for the gh CLI)
 set -euo pipefail
 
 VENV="${1:?venv dir}"
 REPO="${AIML_REPO:-Pymann/aiml}"
 DL="$(mktemp -d)"
 
+# kontor: read, never sourced (F112-15) -- latest.env comes from the network.
+from_kontor() {
+    local url="${AIML_KONTOR_URL%/}" curl_args=(-fsS --retry 3 --connect-timeout 15) ver tarball hdr
+    if [ -n "${AIML_KONTOR_CA:-}" ]; then
+        printf '%s\n' "$AIML_KONTOR_CA" > "$DL/kontor-ca.pem"
+        curl_args+=(--cacert "$DL/kontor-ca.pem")
+    fi
+    if [ -n "${AIML_KONTOR_TOKEN:-}" ]; then
+        hdr="$DL/kontor.hdr"; (umask 077; printf 'Authorization: Bearer %s\n' "$AIML_KONTOR_TOKEN" > "$hdr")
+        curl_args+=(-H @"$hdr")
+    fi
+    if [ -n "${AIML_RELEASE:-}" ]; then
+        ver="$AIML_RELEASE"; tarball="aiml/$ver/aiml-$ver-linux-x86_64.tar.gz"
+    else
+        curl "${curl_args[@]}" -o "$DL/latest.env" "$url/generic/aiml/latest.env" || return 1
+        ver="$(sed -n 's/^version=//p' "$DL/latest.env" | head -1)"
+        tarball="$(sed -n 's/^tarball=//p' "$DL/latest.env" | head -1)"
+        rm -f "$DL/latest.env"
+    fi
+    [[ "$ver" =~ ^[A-Za-z0-9._-]+$ ]] && [[ "$tarball" =~ ^aiml/[A-Za-z0-9._-]+/aiml-[A-Za-z0-9._-]+-linux-x86_64\.tar\.gz$ ]] \
+        || { echo "kontor: unexpected latest.env (version='$ver' tarball='$tarball')"; return 1; }
+    curl "${curl_args[@]}" -o "$DL/${tarball##*/}" "$url/generic/$tarball" || return 1
+    curl "${curl_args[@]}" -o "$DL/${tarball##*/}.sha256" "$url/generic/$tarball.sha256" || return 1
+    rm -f "$DL/kontor-ca.pem" "$DL/kontor.hdr"
+    echo "aiml: kontor $url ($ver)"
+}
+
+got=""
+if [ -n "${AIML_KONTOR_URL:-}" ]; then
+    if from_kontor; then
+        got=kontor
+    elif [ "${AIML_KONTOR_STRICT:-0}" = "1" ]; then
+        echo "::error::aiml not available from kontor $AIML_KONTOR_URL"; exit 1
+    else
+        echo "::warning::aiml not available from kontor $AIML_KONTOR_URL -- falling back to GitHub"
+        rm -f "$DL"/*
+    fi
+fi
+
 tag="${AIML_RELEASE:-}"
-if [ -z "$tag" ]; then
+if [ -n "$got" ]; then
+    :
+elif [ -z "$tag" ]; then
     tag="$(gh release list -R "$REPO" --exclude-drafts -L 1 --json tagName -q '.[0].tagName' 2>/dev/null || true)"
 fi
-if [ -n "$tag" ] && gh release download "$tag" -R "$REPO" -p 'aiml-*-linux-x86_64.tar.gz*' -D "$DL"; then
+if [ -n "$got" ]; then
+    :
+elif [ -n "$tag" ] && gh release download "$tag" -R "$REPO" -p 'aiml-*-linux-x86_64.tar.gz*' -D "$DL"; then
     echo "aiml: release $tag"
 elif [ -n "${AIML_RELEASE:-}" ]; then
     echo "::error::aiml release $AIML_RELEASE has no linux-x86_64 tarball"; exit 1

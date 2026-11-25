@@ -1,0 +1,39 @@
+# Der eine Knoten-Agent des kontor-Servers (doc/spec/112 §112.3).
+#
+# Er startet erst, wenn der Selbsttest mit GENAU dem bwrap gelaufen ist, das
+# die Schritte einsperrt (doc/spec/94 Schritt 9, F112-9).  Er weicht kontor und
+# 9rooms (F112-8): niedrige CPU-/IO-Gewichte statt einer harten Quote, damit er
+# einen leeren Rechner trotzdem ganz nutzen kann.  Mehr Speicher:
+#   sudo systemctl edit cosmos-agent   →   [Service] MemoryMax=4G
+[Unit]
+Description=cosmos node agent (one per server)
+After=network.target cosmosd.service
+Wants=cosmosd.service
+
+[Service]
+Type=simple
+User=cosmos-agent
+Group=cosmos-agent
+WorkingDirectory=/var/lib/cosmos-agent
+Environment=AIML_MEM_V3=1
+Environment=COSMOS_AGENT_URL=ws://127.0.0.1:8770
+Environment=COSMOS_AGENT_ID=kontor-server
+Environment=COSMOS_AGENT_LABELS=kontor-server,x86_64,linux
+EnvironmentFile=/etc/cosmos/cosmos.env
+ExecStartPre=/opt/cosmos/bin/agent --verify-isolation --bwrap-path /opt/cosmos/bin/bwrap
+ExecStart=/opt/cosmos/bin/agent --exec-url ${COSMOS_AGENT_URL} --agent-id ${COSMOS_AGENT_ID} --labels ${COSMOS_AGENT_LABELS} --agent-token-file /var/lib/cosmos-agent/agent.token --bwrap-path /opt/cosmos/bin/bwrap --work-root /var/lib/cosmos-agent/steps
+Restart=on-failure
+RestartSec=10
+Nice=10
+CPUWeight=20
+IOWeight=20
+MemoryMax=2G
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/cosmos-agent
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

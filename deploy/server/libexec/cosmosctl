@@ -1,0 +1,66 @@
+#!/bin/bash
+# cosmosctl — cosmos auf diesem Server bedienen, ueber die REST-Schnittstelle
+# (doc/spec/111 §111.8; eine Browser-Oberflaeche gibt es hier nicht, F112-3).
+# Braucht root: das API-Token liegt in /etc/cosmos/api.token (0600).
+#
+#   cosmosctl status                 Dienste, Agenten, letzte Laeufe
+#   cosmosctl jobs                   Jobs des Katalogs
+#   cosmosctl run <job-id>           einen Job jetzt starten (z. B. cat-aiml_nach_kontor)
+#   cosmosctl runs                   alle Laeufe (JSON)
+#   cosmosctl wait <run-id> [s]      warten, bis ein Lauf fertig ist (Vorgabe 1800 s)
+#   cosmosctl log <run-id>           Ausgabe der Stufen eines Laufs
+#   cosmosctl api <METHODE> <pfad> [koerper]   beliebiger Aufruf, z. B. api GET /cluster
+set -euo pipefail
+ENV_FILE="${COSMOS_ENV:-/etc/cosmos/cosmos.env}"
+TOKEN_FILE="${COSMOS_API_TOKEN_FILE:-/etc/cosmos/api.token}"
+LOG_DIR="${COSMOS_RUN_LOGS:-/var/lib/cosmos/run_logs}"
+port="$(sed -n 's/^COSMOS_API_PORT=//p' "$ENV_FILE" 2>/dev/null | tail -1)"
+API="${COSMOS_API:-http://127.0.0.1:${port:-8771}/api/v1}"
+
+api() {
+    local method="$1" path="$2" body="${3:-}" hdr
+    [ -r "$TOKEN_FILE" ] || { echo "cosmosctl: $TOKEN_FILE nicht lesbar (sudo?)" >&2; exit 2; }
+    hdr="$(mktemp)"; chmod 600 "$hdr"
+    printf 'Authorization: Bearer %s\n' "$(tr -d '\r\n' < "$TOKEN_FILE")" > "$hdr"
+    local args=(-sS -H @"$hdr" -X "$method")
+    [ -n "$body" ] && args+=(--data-binary "$body")
+    curl "${args[@]}" "$API$path"; local rc=$?
+    rm -f "$hdr"; return $rc
+}
+
+run_status() {  # Status eines Laufs aus /runs
+    api GET /runs | jq -r --arg id "$1" '.runs[] | select(.run_id == $id) | .status'
+}
+
+case "${1:-status}" in
+    status)
+        systemctl --no-pager --lines=0 status cosmosd cosmos-api cosmos-agent 2>/dev/null | grep -E '^●|Active:' || true
+        echo "-- Agent (letzte Anmeldung)"
+        journalctl -u cosmos-agent --no-pager -o cat 2>/dev/null | grep -E 'registered at|Isolation' | tail -2 || true
+        echo "-- letzte Laeufe"
+        api GET /runs | jq -r '.runs | sort_by(.started_ms) | reverse | .[:5][] | "  \(.run_id)  \(.pipeline_name)  #\(.build_number)  \(.status)"' ;;
+    jobs) api GET /jobs | jq -r '.jobs[] | "\(.job_id)  \(.name)  enabled=\(.enabled)  interval_s=\(.interval_s)  last=\(.last_status)"' ;;
+    run)
+        out="$(api POST "/jobs/${2:?job-id}/run")"; echo "$out"
+        jq -r '.run_id // empty' <<<"$out" ;;
+    runs) api GET /runs | jq . ;;
+    wait)
+        id="${2:?run-id}"; limit="${3:-1800}"; t=0
+        while [ "$t" -lt "$limit" ]; do
+            st="$(run_status "$id")"
+            case "$st" in
+                done|succeeded|success) echo "$id: $st"; exit 0 ;;
+                failed|error|cancelled|aborted) echo "$id: $st"; exit 1 ;;
+            esac
+            sleep 5; t=$((t + 5))
+        done
+        echo "$id: nach ${limit}s noch $st"; exit 1 ;;
+    log)
+        id="${2:?run-id}"
+        for f in "$LOG_DIR/$id"-*; do
+            [ -f "$f" ] || continue
+            echo "=== $(basename "$f")"; cat "$f"
+        done ;;
+    api) api "${2:?METHODE}" "${3:?pfad}" "${4:-}"; echo ;;
+    *) sed -n '2,13p' "$0"; exit 2 ;;
+esac

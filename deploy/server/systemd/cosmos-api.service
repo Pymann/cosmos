@@ -1,0 +1,28 @@
+# REST-Gateway vor cosmosd (doc/spec/111 §111.8), nur auf 127.0.0.1 (F112-4).
+[Unit]
+Description=cosmos REST gateway (cosmos-api)
+After=cosmosd.service
+Requires=cosmosd.service
+
+[Service]
+Type=simple
+User=cosmos
+Group=cosmos
+WorkingDirectory=/var/lib/cosmos
+Environment=AIML_MEM_V3=1
+Environment=COSMOS_API_HOST=127.0.0.1
+Environment=COSMOS_API_PORT=8771
+Environment=COSMOS_API_UPSTREAM=ws://127.0.0.1:8770
+EnvironmentFile=/etc/cosmos/cosmos.env
+ExecStart=/opt/cosmos/bin/cosmos-api
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/cosmos
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

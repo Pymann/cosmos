@@ -1,0 +1,23 @@
+# AppArmor fuer den cosmos-Agenten auf dem kontor-Server (doc/spec/112 §112.3).
+#
+# Ubuntu (ab 23.10) setzt kernel.apparmor_restrict_unprivileged_userns=1: ein
+# unconfined Programm darf dann keinen brauchbaren User-Namespace mehr anlegen.
+# Den Namespace eines Schritts legt `bwrap` an — darum braucht GENAU die Kopie
+# unter /opt/cosmos/bin/bwrap ein Profil (doc/spec/94 Schritt 6).  Das
+# systemweite /usr/bin/bwrap bleibt unberechtigt.  Kein sysctl.
+#
+# Eingespielt von deploy/server/install.sh:
+#   /etc/apparmor.d/cosmos-server  +  apparmor_parser -r
+abi <abi/4.0>,
+
+include <tunables/global>
+
+profile cosmos-bwrap /opt/cosmos/bin/bwrap flags=(unconfined) {
+    userns,
+    include if exists <local/cosmos-bwrap>
+}
+
+profile cosmos-agent /opt/cosmos/bin/agent flags=(unconfined) {
+    userns,
+    include if exists <local/cosmos-agent>
+}
