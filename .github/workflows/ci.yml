@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      aiml_release:
+        description: "aiml release tag to build with (empty = newest release, else newest green aiml CI run)"
+        required: false
+        default: ""
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Build (Ubuntu 24.04) and test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      EXODUS_CACHE: ${{ github.workspace }}/__exodus_cache
+      AIML_CACHE: ${{ github.workspace }}/__aiml_cache
+      AIML_MEM_V3: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"   # exodus: requires-python >= 3.12
+
+      - name: System packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends g++ libssl-dev curl libldap-dev xmlsec1
+
+      # The prebuilt compiler and runtime from Pymann/aiml, as a venv
+      # (aiml spec/68): every exodus.json here takes $AIML and $AIML_VENV/lib.
+      # Repository variable AIML_RELEASE pins a release for every run.
+      - name: Download aiml
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AIML_RELEASE: ${{ github.event.inputs.aiml_release || vars.AIML_RELEASE }}
+        run: bash .github/ci/setup-aiml.sh "$RUNNER_TEMP/aimlvenv"
+
+      - name: Install Exodus
+        run: |
+          python -m pip install -q "git+https://github.com/Pymann/exodus.git"
+          exodus --help > /dev/null
+
+      # cosmos has no exodus.json of its own, and `exodus pkg install` reads
+      # only that one; the configs CI builds pin no apt packages (only
+      # pipe3d and ui-shot do, which need a display and are not built here).
+
+      # The programs a venv install places (aiml.tool.json "configs").
+      - name: Build
+        run: |
+          for cfg in $(python3 -c 'import json; print(" ".join(json.load(open("aiml.tool.json"))["configs"]))'); do
+            echo "::group::exodus build -c $cfg"
+            exodus build -c "$cfg" -j "$(nproc)"
+            echo "::endgroup::"
+          done
+
+      # The logic tests (no display, no network): run_tests.sh builds its 27
+      # test configurations with the active venv and runs each in a fresh
+      # directory with a time limit.
+      - name: Logic tests
+        run: |
+          set +e
+          TEST_TIMEOUT=300 bash run_tests.sh 2>&1 | tee tests.log
+          rc=${PIPESTATUS[0]}
+          { echo "## Logic tests"; echo '```'; grep -E '^\[ (PASS|FAIL|MISS) \]|logic tests' tests.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: tests.log
+          if-no-files-found: ignore
