@@ -60,7 +60,7 @@ ADATA=/var/lib/cosmos-agent
 # ------------------------------------------------------------------ 0. Pruefen
 step "0. Voraussetzungen"
 for bin in cosmosd cosmos-api agent; do
-    [ -x "$FROM/$bin" ] || die "$FROM/$bin fehlt — erst bauen (ANLEITUNG.md, Schritt 3): aiml build -c exodus-$( [ "$bin" = cosmos-api ] && echo api || echo "$bin").json"
+    [ -x "$FROM/$bin" ] || die "$FROM/$bin fehlt — erst bauen (GUIDE.md, Schritt 3): aiml build -c exodus-$( [ "$bin" = cosmos-api ] && echo api || echo "$bin").json"
 done
 ok "Binaries in $FROM"
 [ -n "$VENV" ] || die "keine aiml-venv: --venv <dir> oder AIML_VENV setzen (sudo -E / sudo AIML_VENV=…)"
@@ -262,4 +262,4 @@ journalctl -u cosmos-agent --since "$since" --no-pager -o cat 2>/dev/null | grep
 ok "Agent angemeldet"
 
 echo
-echo "Fertig.  Weiter mit:  sudo cosmosctl status   |   sudo cosmosctl run cat-aiml_nach_kontor"
+echo "Fertig.  Weiter mit:  sudo cosmosctl status   |   sudo cosmosctl run cat-aiml_to_kontor"

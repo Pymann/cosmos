@@ -12,7 +12,7 @@
 #
 # Ist kontor schon aktuell, enden alle Stufen nach `quelle` sofort (F112-11).
 - pipeline:
-    name: aiml_nach_kontor
+    name: aiml_to_kontor
     steps:
       - stage:
           name: quelle

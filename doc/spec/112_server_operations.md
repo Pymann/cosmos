@@ -8,7 +8,7 @@ hochladen, z.b. für aiml, dann brauchen die anderen runner nur noch diesen blob
 Der Server ist der, auf dem schon kontor (`https://151.80.143.81:8443`) und 9rooms laufen: 2–4
 Kerne, kein Platz für einen zweiten Stapel.  Von hier aus ist er nicht erreichbar; darum liegt
 alles, was der Betreiber dort ausführt, in diesem Repository (`deploy/server/`), samt einer
-Anleitung in einem Stück (`deploy/server/ANLEITUNG.md`), und wird in GitHub Actions auf einem
+Anleitung in einem Stück (`deploy/server/GUIDE.md`), und wird in GitHub Actions auf einem
 frischen Ubuntu 24.04 einmal ganz durchgespielt (§112.7).
 
 ---
@@ -143,15 +143,15 @@ sie aus dem Checkout und die Bibliotheken aus der aiml-venv.
 `deploy/server/uninstall.sh` nimmt alles zurück; Daten (`/var/lib/cosmos*`) und Zugänge
 (`/etc/cosmos*`) nur mit `--purge`.
 
-## 112.5 Die Pipeline `aiml_nach_kontor`
+## 112.5 Die Pipeline `aiml_to_kontor`
 
-Katalog-Job `cat-aiml_nach_kontor`, **stündlich** (`interval_s: 3600`), auf dem Knoten-Agenten
+Katalog-Job `cat-aiml_to_kontor`, **stündlich** (`interval_s: 3600`), auf dem Knoten-Agenten
 (kein `image:`, `steplayer: none`, F110-125).  Die Arbeit tut `aiml-mirror <stufe>`; die Pipeline
 nennt nur die Stufen, damit sie lesbar bleibt und das Werkzeug für sich prüfbar ist.
 
 | Stufe | Tut | Ergebnis in `/ws` |
 |---|---|---|
-| `quelle` | neuestes **nicht-Entwurfs**-Release mit Linux-Tarball, sonst neuester grüner CI-Lauf auf `master` (wie `setup-aiml.sh`); fragt kontor, ob es diese Fassung schon hat | `quelle.env`, ggf. `unveraendert` |
+| `quelle` | neuestes **nicht-Entwurfs**-Release mit Linux-Tarball, sonst neuester grüner CI-Lauf auf `master` (wie `setup-aiml.sh`); fragt kontor, ob es diese Fassung schon hat | `source.env`, ggf. `unchanged` |
 | `holen` | Tarball + `.sha256` laden (Release-Asset oder CI-Artefakt), `sha256sum -c` | `dl/` |
 | `pruefen` | auspacken, `ldd` ohne „not found", Rauchtest `sys.exit 42` | — |
 | `hochladen` | `PUT` Tarball, `.sha256`, **zuletzt** `latest.env` | — |
@@ -224,7 +224,7 @@ Ein frischer GitHub-Runner (Ubuntu 24.04, mit systemd und AppArmor) spielt den S
    ein privates Repository und für diesen Job nicht ladbar);
 2. `install.sh` mit Zugängen aus Dateien;
 3. prüft: drei Dienste aktiv; cosmosd und Gateway horchen **nur** auf 127.0.0.1; der Agent steht
-   in `/api/v1/cluster`; der Job `cat-aiml_nach_kontor` steht im Katalog mit `interval_s 3600`;
+   in `/api/v1/cluster`; der Job `cat-aiml_to_kontor` steht im Katalog mit `interval_s 3600`;
 4. startet den Job, wartet auf `done`; kontor hat Tarball, `.sha256` und `latest.env`, die
    Prüfsumme stimmt;
 5. ein zweiter Lauf lädt **nichts** (F112-11: kontor sieht keinen zweiten `PUT` des Tarballs);
@@ -254,5 +254,5 @@ gebaut wird auf dem Runner nichts mit cosmos.
 - **Weitere Blobs**: dieselbe Form (`kontor-blob put`) trägt auch Bauergebnisse von kontor, ufo
   und cosmos; dafür braucht es nur weitere Pipelines im Katalog.
 - **Spiegel-Pipeline abschalten?**  Seit aiml selbst nach kontor liefert (§112.6), ist
-  `aiml_nach_kontor` doppelt.  Sie bleibt, bis entschieden ist, ob cosmos weiter einen
+  `aiml_to_kontor` doppelt.  Sie bleibt, bis entschieden ist, ob cosmos weiter einen
   zweiten Weg vorhält.

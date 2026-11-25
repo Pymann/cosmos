@@ -16,7 +16,7 @@ ROOT="$PWD"
 WORK="$(mktemp -d)"; chmod 755 "$WORK"
 STUB_PORT=18443
 KURL="http://127.0.0.1:$STUB_PORT"
-JOB=cat-aiml_nach_kontor
+JOB=cat-aiml_to_kontor
 FAILS=0
 ok()   { echo "  ok   $*"; }
 fail() { echo "  FAIL $*"; FAILS=$((FAILS + 1)); }
@@ -37,7 +37,7 @@ STUB_PID=""
 cleanup() { [ -n "$STUB_PID" ] && kill "$STUB_PID" 2>/dev/null; }
 trap cleanup EXIT
 
-runs_of() { sudo cosmosctl api GET /runs | jq -c --arg p aiml_nach_kontor '[.runs[] | select(.pipeline_name == $p)]'; }
+runs_of() { sudo cosmosctl api GET /runs | jq -c --arg p aiml_to_kontor '[.runs[] | select(.pipeline_name == $p)]'; }
 wait_run() {  # wait_run <run-id> → Status ausgeben
     local id="$1" st=""
     for _ in $(seq 1 360); do

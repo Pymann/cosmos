@@ -2,7 +2,7 @@
 
 Ziel (doc/spec/112): auf dem Server, auf dem kontor und 9rooms schon laufen, kommen **genau
 drei Dienste** dazu — `cosmosd`, `cosmos-api` und **ein** Agent.  Nichts davon ist von außen
-erreichbar.  Die Pipeline `aiml_nach_kontor` legt stündlich den neuesten geprüften aiml-Bau in
+erreichbar.  Die Pipeline `aiml_to_kontor` legt stündlich den neuesten geprüften aiml-Bau in
 kontor ab; die GitHub-Runner von cosmos, kontor und ufo laden aiml dann nur noch von dort.
 
 Alles unten läuft **auf dem Server**.  Dauer: etwa 20 Minuten, davon das meiste Bauen.
@@ -137,7 +137,7 @@ sudo cosmosctl status
 ```
 
 Erwartet: drei Dienste `active (running)`, der Agent mit `registered at ws://127.0.0.1:8770`, und
-schon ein Lauf von `aiml_nach_kontor` — der Zeitplan startet ihn sofort nach der Einrichtung.
+schon ein Lauf von `aiml_to_kontor` — der Zeitplan startet ihn sofort nach der Einrichtung.
 
 ```bash
 sudo cosmosctl runs | jq -r '.runs[] | "\(.run_id) \(.status)"'
@@ -150,7 +150,7 @@ curl -s https://127.0.0.1:8443/generic/aiml/latest.env     # (--cacert … bei e
 nichts Neues da, endet der Lauf nach zwei kleinen Anfragen.  Von Hand anstoßen:
 
 ```bash
-sudo cosmosctl run cat-aiml_nach_kontor
+sudo cosmosctl run cat-aiml_to_kontor
 ```
 
 ## 8. Die GitHub-Runner auf kontor umstellen
@@ -179,7 +179,7 @@ fehlt, `KONTOR_TOKEN`.
 |---|---|
 | Zustand | `sudo cosmosctl status` |
 | Jobs | `sudo cosmosctl jobs` |
-| Lauf starten | `sudo cosmosctl run cat-aiml_nach_kontor` |
+| Lauf starten | `sudo cosmosctl run cat-aiml_to_kontor` |
 | Protokoll eines Laufs | `sudo cosmosctl log <run-id>` |
 | Dienst-Protokolle | `journalctl -u cosmosd -u cosmos-api -u cosmos-agent -f` |
 | Feste aiml-Fassung statt der neuesten | `AIML_RELEASE=v…` in `/etc/cosmos-agent/aiml.env` |

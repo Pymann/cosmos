@@ -5,4 +5,4 @@
 - catalog:
     jobs:
       # stuendlich; ist kontor aktuell, kostet ein Lauf zwei kleine Anfragen.
-      - job: { name: aiml_nach_kontor, source: pipelines/aiml_nach_kontor.yaml, project: aiml, interval_s: 3600 }
+      - job: { name: aiml_to_kontor, source: pipelines/aiml_to_kontor.yaml, project: aiml, interval_s: 3600 }

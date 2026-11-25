@@ -1,5 +1,5 @@
 #!/bin/bash
-# aiml-mirror — die Stufen der Pipeline `aiml_nach_kontor` (doc/spec/112 §112.5).
+# aiml-mirror — die Stufen der Pipeline `aiml_to_kontor` (doc/spec/112 §112.5).
 #
 #   aiml-mirror quelle      neueste Fassung bestimmen; hat kontor sie schon?
 #   aiml-mirror holen       Tarball + .sha256 von GitHub laden und pruefen
@@ -28,7 +28,7 @@ GH_TOKEN_FILE="${GITHUB_TOKEN_FILE:-$(conf GITHUB_TOKEN_FILE)}"
 GH_TOKEN_FILE="${GH_TOKEN_FILE:-/etc/cosmos-agent/github.token}"
 API="${GITHUB_API_URL:-https://api.github.com}"
 
-STATE="$WS/quelle.env"
+STATE="$WS/source.env"
 DL="$WS/dl"
 say() { echo "[aiml-mirror] $*"; }
 die() { echo "[aiml-mirror] FEHLER: $*" >&2; exit 1; }
@@ -46,11 +46,11 @@ gh_api() { curl -fsS --retry 3 --connect-timeout 15 -H @"$HDR" \
 gh_get() { curl -fsSL --retry 3 --connect-timeout 15 -H @"$HDR" "$@"; }
 
 skip_if_unchanged() {
-    if [ -f "$WS/unveraendert" ]; then say "kontor ist aktuell ($(get version)) — nichts zu tun"; exit 0; fi
+    if [ -f "$WS/unchanged" ]; then say "kontor ist aktuell ($(get version)) — nichts zu tun"; exit 0; fi
 }
 
 stage_quelle() {
-    mkdir -p "$WS"; rm -f "$STATE" "$WS/unveraendert" "$WS/blob_da"
+    mkdir -p "$WS"; rm -f "$STATE" "$WS/unchanged" "$WS/blob_present"
     local rels rel version tarball source
     if [ -n "$PIN" ]; then
         rels="[$(gh_api "repos/$REPO/releases/tags/$PIN")]" || die "Release $PIN nicht gefunden"
@@ -92,10 +92,10 @@ stage_quelle() {
     # Hat kontor diese Fassung schon (F112-11)?
     local latest; latest="$(mktemp)"
     if "$BLOB" has "aiml/$version/$tarball.sha256"; then
-        touch "$WS/blob_da"
+        touch "$WS/blob_present"
         if "$BLOB" get aiml/latest.env "$latest" 2>/dev/null \
             && [ "$(sed -n 's/^version=//p' "$latest")" = "$version" ]; then
-            touch "$WS/unveraendert"
+            touch "$WS/unchanged"
             say "kontor hat $version schon, und aiml/latest.env zeigt darauf"
         else
             say "kontor hat $version, aiml/latest.env zeigt woanders hin — nur der Zeiger wird neu"
@@ -108,7 +108,7 @@ stage_quelle() {
 
 stage_holen() {
     skip_if_unchanged
-    [ -f "$WS/blob_da" ] && { say "Tarball liegt schon in kontor — kein Download"; exit 0; }
+    [ -f "$WS/blob_present" ] && { say "Tarball liegt schon in kontor — kein Download"; exit 0; }
     local tarball; tarball="$(get tarball)"; safe "$tarball"
     rm -rf "$DL"; mkdir -p "$DL"
     case "$(get kind)" in
@@ -118,7 +118,7 @@ stage_holen() {
         ci)
             gh_get -o "$DL/artifact.zip" "$(get artifact)"
             unzip -q -o "$DL/artifact.zip" -d "$DL"; rm -f "$DL/artifact.zip" ;;
-        *) die "quelle.env unvollstaendig — lief die Stufe quelle?" ;;
+        *) die "source.env unvollstaendig — lief die Stufe quelle?" ;;
     esac
     [ -f "$DL/$tarball" ] && [ -f "$DL/$tarball.sha256" ] \
         || die "erwartet $tarball und $tarball.sha256, bekommen: $(ls "$DL" | tr '\n' ' ')"
@@ -128,7 +128,7 @@ stage_holen() {
 
 stage_pruefen() {
     skip_if_unchanged
-    [ -f "$WS/blob_da" ] && { say "Tarball liegt schon in kontor — schon geprueft"; exit 0; }
+    [ -f "$WS/blob_present" ] && { say "Tarball liegt schon in kontor — schon geprueft"; exit 0; }
     local tarball pkg probe rc missing; tarball="$(get tarball)"; safe "$tarball"
     rm -rf "$DL/x"; mkdir -p "$DL/x"
     # --no-same-owner: im Sandkasten ist nur EINE Kennung abgebildet; die
@@ -150,7 +150,7 @@ stage_hochladen() {
     skip_if_unchanged
     local version tarball sum
     version="$(get version)"; tarball="$(get tarball)"; safe "$version"; safe "$tarball"
-    if [ ! -f "$WS/blob_da" ]; then
+    if [ ! -f "$WS/blob_present" ]; then
         "$BLOB" put "$DL/$tarball" "aiml/$version/$tarball"
         "$BLOB" put "$DL/$tarball.sha256" "aiml/$version/$tarball.sha256"
         sum="$(cut -d' ' -f1 "$DL/$tarball.sha256")"
