@@ -165,12 +165,13 @@ es von dort nehmen, brauchen diese Repositories dieselben **Secrets** wie `Pyman
 | `KONTOR_URL` | `https://151.80.143.81:8443` |
 | `KONTOR_CA` | der **Inhalt** der CA-Datei von kontor (`-----BEGIN CERTIFICATE-----` …) |
 
-Das Schreib-Token `KONTOR_TOKEN` gehört **nicht** dazu — die Runner lesen nur.  Im nächsten
+Im nächsten
 CI-Lauf steht im Schritt *Download aiml*: `aiml: kontor https://151.80.143.81:8443 (latest,
 sha256 …)`.  Ist kontor nicht erreichbar, lädt der Runner wie bisher von GitHub und warnt.
 
-Hat kontor anonymes Lesen abgeschaltet (`auth.anonymous: none`), zusätzlich ein Token mit der
-Rolle `reader` als Secret `AIML_KONTOR_TOKEN`.
+kontor verlangt fürs Lesen ein Token (anonymes Lesen ist abgeschaltet).  Die Workflows nehmen
+das Secret `AIML_KONTOR_TOKEN` (am besten ein Token nur mit der Rolle `reader`), und wenn es
+fehlt, `KONTOR_TOKEN`.
 
 ## 9. Bedienen
 

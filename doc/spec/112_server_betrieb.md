@@ -210,8 +210,9 @@ Neue Quelle **vor** den beiden bisherigen, nur wenn `AIML_KONTOR_URL` gesetzt is
 - **F112-15: Was aus dem Netz kommt, wird geprüft, nicht geglaubt.**  Der Schlüssel muss
   `^[A-Za-z0-9._-]+$` sein; eine Antwort ohne Prüfsumme oder mit falscher gilt als Ausfall.
 - In GitHub: die Secrets **`KONTOR_URL`** und **`KONTOR_CA`** — dieselben Namen wie in
-  `Pymann/aiml`.  Das Schreib-Token `KONTOR_TOKEN` bekommen die Leser **nicht**.  Ohne Secrets
-  bleibt alles wie bisher.
+  `Pymann/aiml`.  kontor verlangt auch fürs Lesen ein Token (gemessen: anonym → 401); die
+  Workflows nehmen `AIML_KONTOR_TOKEN` (besser: nur `reader`), sonst `KONTOR_TOKEN`.  Ohne
+  Secrets bleibt alles wie bisher.
 - Dieselbe Datei liegt in cosmos, kontor und ufo (`.github/ci/setup-aiml.sh`).
 
 ## 112.7 Abnahme (`deploy/server/test_install.sh`, CI-Job `server-setup`)
