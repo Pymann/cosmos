@@ -39,7 +39,7 @@ PKG="$(echo "$DL"/aiml-*-linux-x86_64/)"
 # libraries the tarball bundles next to them have to come along, or bin/aiml
 # (RUNPATH $ORIGIN/../lib) no longer finds them.
 "$PKG/bin/aiml" venv "$VENV"
-cp -n "$PKG"/lib/*.so* "$VENV/lib/"
+cp --update=none "$PKG"/lib/*.so* "$VENV/lib/"
 
 # A venv made from this one by `aiml venv <dir>` (ufo's venv_layer.sh does
 # that) gets compiler and runtime only, without the bundled libraries, and

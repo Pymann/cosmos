@@ -54,10 +54,11 @@ jobs:
       # only that one; the configs CI builds pin no apt packages (only
       # pipe3d and ui-shot do, which need a display and are not built here).
 
-      # The programs a venv install places (aiml.tool.json "configs").
+      # The programs a venv install places (aiml.tool.json "configs"), plus
+      # the console offer library test_console loads (doc/spec/108).
       - name: Build
         run: |
-          for cfg in $(python3 -c 'import json; print(" ".join(json.load(open("aiml.tool.json"))["configs"]))'); do
+          for cfg in $(python3 -c 'import json; print(" ".join(json.load(open("aiml.tool.json"))["configs"]))') exodus-console-offer.json; do
             echo "::group::exodus build -c $cfg"
             exodus build -c "$cfg" -j "$(nproc)"
             echo "::endgroup::"
