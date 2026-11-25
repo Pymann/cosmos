@@ -215,6 +215,20 @@
                       - call: [log.info, "[deprovision] Token ${req.token_id} widerrufen=${revoked}"]
                 - set: [res.token_id, req.token_id]
 
+                # F94-14: waehrend eine Einrichtung nebenher laeuft, wird NICHT
+                # zurueckgebaut — beide Ketten arbeiteten sonst gleichzeitig auf
+                # demselben Knoten (gemessen 2026-11-25: `work_dir` der Einrichtung
+                # lief NACH dem Rueckbau und liess Reste zurueck).  Das Token ist
+                # oben schon widerrufen; das ist der Ausschalter und bleibt.
+                - if:
+                    condition: { eq: [{ call: [<.prov_job.is_running] }, 1] }
+                    then:
+                      - set: [res.failed_step, "busy"]
+                      - set: [res.message, "Es laeuft noch eine Einrichtung — Rueckbau erst danach (Token widerrufen=${revoked})."]
+                      - call: [log.info, "[deprovision] ${req.host}: busy, Einrichtung laeuft (Token widerrufen=${revoked})"]
+                      - call: [session.reply_rpc, rpc, "set_result", 0, res]
+                      - return: []
+
                 - decl: [steps, list<ProvisionStep>, { call: [<.provisioner.teardown_plan, cfg] }]
                 - decl: [out, ProvisionResult, { call: [<.provisioner.run_teardown, cfg, steps, req.expected_fp, req.login_password, req.sudo_password] }]
                 - set: [res.success, out.success]

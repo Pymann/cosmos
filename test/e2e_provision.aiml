@@ -12,6 +12,7 @@
 #   2 mit Fingerprint meldet er „angenommen" SOFORT (running=1, kein Blockieren)
 #   3 waehrend es laeuft, antwortet der Server weiter (provision_status)
 #   4 der Auftrag endet und nennt seinen Ausgang
+#   5 ein Rueckbau waehrend der Einrichtung meldet busy und baut nichts ab (F94-14)
 #
 # Expected exit code: 0
 
@@ -71,6 +72,18 @@
       - set: [fails, { +: [fails, { call: [expect, "und meldet angenommen (${go_res.message})", { eq: [go_res.running, 1] }] }] }]
       # Der Aufruf darf NICHT auf die Schritte warten — sonst steht der Server.
       - set: [fails, { +: [fails, { call: [expect, "der Aufruf kehrt sofort zurueck (${took_ms} ms)", { lt: [took_ms, 3000] }] }] }]
+
+      # ── 2b) Rueckbau WAEHREND der Einrichtung (F94-14) ───────────────────
+      # run_e2e_provision.sh macht den Paketschritt zwei Sekunden lang, die
+      # Einrichtung laeuft hier also sicher noch.  Der Rueckbau widerruft das
+      # Token und weigert sich, gleichzeitig am Knoten zu arbeiten.
+      - decl: [dp_req, ProvisionReq, req]
+      - set: [dp_req.token_id, go_res.token_id]
+      - decl: [dp_res, ptr<ProvisionResp>, { new: ProvisionResp }]
+      - decl: [got_dp, i32, { call: [runner.sess.send_and_await, 0, "deprovision_agent", dp_req, dp_res, 20000] }]
+      - set: [fails, { +: [fails, { call: [expect, "Rueckbau waehrend der Einrichtung antwortet", { eq: [got_dp, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und meldet busy (${dp_res.failed_step}: ${dp_res.message})", { eq: [dp_res.failed_step, "busy"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und fuehrt keinen Schritt aus", { eq: [dp_res.steps_done, 0] }] }] }]
 
       # ── 3+4) Stand abfragen, bis fertig ──────────────────────────────────
       - decl: [polls, i32, 0]

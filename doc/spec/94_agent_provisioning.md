@@ -264,6 +264,19 @@ kommt aus der Umgebung des Servers, mit Produktionswerten als Standard:
 | `COSMOS_PROV_SUDO` | `sudo -S -p '' ` |
 | `COSMOS_PROV_PKG_CMD` | `apt-get install -y uidmap` |
 | `COSMOS_PROV_EXEC_URL` | die Bind-Adresse des Servers |
+| `COSMOS_AGENT_RUNTIME` | `./deploy/runtime.tar.gz` (Laufzeit neben dem Binary, Schritt 5) |
+| `COSMOS_PROV_WORK_DIR` | `/var/lib/cosmos-agent` |
+| `COSMOS_PROV_RUNTIME_OWNER` | `root:root` (Besitzer von `lib/` und `bwrap` nach dem Auspacken) |
+| `COSMOS_PROV_SUBUID_FILE` / `COSMOS_PROV_SUBGID_FILE` | `/etc/subuid` / `/etc/subgid` |
+| `COSMOS_PROV_VERIFY_PREFIX` | `sudo -S -p '' -u cosmos-agent ` |
+| `COSMOS_PROV_APPARMOR_CMD` / `COSMOS_PROV_APPARMOR_UNLOAD` | `apparmor_parser -r` / `apparmor_parser -R` |
+| `COSMOS_PROV_SERVICE_CMD` | `systemctl daemon-reload && systemctl enable cosmos-agent && systemctl restart cosmos-agent` |
+| `COSMOS_PROV_CHECK_CMD` / `COSMOS_PROV_STOP_CMD` / `COSMOS_PROV_RELOAD_CMD` | `systemctl is-active --quiet cosmos-agent` / `systemctl disable --now cosmos-agent` / `systemctl daemon-reload` |
+
+Die Abnahme-Läufe (`run_e2e.sh`, `run_e2e_provision.sh`) setzen **jede** Zielpfad-Variable auf
+ein Verzeichnis unter ihrem Arbeitsordner: ein Test, der als root läuft, darf sonst nach
+`/var/lib/cosmos-agent` oder `/opt/cosmos` des Rechners schreiben (gemessen 2026-11-25:
+`run_e2e.sh` setzte `COSMOS_PROV_WORK_DIR` nicht).
 
 Der Wert **`-`** bedeutet bei `COSMOS_PROV_SUDO`, `COSMOS_PROV_VERIFY_PREFIX` und
 `COSMOS_PROV_STOP_CMD` ausdrücklich **leer** (kein sudo, kein Nutzerwechsel, kein
@@ -342,6 +355,14 @@ Jeder Schritt ist **idempotent**: ein zweiter Rückbau darf nicht scheitern, nur
 nichts mehr da ist (`rm -f`, `userdel` nur wenn der Nutzer existiert, `grep`-gestütztes
 Streichen der ID-Zeilen).
 
+**Rückbau während einer Einrichtung (F94-14, 2026-11-25).**  Die Einrichtung läuft nebenher
+(`provision_status`), ein Rückbau kann also eintreffen, während sie noch Schritte ausführt.
+Dann widerruft er das Token wie immer **zuerst** (Schritt 1 — der Ausschalter darf nicht
+warten), führt aber **keinen** Schritt am Knoten aus und antwortet `failed_step = "busy"`.
+Zwei Ketten gleichzeitig auf demselben Knoten ließen Reste zurück, die keine von beiden
+kennt (gemessen 2026-11-25: der Schritt `work_dir` der Einrichtung lief nach dem Rückbau).
+Wer zurückbauen will, wartet das Ende der Einrichtung ab (`running = 0`) und ruft erneut.
+
 ## 94.6 Abnahme (testbar)
 
 - **P1 Idempotenz:** zweimal einrichten → derselbe Endzustand, kein Fehler.
@@ -354,6 +375,9 @@ Streichen der ID-Zeilen).
   und der ID-Bereich **weg**, und das Enrollment-Token ist am Server **widerrufen** (eine
   Anmeldung damit wird abgelehnt). Zweimal zurückbauen scheitert nicht. `uidmap` bleibt
   installiert.
+- **P10 Rückbau während der Einrichtung (F94-14):** solange `provision_status` `running = 1`
+  meldet, antwortet `deprovision_agent` `busy` mit `steps_done = 0`, und das Token ist
+  widerrufen (`test/e2e_provision.aiml`).
 - **P3 Kein Geheimnis in Logs:** nach einem Lauf enthält **keine** Log-Datei das Passwort —
   prüfbar durch Suche nach dem verwendeten Wert.
 - **P4 Kein Geheimnis in der Prozessliste:** während des Laufs taucht das Passwort in

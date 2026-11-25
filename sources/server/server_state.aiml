@@ -325,7 +325,7 @@
       - { class: RpcHandlerBase, instance: set_break,   sees: [cluster, auth], implements: [mirror.RpcHandler] }
       - { class: RpcHandlerBase, instance: clear_break, sees: [cluster, auth], implements: [mirror.RpcHandler] }
       - { class: RpcHandlerBase, instance: rewind_run,  sees: [cluster, auth], implements: [mirror.RpcHandler] }
-      - { class: RpcHandlerBase, instance: deprovision_agent, sees: [auth, tokens, provisioner], implements: [mirror.RpcHandler] }
+      - { class: RpcHandlerBase, instance: deprovision_agent, sees: [auth, tokens, provisioner, prov_job], implements: [mirror.RpcHandler] }
 
       # doc/spec/96 §96.13: eingereichte Pipelines pruefen und ausfalten.  Der
       # Pruefer ist eine eigene Instanz, damit er ohne RPC testbar bleibt.
