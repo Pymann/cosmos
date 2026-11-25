@@ -11,7 +11,7 @@
 # VERAENDERT DEN RECHNER (Dienste, Nutzer, /opt/cosmos) — nur auf einem
 # Wegwerf-Rechner ausfuehren.
 set -uo pipefail
-cd "$(dirname "$0")/../.."
+cd "$(dirname "$0")/../.." || exit 2
 ROOT="$PWD"
 WORK="$(mktemp -d)"; chmod 755 "$WORK"
 STUB_PORT=18443
@@ -84,7 +84,7 @@ if [ -z "$first" ]; then
 fi
 echo "       Lauf $first"
 st="$(wait_run "$first")"
-check "erster Lauf done (war: $st)" [ "$st" = done ]
+check "erster Lauf done (war: $st)" [ "$st" = "done" ]
 latest="$WORK/kontor/generic/aiml/latest.env"
 check "kontor hat aiml/latest.env" [ -f "$latest" ]
 if [ -f "$latest" ]; then
@@ -100,7 +100,7 @@ echo "== 5. zweiter Lauf laedt nichts (F112-11)"
 puts_before="$(grep -c '\.tar\.gz ' "$WORK/kontor/puts.log" 2>/dev/null || echo 0)"
 second="$(sudo cosmosctl run "$JOB" | tail -1)"
 st="$(wait_run "$second")"
-check "zweiter Lauf done (war: $st)" [ "$st" = done ]
+check "zweiter Lauf done (war: $st)" [ "$st" = "done" ]
 check "kein zweiter PUT des Tarballs" [ "$(grep -c '\.tar\.gz ' "$WORK/kontor/puts.log" 2>/dev/null || echo 0)" = "$puts_before" ]
 sudo cosmosctl log "$second" 2>/dev/null | grep -q 'nichts zu tun\|schon' && ok "Lauf meldet: kontor aktuell" || fail "Lauf meldet nicht, dass kontor aktuell ist"
 
@@ -126,7 +126,7 @@ resp="$(sudo cosmosctl api POST /pipelines/run "$probe")"
 pid="$(jq -r '.run_id // empty' <<<"$resp")"
 if [ -n "$pid" ]; then
     st="$(wait_run "$pid")"
-    check "Schritt liest weder API-Token, Admin-Passwort, KV noch Agent-Token, aber kontor.env (war: $st)" [ "$st" = done ]
+    check "Schritt liest weder API-Token, Admin-Passwort, KV noch Agent-Token, aber kontor.env (war: $st)" [ "$st" = "done" ]
 else
     fail "Probe-Pipeline abgelehnt: $resp"
 fi
@@ -139,6 +139,7 @@ fi
 
 echo "== 8. install.sh ein zweites Mal (idempotent)"
 before="$(sudo sha256sum /etc/cosmos/api.token /etc/cosmos/admin.password /var/lib/cosmos-agent/agent.token)"
+# shellcheck disable=SC2024  # das Protokoll gehoert dem Aufrufer, nicht root
 if sudo "$ROOT/deploy/server/install.sh" --venv "$AIML_VENV" > "$WORK/install2.log" 2>&1; then
     ok "zweiter Lauf von install.sh"
 else
@@ -149,7 +150,7 @@ check "kontor-URL bleibt (ohne --kontor-url)" sudo grep -q "^KONTOR_URL=$KURL$" 
 for u in cosmosd cosmos-api cosmos-agent; do check "$u wieder aktiv" systemctl is-active --quiet "$u"; done
 third="$(sudo cosmosctl run "$JOB" | tail -1)"
 st="$(wait_run "$third")"
-check "Lauf nach Neuinstallation done (war: $st)" [ "$st" = done ]
+check "Lauf nach Neuinstallation done (war: $st)" [ "$st" = "done" ]
 
 echo
 if [ "$FAILS" -eq 0 ]; then echo "SERVER-SETUP: PASS"; exit 0; fi
