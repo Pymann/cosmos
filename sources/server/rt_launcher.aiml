@@ -141,7 +141,7 @@
             # mit dem Container weg — und „ab Stufe X nochmal" liefe gegen das
             # nackte Abbild, obwohl die Schichten der frueheren Stufen noch da
             # sind.  Ein Verzeichnis je WIRT, darin eines je Lauf.
-            - decl: [work_at, string, "${<.work_dir}/lauf"]
+            - decl: [work_at, string, "${<.work_dir}/runs"]
             - call: [io.mkdir_all, work_at]
             # Optional: eine Zugangsdatei fuer git (COSMOS_RT_GIT_CRED).  Sie
             # reist als EIGENER Bind, nicht im Abbild — ein Geheimnis in einer

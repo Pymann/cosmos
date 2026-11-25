@@ -134,7 +134,7 @@
             # er nichts mehr zu tun hat.  Wer zuerst die Wurzel pruefte, haette
             # genau dann aufgegeben, wenn das Material noch vollstaendig da ist.
             - decl: [work_at, string, { call: [<.work_root_of, rootfs] }]
-            - decl: [layers_at, string, "${work_at}/lauf/${run_id}/layers"]
+            - decl: [layers_at, string, "${work_at}/runs/${run_id}/layers"]
             - decl: [have_lay, i32, 0]
             - if: { condition: { eq: [{ call: [io.is_dir, layers_at] }, true] }, then: [{ set: [have_lay, 1] }] }
             - if:

@@ -1482,7 +1482,7 @@ Zwei Anläufe waren nötig, und beide stehen oben: das Bind-Ziel gab es im Abbil
   `<bündel>/work` — also im Container.  Wird der abgeräumt (schon 60 s ohne Arbeit), startet der
   nächste mit einem neuen Bündel und findet die Schichten der früheren Stufen nicht; „ab Stufe X
   nochmal" liefe gegen das nackte Abbild.  Das widersprach F110-94, das genau dies versprach.
-  Jetzt: `<wirt-arbeitsbereich>/lauf/<lauf>/…`, in jeden Container als `/work` gehängt.
+  Jetzt: `<wirt-arbeitsbereich>/runs/<lauf>/…` (gespeicherte Pfade englisch; bis 2026-11-25 `lauf/`), in jeden Container als `/work` gehängt.
 - **F110-111: `/ws` war der Arbeitsplatz des CONTAINERS, nicht des Laufs.**  Der Bind des
   Lauf-Arbeitsplatzes nach `/ws` stand nur im bwrap-Pfad (Knoten ohne Container).  Im Container
   schrieb eine Stufe nach `/ws` in die **Wurzel des Containers** — und `reap` löscht die Wurzel.
