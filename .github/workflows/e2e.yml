@@ -131,3 +131,64 @@ jobs:
           name: e2e-logs-run_e2e_kontor.sh
           path: logs/
           if-no-files-found: ignore
+
+  # The wasm probes (run_wasm_probes.sh): `aiml build` with output_type wasm
+  # (aiml spec/68 §7.1), linked by emcc of the version the release names in
+  # lib/wasm32/emsdk.version, run in node.  An aiml release without wasm
+  # builds says so and the job passes with a notice.
+  wasm-probes:
+    name: run_wasm_probes.sh
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      AIML_CACHE: ${{ github.workspace }}/__aiml_cache
+      AIML_MEM_V3: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: System packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends g++ libssl-dev curl jq libldap-dev xmlsec1
+
+      - name: Download aiml
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AIML_RELEASE: ${{ github.event.inputs.aiml_release || vars.AIML_RELEASE }}
+        run: bash .github/ci/setup-aiml.sh "$RUNNER_TEMP/aimlvenv"
+
+      - name: Does this aiml build wasm?
+        id: can
+        run: |
+          if [ ! -f "$AIML_VENV/lib/wasm32/emsdk.version" ]; then
+            echo "::notice::this aiml release carries no lib/wasm32 (spec/68 F68-90), run_wasm_probes.sh skipped"; exit 0
+          fi
+          out=$(aiml build -c exodus-test-ptrref-wasm.json 2>&1 || true)
+          if echo "$out" | grep -q "output_type 'wasm'"; then
+            echo "::notice::this aiml release does not build wasm yet (spec/68 F68-88), run_wasm_probes.sh skipped"; exit 0
+          fi
+          echo "emsdk=$(tr -d '[:space:]' < "$AIML_VENV/lib/wasm32/emsdk.version")" >> "$GITHUB_OUTPUT"
+
+      - name: emsdk
+        if: steps.can.outputs.emsdk != ''
+        run: |
+          git clone -q --depth 1 https://github.com/emscripten-core/emsdk.git "$RUNNER_TEMP/emsdk"
+          cd "$RUNNER_TEMP/emsdk"
+          ./emsdk install "${{ steps.can.outputs.emsdk }}" > /dev/null
+          ./emsdk activate "${{ steps.can.outputs.emsdk }}" > /dev/null
+          . ./emsdk_env.sh > /dev/null
+          echo "$(dirname "$(command -v emcc)")" >> "$GITHUB_PATH"
+          echo "EM_CONFIG=$EM_CONFIG" >> "$GITHUB_ENV"
+          emcc --version | head -1
+
+      - name: run_wasm_probes.sh
+        if: steps.can.outputs.emsdk != ''
+        run: timeout 2400 bash run_wasm_probes.sh
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-logs-run_wasm_probes.sh
+          path: logs/
+          if-no-files-found: ignore

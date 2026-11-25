@@ -1,0 +1,38 @@
+# stamp_build_version.aiml — pre_compilation hook of exodus-client.json
+# (aiml spec/68 F68-87: hooks are aiml, run by the JIT).
+#
+# The client shows a build stamp on its login and shell screens
+# (io.read_asset "build_version").  This writes it: the config's version,
+# the git commit and the build time in ms.  It also gives the asset
+# directory the two vocab assets the client loads at boot (aiml spec/44_8)
+# when they are not there yet: English only, no translations.  Existing
+# files are left alone.
+- def:
+    name: main
+    return: i32
+    body:
+      - call: [io.mkdir_all, "assets"]
+      - decl: [commit, string, "unknown"]
+      - if:
+          condition: { eq: [{ call: [io.is_file, ".git/HEAD"] }, true] }
+          then:
+            - decl: [head_raw, string, { call: [io.read_file, ".git/HEAD"] }]
+            - decl: [head, string, { call: [head_raw.trim] }]
+            - set: [commit, head]
+            - if:
+                condition: { call: [head.starts_with, "ref: "] }
+                then:
+                  - decl: [ref_name, string, { call: [head.substr, 5, { -: [head.len, 5] }] }]
+                  - decl: [ref_at, string, ".git/${ref_name}"]
+                  - if:
+                      condition: { eq: [{ call: [io.is_file, ref_at] }, true] }
+                      then:
+                        - decl: [ref_raw, string, { call: [io.read_file, ref_at] }]
+                        - set: [commit, { call: [ref_raw.trim] }]
+      - decl: [vars, map<string:string>, { call: [sys.env] }]
+      - decl: [name, string, { call: [vars.get, "AIML_BUILD_NAME"] }]
+      - decl: [stamp, i64, { call: [time.now] }]
+      - call: [io.write_file, "assets/build_version.txt", "${name} ${commit} ${stamp}"]
+      - if: { condition: { eq: [{ call: [io.is_file, "assets/languages.json"] }, false] }, then: [{ call: [io.write_file, "assets/languages.json", "{ \"0\": \"en\" }"] }] }
+      - if: { condition: { eq: [{ call: [io.is_file, "assets/vocab.json"] }, false] }, then: [{ call: [io.write_file, "assets/vocab.json", "{}"] }] }
+      - return: 0

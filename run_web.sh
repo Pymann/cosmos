@@ -64,14 +64,15 @@ if [ "$TLS" = "1" ]; then
 fi
 
 if [ "${1:-}" = "--build" ]; then
-  [ -f ../../exvenv/bin/activate ] && source ../../exvenv/bin/activate
   # aiml spec/68: die Konfigurationen nehmen Compiler und Laufzeit aus einer
   # venv ($AIML, $AIML_VENV) — die Standard-venv, falls keine aktiv ist.
   [ -n "${AIML:-}" ] || [ ! -f ../../aimlvenv/env ] || . ../../aimlvenv/env
   echo "[web] build cosmosd"; aiml build -c exodus-cosmosd.json || exit 1
   echo "[web] build console-offer (doc/spec/108)"; aiml build -c exodus-console-offer.json || exit 1
   echo "[web] build static";  aiml build -c exodus-static.json  || exit 1
-  echo "[web] build client (WASM)"; exodus build -c exodus-client.json || exit 1
+  # Der Client ist wasm (aiml spec/68 §7.1): emcc aus dem PATH oder $EMCC,
+  # in der Version aus $AIML_VENV/lib/wasm32/emsdk.version (emsdk_env.sh).
+  echo "[web] build client (WASM)"; aiml build -c exodus-client.json || exit 1
 fi
 
 [ -x ./cosmosd ] || { echo "missing ./cosmosd — run with --build"; exit 1; }

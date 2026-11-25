@@ -3,26 +3,6 @@
   "$schema": "exodus.project.config-1.0",
   "name": "ptrref_wasm",
   "version": "0.0.1",
-  "git_packages": [
-    {
-      "name": "emsdk",
-      "repo": "https://github.com/emscripten-core/emsdk.git",
-      "ref": "main",
-      "setup_commands": [
-        [
-          "./emsdk",
-          "install",
-          "3.1.74"
-        ],
-        [
-          "./emsdk",
-          "activate",
-          "3.1.74"
-        ]
-      ],
-      "digest": "d0797f10c9382986e1aefa7b72de8926bed5b04f"
-    }
-  ],
   "output_type": "wasm",
   "sources": [
     "test/test_ptr_into_ref_param.aiml"
@@ -32,7 +12,6 @@
     "name": "$AIML"
   },
   "linker": {
-    "name": "__exodus_cache/git/emsdk/current/upstream/emscripten/emcc",
     "flags": [
       "-sASYNCIFY=1",
       "-sASYNCIFY_STACK_SIZE=131072",
@@ -51,14 +30,13 @@
       "-lwebsocket.js"
     ],
     "library_paths": [
-      "/media/nikolai/95a208ef-ffa2-478b-abdd-ff394baa6a76/projects/python/test/aiml/out/aiml_wasm/aiml_wasm"
+      "$AIML_VENV/lib/wasm32"
     ],
     "libraries": [
       "aiml_wasm"
     ]
   },
   "env": {
-    "EM_CONFIG": "__exodus_cache/git/emsdk/current/.emscripten",
     "AIML_STRICT_TOPLEVEL": "1",
     "AIML_LIFETIME_DROPS": "1",
     "AIML_MEM_V3": "1"
