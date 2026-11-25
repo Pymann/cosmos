@@ -2,11 +2,11 @@
 # Abnahme der Server-Einrichtung (doc/spec/112 §112.7) — auf einem frischen
 # Ubuntu 24.04 mit systemd, das den kontor-Server spielt (CI-Job server-setup).
 #
-#   GH_TOKEN=… AIML_VENV=… deploy/server/test_install.sh
+#   AIML_VENV=… [GH_TOKEN=…] deploy/server/test_install.sh
 #
 # Braucht: gebaute cosmosd, cosmos-api, agent im Repo; eine aiml-venv
-# ($AIML_VENV); sudo; ein GitHub-Token mit Lesezugriff ($GH_TOKEN), weil die
-# Pipeline den aiml-Tarball aus einem CI-Lauf von Pymann/aiml holt.
+# ($AIML_VENV); sudo.  GH_TOKEN nur fuer den Rueckfall von setup-aiml.sh auf
+# GitHub (Schritt 5).
 #
 # VERAENDERT DEN RECHNER (Dienste, Nutzer, /opt/cosmos) — nur auf einem
 # Wegwerf-Rechner ausfuehren.
@@ -16,14 +16,13 @@ ROOT="$PWD"
 WORK="$(mktemp -d)"; chmod 755 "$WORK"
 STUB_PORT=18443
 KURL="http://127.0.0.1:$STUB_PORT"
-JOB=cat-aiml_to_kontor
+JOB=cat-blob_probe
 FAILS=0
 ok()   { echo "  ok   $*"; }
 fail() { echo "  FAIL $*"; FAILS=$((FAILS + 1)); }
 check() { local what="$1"; shift; if "$@"; then ok "$what"; else fail "$what"; fi; }
 
 [ -n "${AIML_VENV:-}" ] || { echo "AIML_VENV fehlt"; exit 2; }
-[ -n "${GH_TOKEN:-}" ] || { echo "GH_TOKEN fehlt"; exit 2; }
 
 diagnose() {
     echo "::group::Diagnose"
@@ -37,7 +36,6 @@ STUB_PID=""
 cleanup() { [ -n "$STUB_PID" ] && kill "$STUB_PID" 2>/dev/null; }
 trap cleanup EXIT
 
-runs_of() { sudo cosmosctl api GET /runs | jq -c --arg p aiml_to_kontor '[.runs[] | select(.pipeline_name == $p)]'; }
 wait_run() {  # wait_run <run-id> → Status ausgeben
     local id="$1" st=""
     for _ in $(seq 1 360); do
@@ -50,15 +48,33 @@ wait_run() {  # wait_run <run-id> → Status ausgeben
 
 echo "== 1. kontor-Ersatz"
 head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$WORK/kontor.token"
-printf '%s\n' "$GH_TOKEN" > "$WORK/github.token"; chmod 600 "$WORK/github.token"
 python3 "$ROOT/test/kontor_stub.py" "$STUB_PORT" "$WORK/kontor" "$WORK/kontor.token" > "$WORK/stub.log" 2>&1 &
 STUB_PID=$!
 for _ in $(seq 1 40); do curl -fs "$KURL/api/v1/health" >/dev/null 2>&1 && break; sleep 0.25; done
 check "kontor-Ersatz antwortet" curl -fs "$KURL/api/v1/health" -o /dev/null
 
+# Eine eigene Pipeline des Betreibers (from_dir, §112.5) und die Ueberbleibsel
+# einer frueheren Fassung (F112-16), so wie sie nach einem Update daliegen.
+sudo install -d -m 0755 /etc/cosmos/pipelines /usr/local/libexec/cosmos
+sudo install -d -m 0750 /etc/cosmos-agent
+sudo tee /etc/cosmos/pipelines/blob_probe.yaml >/dev/null <<'YAML'
+# project: cosmos
+- pipeline:
+    name: blob_probe
+    steps:
+      - stage:
+          name: blob
+          requires: [curl, sha256sum]
+          timeout: 120000
+          run: "set -e; head -c 4096 /dev/urandom > probe.bin; /usr/local/libexec/cosmos/kontor-blob put probe.bin probe/blob.bin; /usr/local/libexec/cosmos/kontor-blob has probe/blob.bin; /usr/local/libexec/cosmos/kontor-blob get probe/blob.bin back.bin; cmp probe.bin back.bin; ! /usr/local/libexec/cosmos/kontor-blob has probe/fehlt.bin; sha256sum probe.bin; echo blob-ok"
+YAML
+echo '- pipeline: { name: aiml_to_kontor, steps: [ { stage: { name: alt, run: "false" } } ] }' | sudo tee /etc/cosmos/pipelines/aiml_to_kontor.yaml >/dev/null
+printf '#!/bin/sh\nexit 1\n' | sudo tee /usr/local/libexec/cosmos/aiml-mirror >/dev/null
+echo '#AIML_REPO=Pymann/aiml' | sudo tee /etc/cosmos-agent/aiml.env >/dev/null
+
 echo "== 2. install.sh"
 if ! sudo "$ROOT/deploy/server/install.sh" --venv "$AIML_VENV" --kontor-url "$KURL" \
-        --kontor-token-file "$WORK/kontor.token" --github-token-file "$WORK/github.token"; then
+        --kontor-token-file "$WORK/kontor.token"; then
     fail "install.sh"; diagnose; exit 1
 fi
 ok "install.sh"
@@ -69,55 +85,34 @@ listen="$(sudo ss -ltnH)"
 check "cosmosd horcht nur auf 127.0.0.1:8770" bash -c "grep -q '127.0.0.1:8770 ' <<<'$listen' && ! grep -qE '(0.0.0.0|\\*|\\[::\\]):8770 ' <<<'$listen'"
 check "cosmos-api horcht nur auf 127.0.0.1:8771" bash -c "grep -q '127.0.0.1:8771 ' <<<'$listen' && ! grep -qE '(0.0.0.0|\\*|\\[::\\]):8771 ' <<<'$listen'"
 jobs="$(sudo cosmosctl jobs)"; echo "$jobs" | sed 's/^/       /'
-check "Katalog-Job $JOB, stuendlich" grep -q "^$JOB .*interval_s=3600" <<<"$jobs"
+check "eigene Pipeline ist Katalog-Job $JOB (from_dir)" grep -q "^$JOB " <<<"$jobs"
+check "kein Job cat-aiml_to_kontor (F112-13)" bash -c "! grep -q '^cat-aiml_to_kontor ' <<<'$jobs'"
+for old in /etc/cosmos/pipelines/aiml_to_kontor.yaml /usr/local/libexec/cosmos/aiml-mirror /etc/cosmos-agent/aiml.env; do
+    check "Ueberbleibsel entfernt: $old (F112-16)" sudo test ! -e "$old"
+done
 check "Geheimnisse 0600 root" bash -c '[ "$(sudo stat -c %a:%U /etc/cosmos/api.token)" = 600:root ] && [ "$(sudo stat -c %a:%U /etc/cosmos/admin.password)" = 600:root ]'
 check "Agent-Token 0600 cosmos-agent" bash -c '[ "$(sudo stat -c %a:%U /var/lib/cosmos-agent/agent.token)" = 600:cosmos-agent ]'
 
-echo "== 4. erster Lauf (der Zeitplan startet ihn sofort, F112-5)"
-first=""
-for _ in $(seq 1 30); do
-    first="$(runs_of | jq -r 'sort_by(.started_ms) | .[0].run_id // empty')"
-    [ -n "$first" ] && break; sleep 2
-done
-if [ -z "$first" ]; then
-    echo "       kein geplanter Lauf nach 60 s — von Hand"
-    first="$(sudo cosmosctl run "$JOB" | tail -1)"
-fi
-echo "       Lauf $first"
-st="$(wait_run "$first")"
-check "erster Lauf done (war: $st)" [ "$st" = "done" ]
-latest="$WORK/kontor/generic/aiml/latest.env"
-check "kontor hat aiml/latest.env" [ -f "$latest" ]
-if [ -f "$latest" ]; then
-    sed 's/^/       /' "$latest"
-    tb="$(sed -n 's/^tarball=//p' "$latest")"; sum="$(sed -n 's/^sha256=//p' "$latest")"
-    check "Tarball liegt in kontor" [ -f "$WORK/kontor/generic/$tb" ]
-    check ".sha256 liegt in kontor" [ -f "$WORK/kontor/generic/$tb.sha256" ]
-    check "Pruefsumme stimmt" bash -c "[ \"\$(sha256sum '$WORK/kontor/generic/$tb' | cut -d' ' -f1)\" = '$sum' ]"
-    check "latest.env kam zuletzt (F112-10)" bash -c "tail -1 '$WORK/kontor/puts.log' | grep -q 'aiml/latest.env'"
+echo "== 4. Pipeline legt mit kontor-blob ab (§112.5)"
+run1="$(sudo cosmosctl run "$JOB" | tail -1)"
+echo "       Lauf $run1"
+st="$(wait_run "$run1")"
+check "Lauf $JOB done (war: $st)" [ "$st" = "done" ]
+blob="$WORK/kontor/generic/probe/blob.bin"
+check "kontor hat probe/blob.bin" [ -f "$blob" ]
+if [ -f "$blob" ]; then
+    sum="$(sha256sum "$blob" | cut -d' ' -f1)"
+    check "PUT mit Pruefsumme im Protokoll des kontor-Ersatzes" grep -q "^PUT /generic/probe/blob.bin $sum$" "$WORK/kontor/puts.log"
+    log1="$(sudo cosmosctl log "$run1" 2>&1)"   # erst ganz lesen: grep -q schloesse die Pipe (pipefail)
+    check "der Schritt hat dieselbe Datei hochgeladen" grep -q "$sum" <<<"$log1"
 fi
 
-echo "== 5. zweiter Lauf laedt nichts (F112-11)"
-puts_before="$(grep -c '\.tar\.gz ' "$WORK/kontor/puts.log" 2>/dev/null || echo 0)"
-second="$(sudo cosmosctl run "$JOB" | tail -1)"
-st="$(wait_run "$second")"
-check "zweiter Lauf done (war: $st)" [ "$st" = "done" ]
-check "kein zweiter PUT des Tarballs" [ "$(grep -c '\.tar\.gz ' "$WORK/kontor/puts.log" 2>/dev/null || echo 0)" = "$puts_before" ]
-log2="$(sudo cosmosctl log "$second" 2>&1)"   # erst ganz lesen: grep -q schloesse die Pipe (pipefail)
-if grep -q 'nichts zu tun' <<<"$log2"; then ok "Lauf meldet: kontor aktuell"; else fail "Lauf meldet nicht, dass kontor aktuell ist"; echo "$log2" | tail -n 20; fi
-
-echo "== 6. setup-aiml.sh aus kontor (F112-14, STRICT)"
+echo "== 5. setup-aiml.sh aus kontor (F112-14, STRICT)"
 # Die Ablage, die aiml's eigene CI in kontor fuellt ("Put the bundle into
 # kontor"): generic/aiml/latest/aiml-x86_64-linux.tar.gz, eine venv (bin lib
-# env) ohne Huelle.  Gebaut wie dort, aus dem eben gespiegelten Tarball.
-if [ -f "${latest:-}" ]; then
-    bdir="$(mktemp -d)"; mkdir "$bdir/venv"
-    tar -xzf "$WORK/kontor/generic/$tb" -C "$bdir/venv" --strip-components=1
-    printf '%s\n' "# aiml venv" > "$bdir/venv/env"
-    mkdir -p "$WORK/kontor/generic/aiml/latest"
-    tar -czf "$WORK/kontor/generic/aiml/latest/aiml-x86_64-linux.tar.gz" -C "$bdir/venv" bin lib env
-    rm -rf "$bdir"
-fi
+# env) ohne Huelle.  Gebaut wie dort, aus der venv dieses Laufs.
+mkdir -p "$WORK/kontor/generic/aiml/latest"
+tar -czf "$WORK/kontor/generic/aiml/latest/aiml-x86_64-linux.tar.gz" -C "$AIML_VENV" bin lib env
 if env -u GITHUB_ENV -u GITHUB_PATH AIML_KONTOR_URL="$KURL" AIML_KONTOR_STRICT=1 \
         bash "$ROOT/.github/ci/setup-aiml.sh" "$WORK/venv2" > "$WORK/setup.log" 2>&1; then
     check "Quelle war kontor (latest)" grep -q "^aiml: kontor $KURL (latest, sha256 " "$WORK/setup.log"
@@ -128,7 +123,7 @@ fi
 check "unbekannter Schluessel → STRICT scheitert" bash -c "! env -u GITHUB_ENV -u GITHUB_PATH AIML_KONTOR_URL='$KURL' AIML_KONTOR_STRICT=1 AIML_RELEASE=v0.0.0-gibtsnicht bash '$ROOT/.github/ci/setup-aiml.sh' '$WORK/venv4' >/dev/null 2>&1"
 check "kontor aus → Rueckfall mit Warnung" bash -c "env -u GITHUB_ENV -u GITHUB_PATH AIML_KONTOR_URL=http://127.0.0.1:1 bash '$ROOT/.github/ci/setup-aiml.sh' '$WORK/venv3' 2>&1 | grep -q 'falling back to GitHub'"
 
-echo "== 7. Was ein Schritt sieht (F112-2, F112-6)"
+echo "== 6. Was ein Schritt sieht (F112-2, F112-6)"
 probe='- pipeline:
     name: sicht_probe
     steps:
@@ -151,7 +146,7 @@ else
     ok "Agent-Token in keiner Schritt-Ausgabe"
 fi
 
-echo "== 8. install.sh ein zweites Mal (idempotent)"
+echo "== 7. install.sh ein zweites Mal (idempotent)"
 before="$(sudo sha256sum /etc/cosmos/api.token /etc/cosmos/admin.password /var/lib/cosmos-agent/agent.token)"
 # shellcheck disable=SC2024  # das Protokoll gehoert dem Aufrufer, nicht root
 if sudo "$ROOT/deploy/server/install.sh" --venv "$AIML_VENV" > "$WORK/install2.log" 2>&1; then
@@ -160,6 +155,7 @@ else
     fail "zweiter Lauf von install.sh"; tail -n 30 "$WORK/install2.log"
 fi
 check "Tokens und Passwort unveraendert" [ "$before" = "$(sudo sha256sum /etc/cosmos/api.token /etc/cosmos/admin.password /var/lib/cosmos-agent/agent.token)" ]
+check "eigene Pipeline steht noch" sudo test -f /etc/cosmos/pipelines/blob_probe.yaml
 check "kontor-URL bleibt (ohne --kontor-url)" sudo grep -q "^KONTOR_URL=$KURL$" /etc/cosmos-agent/kontor.env
 for u in cosmosd cosmos-api cosmos-agent; do check "$u wieder aktiv" systemctl is-active --quiet "$u"; done
 third="$(sudo cosmosctl run "$JOB" | tail -1)"

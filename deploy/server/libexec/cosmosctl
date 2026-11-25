@@ -5,7 +5,7 @@
 #
 #   cosmosctl status                 Dienste, Agenten, letzte Laeufe
 #   cosmosctl jobs                   Jobs des Katalogs
-#   cosmosctl run <job-id>           einen Job jetzt starten (z. B. cat-aiml_to_kontor)
+#   cosmosctl run <job-id>           einen Job jetzt starten (z. B. cat-<name>)
 #   cosmosctl runs                   alle Laeufe (JSON)
 #   cosmosctl wait <run-id> [s]      warten, bis ein Lauf fertig ist (Vorgabe 1800 s)
 #   cosmosctl log <run-id>           Ausgabe der Stufen eines Laufs

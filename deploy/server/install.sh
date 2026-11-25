@@ -6,10 +6,9 @@
 #   --from <dir>               cosmos-Checkout mit den gebauten Binaries
 #                              (cosmosd, cosmos-api, agent; Vorgabe: dieses Repo)
 #   --venv <dir>               aiml-venv, aus der die Bibliotheken kommen (Vorgabe: $AIML_VENV)
-#   --kontor-url <url>         wohin die Pipeline hochlaedt (Vorgabe: https://127.0.0.1:8443)
+#   --kontor-url <url>         wohin Pipelines hochladen (Vorgabe: https://127.0.0.1:8443)
 #   --kontor-ca <datei>        CA/Zertifikat von kontor, falls selbstsigniert
 #   --kontor-token-file <f>    kontor-Token mit Rolle writer (Datei, nie Argument)
-#   --github-token-file <f>    GitHub-Token, nur lesend (fuer CI-Artefakte von aiml)
 #   --admin-email <adresse>    Admin-Konto von cosmos (Vorgabe: admin@cosmos.local)
 #   --no-start                 alles ablegen, aber keinen Dienst starten
 #
@@ -24,7 +23,6 @@ VENV="${AIML_VENV:-}"
 KONTOR_URL=""
 KONTOR_CA=""
 KONTOR_TOKEN_FILE=""
-GITHUB_TOKEN_FILE=""
 ADMIN_EMAIL="admin@cosmos.local"
 START=1
 
@@ -35,7 +33,6 @@ while [ $# -gt 0 ]; do
         --kontor-url) KONTOR_URL="$2"; shift 2 ;;
         --kontor-ca) KONTOR_CA="$2"; shift 2 ;;
         --kontor-token-file) KONTOR_TOKEN_FILE="$2"; shift 2 ;;
-        --github-token-file) GITHUB_TOKEN_FILE="$2"; shift 2 ;;
         --admin-email) ADMIN_EMAIL="$2"; shift 2 ;;
         --no-start) START=0; shift ;;
         -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
@@ -66,7 +63,7 @@ ok "Binaries in $FROM"
 [ -n "$VENV" ] || die "keine aiml-venv: --venv <dir> oder AIML_VENV setzen (sudo -E / sudo AIML_VENV=…)"
 [ -f "$VENV/lib/libaiml.so" ] || die "$VENV/lib/libaiml.so fehlt — ist $VENV eine aiml-venv?"
 ok "aiml-venv $VENV"
-for f in "$KONTOR_CA" "$KONTOR_TOKEN_FILE" "$GITHUB_TOKEN_FILE"; do
+for f in "$KONTOR_CA" "$KONTOR_TOKEN_FILE"; do
     [ -z "$f" ] || [ -r "$f" ] || die "$f nicht lesbar"
 done
 
@@ -128,18 +125,22 @@ fi
 step "5. Werkzeuge"
 install -d -m 0755 "$LIBEXEC"
 install -m 0755 "$HERE/libexec/kontor-blob" "$LIBEXEC/kontor-blob"
-install -m 0755 "$HERE/libexec/aiml-mirror" "$LIBEXEC/aiml-mirror"
 install -m 0755 "$HERE/libexec/cosmosctl" /usr/local/sbin/cosmosctl
 printf 'd %s 0750 cosmos-agent cosmos-agent 14d\n' "$ADATA/steps" > /etc/tmpfiles.d/cosmos-agent.conf
-ok "kontor-blob, aiml-mirror ($LIBEXEC), cosmosctl (/usr/local/sbin), Aufraeumen nach 14 Tagen"
+ok "kontor-blob ($LIBEXEC), cosmosctl (/usr/local/sbin), Aufraeumen nach 14 Tagen"
 
 # ------------------------------------------------------------------ 6. Konfiguration
 step "6. Konfiguration ($ETC, $AETC)"
 install -d -m 0755 "$ETC" "$ETC/pipelines"
 [ -f "$ETC/cosmos.env" ] || { install -m 0644 "$HERE/cosmos.env" "$ETC/cosmos.env"; ok "cosmos.env angelegt"; }
 install -m 0644 "$HERE/cosmos.yaml" "$ETC/cosmos.yaml"
-install -m 0644 "$HERE"/pipelines/*.yaml "$ETC/pipelines/"
-ok "Erklaerung + $(ls "$HERE"/pipelines/*.yaml | wc -l) Pipeline(s)"
+# Was fruehere Fassungen lieferten und heute nicht mehr gilt (F112-16).  Eigene
+# Pipelines in $ETC/pipelines bleiben stehen.
+for old in "$ETC/pipelines/aiml_to_kontor.yaml" "$LIBEXEC/aiml-mirror" "$AETC/aiml.env"; do
+    [ -e "$old" ] || continue
+    rm -f "$old"; ok "entfernt: $old (Spiegel-Pipeline ist herausgenommen, doc/spec/112 §112.5)"
+done
+ok "Erklaerung, $(find "$ETC/pipelines" -maxdepth 1 -name '*.yaml' | wc -l) Pipeline(s) in $ETC/pipelines"
 
 install -d -o root -g cosmos-agent -m 0750 "$AETC"
 setkey() {  # setkey <datei> <schluessel> <wert>: Zeile setzen, Rest stehen lassen
@@ -159,22 +160,12 @@ if [ -n "$KONTOR_CA" ]; then
     setkey "$KENV" KONTOR_CA "$AETC/kontor-ca.pem"
 fi
 [ -z "$KONTOR_TOKEN_FILE" ] || install -o root -g cosmos-agent -m 0640 "$KONTOR_TOKEN_FILE" "$AETC/kontor.token"
-[ -z "$GITHUB_TOKEN_FILE" ] || install -o root -g cosmos-agent -m 0640 "$GITHUB_TOKEN_FILE" "$AETC/github.token"
-if [ ! -f "$AETC/aiml.env" ]; then
-    cat > "$AETC/aiml.env" <<'AIML'
-# Was aiml-mirror spiegelt (doc/spec/112 §112.5).  Leer = Vorgaben.
-#AIML_REPO=Pymann/aiml
-#AIML_BRANCH=master
-# Eine feste Fassung statt der neuesten (Release-Tag):
-#AIML_RELEASE=v1.0.2.4
-AIML
-fi
-chown root:cosmos-agent "$KENV" "$AETC/aiml.env"; chmod 0640 "$KENV" "$AETC/aiml.env"
+chown root:cosmos-agent "$KENV"; chmod 0640 "$KENV"
 ok "kontor.env → $(sed -n 's/^KONTOR_URL=//p' "$KENV")"
 [ -f "$AETC/kontor.token" ] && ok "kontor-Token vorhanden" \
-    || echo "   HINWEIS: $AETC/kontor.token fehlt — ohne es scheitert die Stufe hochladen (--kontor-token-file)"
-[ -f "$AETC/github.token" ] && ok "GitHub-Token vorhanden" \
-    || echo "   HINWEIS: $AETC/github.token fehlt — CI-Artefakte von aiml sind ohne Token nicht ladbar (--github-token-file)"
+    || echo "   HINWEIS: $AETC/kontor.token fehlt — ohne es kann kein Schritt nach kontor hochladen (--kontor-token-file)"
+[ ! -f "$AETC/github.token" ] \
+    || echo "   HINWEIS: $AETC/github.token wird nicht mehr gebraucht (nur die Spiegel-Pipeline las es) — loeschen: sudo shred -u $AETC/github.token"
 
 # ------------------------------------------------------------------ 7. Betriebshandlungen
 step "7. Konto und Agent-Token (bei gestopptem Dienst, doc/spec/108 F108-3)"
@@ -262,4 +253,4 @@ journalctl -u cosmos-agent --since "$since" --no-pager -o cat 2>/dev/null | grep
 ok "Agent angemeldet"
 
 echo
-echo "Fertig.  Weiter mit:  sudo cosmosctl status   |   sudo cosmosctl run cat-aiml_to_kontor"
+echo "Fertig.  Weiter mit:  sudo cosmosctl status   |   sudo cosmosctl jobs"

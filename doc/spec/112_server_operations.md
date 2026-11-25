@@ -5,6 +5,10 @@ server wie kontor laufen lassen und pipelines laufen lassen, die z.b. die pipeli
 hochladen, z.b. für aiml, dann brauchen die anderen runner nur noch diesen blob downloaden"* —
 *„nein nur cosmos soll auf dem server laufen und einen agenten verbinden"*.
 
+**Nachtrag 2026-11-25:** aiml liefert sein Bündel selbst nach kontor (§112.6).  Die
+Spiegel-Pipeline `aiml_to_kontor`, mit der cosmos das anfangs übernahm, ist darum
+**herausgenommen** (§112.5): der Katalog des Servers ist leer, bis eine eigene Pipeline kommt.
+
 Der Server ist der, auf dem schon kontor (`https://151.80.143.81:8443`) und 9rooms laufen: 2–4
 Kerne, kein Platz für einen zweiten Stapel.  Von hier aus ist er nicht erreichbar; darum liegt
 alles, was der Betreiber dort ausführt, in diesem Repository (`deploy/server/`), samt einer
@@ -50,12 +54,11 @@ ihn (`job: { …, interval_s: n }`, §111.4).  Es braucht keinen systemd-Timer u
 
 ```
                        ┌──────────────── kontor-Server (2–4 Kerne) ─────────────────┐
-GitHub (Pymann/aiml)   │                                                             │
-  grüner CI-Lauf ──────┼─▶ cosmos-agent ──(Schritte, bwrap)── aiml-mirror ──PUT──▶ kontor :8443
-  oder Release         │      ▲ ws://127.0.0.1:8770                            /generic/aiml/…
+                       │   cosmos-agent ──(Schritte, bwrap)── kontor-blob ──PUT──▶ kontor :8443
+                       │      ▲ ws://127.0.0.1:8770                     ▲   /generic/…
                        │   cosmosd ◀── cosmos-api 127.0.0.1:8771 ◀── cosmosctl    │
-                       └──────────────────────────────────────────────────────┼─────┘
-                                                                              │ GET (anonym)
+                       └────────────────────────────────────────────────┼─────┼─────┘
+GitHub (Pymann/aiml), CI ── „Put the bundle into kontor" ──PUT──────────┘     │ GET (Token)
                      GitHub-Actions-Runner von cosmos, kontor, ufo ◀──────────┘
                        .github/ci/setup-aiml.sh  (AIML_KONTOR_URL)
 ```
@@ -74,16 +77,15 @@ GitHub (Pymann/aiml)   │                                                      
 |---|---|---|---|
 | `/opt/cosmos/bin/` | root, 0755 | `cosmosd`, `cosmos-api`, `agent`, `bwrap` (eigene Kopie) | nein |
 | `/opt/cosmos/lib/` | root, 0755 | `libaiml.so` + Ladekette (aus der aiml-venv) | nein |
-| `/etc/cosmos/pipelines/` | root, 0755 | die Pipelines des Katalogs | ja (harmlos) |
+| `/etc/cosmos/pipelines/` | root, 0755 | die Pipelines des Katalogs (`from_dir`, §112.5); anfangs leer | ja (harmlos) |
 | `/etc/cosmos/cosmos.env` | root, 0644 | Ports, Adressen — **kein** Geheimnis | ja (harmlos) |
 | `/etc/cosmos/cosmos.yaml` | root, 0644 | Erklärung (Katalog, §111.1) | ja (harmlos) |
 | `/etc/cosmos/admin.password`, `api.token` | root, 0600 | Admin-Konto, API-Token für `cosmosctl` | **nein** (0600 root) |
 | `/etc/cosmos-agent/kontor.env` | root:cosmos-agent, 0640 | `KONTOR_URL`, `KONTOR_CA` | ja — gewollt |
 | `/etc/cosmos-agent/kontor.token` | root:cosmos-agent, 0640 | kontor-Token (Rolle `writer`) | ja — gewollt |
-| `/etc/cosmos-agent/github.token` | root:cosmos-agent, 0640 | GitHub-Token, nur lesend | ja — gewollt |
 | `/var/lib/cosmos/` | cosmos, 0750 | KV von cosmosd, Lauf-Protokolle | nein |
 | `/var/lib/cosmos-agent/` | cosmos-agent, 0750 | `agent.token` (0600), `steps/` | nur das eigene Schrittverzeichnis |
-| `/usr/local/libexec/cosmos/` | root, 0755 | `kontor-blob`, `aiml-mirror` | ja — gewollt |
+| `/usr/local/libexec/cosmos/` | root, 0755 | `kontor-blob` | ja — gewollt |
 | `/usr/local/sbin/cosmosctl` | root, 0755 | Bedienung über REST | ja (ohne Token wertlos) |
 
 - **F112-6: Zwei Dienstnutzer.**  `cosmos` (cosmosd, Gateway) und `cosmos-agent` (Agent).
@@ -130,8 +132,9 @@ sie aus dem Checkout und die Bibliotheken aus der aiml-venv.
 4. AppArmor-Profil laden.
 5. Werkzeuge nach `/usr/local/libexec/cosmos/`, `cosmosctl` nach `/usr/local/sbin/`.
 6. `/etc/cosmos/*` und `/etc/cosmos-agent/*` anlegen — **vorhandene Dateien bleiben stehen**
-   (Ports, Tokens des Betreibers werden nie überschrieben).  Zugänge kommen aus Dateien
-   (`--kontor-token-file`, `--github-token-file`), nie aus Argumenten (Prozessliste).
+   (Ports, Tokens und Pipelines des Betreibers werden nie überschrieben).  Zugänge kommen aus
+   Dateien (`--kontor-token-file`), nie aus Argumenten (Prozessliste).  Was frühere Fassungen
+   abgelegt haben und heute nicht mehr gilt, nimmt dieser Schritt weg (F112-16).
 7. Dienste anhalten; beim ersten Lauf: Admin-Konto anlegen (`cosmosd --add-user`, Zufallspasswort
    nach `/etc/cosmos/admin.password`), Freigabe 1 setzen, Agent-Token prägen
    (`cosmosd --mint-token`) — Betriebshandlungen bei gestopptem Dienst (F108-3).
@@ -143,43 +146,33 @@ sie aus dem Checkout und die Bibliotheken aus der aiml-venv.
 `deploy/server/uninstall.sh` nimmt alles zurück; Daten (`/var/lib/cosmos*`) und Zugänge
 (`/etc/cosmos*`) nur mit `--purge`.
 
-## 112.5 Die Pipeline `aiml_to_kontor`
+## 112.5 Pipelines auf dem Server
 
-Katalog-Job `cat-aiml_to_kontor`, **stündlich** (`interval_s: 3600`), auf dem Knoten-Agenten
-(kein `image:`, `steplayer: none`, F110-125).  Die Arbeit tut `aiml-mirror <stufe>`; die Pipeline
-nennt nur die Stufen, damit sie lesbar bleibt und das Werkzeug für sich prüfbar ist.
+Der Katalog liest **`/etc/cosmos/pipelines/`** (`catalog: { from_dir: [ { path: pipelines } ] }`,
+§111.4): jede `*.yaml` dort ist ein Job `cat-<dateistamm>`, das Projekt aus der Kopfzeile
+`# project: <name>`.  Eine Pipeline hinzufügen heißt: Datei hineinlegen,
+`systemctl restart cosmosd`.  Ein Zeitplan (`interval_s`) braucht stattdessen einen
+`job:`-Eintrag in `/etc/cosmos/cosmos.yaml`.
 
-| Stufe | Tut | Ergebnis in `/ws` |
-|---|---|---|
-| `quelle` | neuestes **nicht-Entwurfs**-Release mit Linux-Tarball, sonst neuester grüner CI-Lauf auf `master` (wie `setup-aiml.sh`); fragt kontor, ob es diese Fassung schon hat | `source.env`, ggf. `unchanged` |
-| `holen` | Tarball + `.sha256` laden (Release-Asset oder CI-Artefakt), `sha256sum -c` | `dl/` |
-| `pruefen` | auspacken, `ldd` ohne „not found", Rauchtest `sys.exit 42` | — |
-| `hochladen` | `PUT` Tarball, `.sha256`, **zuletzt** `latest.env` | — |
-| `aufraeumen` | `dl/` weg | — |
+Schritte laufen auf dem Knoten-Agenten (kein `image:`, `steplayer: none`, F110-125) und legen
+Ergebnisse mit `kontor-blob put <datei> <pfad>` in kontor ab (Pfad unter `/generic/`, Prüfsumme
+im Kopf `X-Checksum-Sha256`).
 
-Ablage in kontor (generisches Repository):
+**F112-13: Die Spiegel-Pipeline `aiml_to_kontor` ist herausgenommen.**  Sie holte stündlich den
+geprüften CI-Bau von aiml von GitHub und legte ihn unter `aiml/<fassung>/…` und
+`aiml/latest.env` in kontor ab.  Seit aiml das selbst tut (§112.6) und die Runner genau diese
+Ablage lesen, war sie ein zweiter Weg zum selben Ziel, ein GitHub-Token auf dem Server und ein
+stündlicher Lauf mehr.  Weg sind: die Pipeline, `aiml-mirror`, `/etc/cosmos-agent/aiml.env`
+und die Option `--github-token-file`.  Zurückholen lässt sie sich aus der Git-Geschichte.
+Was sie schon in kontor abgelegt hat, bleibt dort liegen; gelesen wird es von niemandem.
 
-```
-/generic/aiml/<fassung>/aiml-<fassung>-linux-x86_64.tar.gz
-/generic/aiml/<fassung>/aiml-<fassung>-linux-x86_64.tar.gz.sha256   („<hex>  <name>", wie bei GitHub)
-/generic/aiml/latest.env                                            (version=…, tarball=…, sha256=…, source=…)
-```
-
-`<fassung>` ist der Release-Tag (`v1.0.2.4`) oder `git-<sha7>` — derselbe Name, den
-`tools/ci/package_release.sh` in aiml vergibt.
-
-- **F112-10: Der Zeiger kommt zuletzt.**  `latest.env` wird erst geschrieben, wenn Tarball und
-  Prüfsumme liegen.  Wer liest, findet nie einen Zeiger auf etwas, das noch fehlt.
-- **F112-11: Unverändert heißt: nichts tun.**  Hat kontor die Fassung schon und zeigt
-  `latest.env` darauf, enden alle folgenden Stufen sofort mit 0 — ein stündlicher Lauf kostet
-  dann zwei kleine Anfragen, keinen Download.
-- **F112-12: Geprüft wird vor dem Ablegen.**  Ein Tarball, dessen Prüfsumme nicht stimmt oder
-  der auf diesem Rechner nicht startet, kommt nicht nach kontor.
-- **F112-13: Gebaut wird hier noch nicht.**  Den Compiler aus den Quellen zu bauen braucht
-  exodus, 171 festgelegte apt-Pakete und LLVM — auf 2–4 Kernen eine Stunde, und `apt-get
-  download` findet im Sandkasten keine Paketlisten.  Die Pipeline **spiegelt** darum den
-  geprüften CI-Bau von aiml; ein Quellbau ist der nächste Schritt (§112.9) und eine eigene
-  Entscheidung.
+- **F112-16: Eine neue Fassung räumt auf, was sie nicht mehr liefert.**  `install.sh` löscht
+  `/etc/cosmos/pipelines/aiml_to_kontor.yaml`, `/usr/local/libexec/cosmos/aiml-mirror` und
+  `/etc/cosmos-agent/aiml.env`; der Katalog schaltet den Job `cat-aiml_to_kontor` beim nächsten
+  Start ab (nicht mehr erklärt, §111.1; seine Läufe bleiben in der Geschichte).  Eigene
+  Pipelines des Betreibers in `/etc/cosmos/pipelines/` bleiben stehen.  Ein
+  `/etc/cosmos-agent/github.token` aus einer früheren Fassung bleibt auch stehen (es ist ein
+  Zugang des Betreibers), wird aber nicht mehr gebraucht; `install.sh` sagt das.
 
 ## 112.6 Die Runner: `setup-aiml.sh` liest kontor
 
@@ -192,9 +185,8 @@ Ablage in kontor (generisches Repository):
 /generic/aiml/latest/aiml-x86_64-linux.tar.gz        (jeder Tag-Lauf schiebt ihn weiter)
 ```
 
-Das ist die Form, die die Runner lesen — **eine** Ablage, **ein** Leser.  Die Spiegel-Pipeline
-(§112.5) schreibt in einen eigenen Namensraum (`aiml/<fassung>/…`, `aiml/latest.env`) und
-kommt dieser Ablage nicht in die Quere; sie ist damit verzichtbar geworden (§112.9).
+Das ist die Form, die die Runner lesen — **eine** Ablage, **ein** Schreiber (aiml), **ein**
+Leser (`setup-aiml.sh`).
 
 Neue Quelle **vor** den beiden bisherigen, nur wenn `AIML_KONTOR_URL` gesetzt ist:
 
@@ -221,38 +213,40 @@ Ein frischer GitHub-Runner (Ubuntu 24.04, mit systemd und AppArmor) spielt den S
 
 1. baut `cosmosd`, `cosmos-api`, `agent`; startet einen **kontor-Ersatz**
    (`test/kontor_stub.py`, das generische Repository mit Bearer-Prüfung — das echte kontor ist
-   ein privates Repository und für diesen Job nicht ladbar);
+   ein privates Repository und für diesen Job nicht ladbar); legt vorher eine eigene Pipeline
+   `blob_probe.yaml` und die Überbleibsel einer früheren Fassung (`aiml_to_kontor.yaml`,
+   `aiml-mirror`, `aiml.env`) auf den Rechner;
 2. `install.sh` mit Zugängen aus Dateien;
 3. prüft: drei Dienste aktiv; cosmosd und Gateway horchen **nur** auf 127.0.0.1; der Agent steht
-   in `/api/v1/cluster`; der Job `cat-aiml_to_kontor` steht im Katalog mit `interval_s 3600`;
-4. startet den Job, wartet auf `done`; kontor hat Tarball, `.sha256` und `latest.env`, die
-   Prüfsumme stimmt;
-5. ein zweiter Lauf lädt **nichts** (F112-11: kontor sieht keinen zweiten `PUT` des Tarballs);
-6. `setup-aiml.sh` mit `AIML_KONTOR_URL` (und `AIML_KONTOR_STRICT=1`) baut eine venv **aus
-   kontor**, Rauchtest grün;
-7. das Agent-Token steht in keiner Schritt-Ausgabe; ein Schritt kann `/etc/cosmos/api.token`
+   in `/api/v1/cluster`; die Überbleibsel sind weg (F112-16), `cat-aiml_to_kontor` steht
+   **nicht** im Katalog, `cat-blob_probe` schon (`from_dir`);
+4. startet `cat-blob_probe`, wartet auf `done`: ein Schritt legt mit `kontor-blob put` eine Datei
+   in kontor, liest sie mit `get` zurück und findet sie mit `has`; im kontor-Ersatz liegt sie mit
+   der richtigen Prüfsumme;
+5. `setup-aiml.sh` mit `AIML_KONTOR_URL` (und `AIML_KONTOR_STRICT=1`) baut eine venv **aus
+   kontor** (die Ablage, wie aiml sie füllt, gebaut aus der venv dieses Laufs); ein unbekannter
+   Schlüssel scheitert unter STRICT; ist kontor aus, fällt es mit Warnung auf GitHub zurück;
+6. das Agent-Token steht in keiner Schritt-Ausgabe; ein Schritt kann `/etc/cosmos/api.token`
    und `/var/lib/cosmos` **nicht** lesen;
-8. `install.sh` ein zweites Mal: Tokens unverändert, Dienste wieder aktiv (idempotent).
+7. `install.sh` ein zweites Mal: Tokens unverändert, die eigene Pipeline steht noch, Dienste
+   wieder aktiv, `cat-blob_probe` läuft wieder durch (idempotent).
 
 **Grenze, nicht verschwiegen:** der Runner ist hier Prüfstand eines Installers, kein
-Bau-Agent.  Die Pipeline lädt im Test einmal den aiml-Tarball (das tut jeder CI-Lauf ohnehin);
-gebaut wird auf dem Runner nichts mit cosmos.
+Bau-Agent; gebaut wird auf dem Runner nichts mit cosmos.
 
 ## 112.8 Was der Betreiber tun muss (und warum nicht wir)
 
 - auf dem Server: Checkout, `aiml build`, `sudo deploy/server/install.sh` — der Server ist von
   hier nicht erreichbar;
-- in kontor: ein Token mit Rolle `writer` für den Agenten anlegen;
-- bei GitHub: ein nur lesendes Token für den Agenten (öffentliche Repositories genügen) und in
-  den Repositories die Variable `AIML_KONTOR_URL`.
+- in kontor: ein Token mit Rolle `writer` für den Agenten anlegen (für eigene Pipelines; solange
+  keine im Katalog steht, liest es niemand);
+- bei GitHub: in cosmos, kontor und ufo die Secrets `KONTOR_URL`, `KONTOR_CA` und ein Lese-Token
+  (§112.6).
 
 ## 112.9 Offen
 
-- **Quellbau von aiml in cosmos** (F112-13): braucht einen eigenen Bau-Weg für apt im Sandkasten
-  oder ein Basis-Abbild mit Container-Agent — auf diesem Server mit `MemoryMax` und Zeit
-  abzuwägen.
+- **Quellbau von aiml in cosmos**: braucht exodus, 171 festgelegte apt-Pakete und LLVM — auf 2–4
+  Kernen eine Stunde, und `apt-get download` findet im Sandkasten keine Paketlisten.  Ein eigener
+  Bau-Weg für apt im Sandkasten oder ein Basis-Abbild mit Container-Agent wäre nötig.
 - **Weitere Blobs**: dieselbe Form (`kontor-blob put`) trägt auch Bauergebnisse von kontor, ufo
-  und cosmos; dafür braucht es nur weitere Pipelines im Katalog.
-- **Spiegel-Pipeline abschalten?**  Seit aiml selbst nach kontor liefert (§112.6), ist
-  `aiml_to_kontor` doppelt.  Sie bleibt, bis entschieden ist, ob cosmos weiter einen
-  zweiten Weg vorhält.
+  und cosmos; dafür braucht es nur Dateien in `/etc/cosmos/pipelines/`.

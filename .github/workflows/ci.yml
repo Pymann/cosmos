@@ -78,7 +78,7 @@ jobs:
           if-no-files-found: ignore
 
   # doc/spec/112 §112.7: the runner plays the kontor server once -- install.sh,
-  # three systemd services, the aiml_to_kontor pipeline against a kontor
+  # three systemd services, a pipeline from /etc/cosmos/pipelines putting a blob into a kontor
   # stand-in, and setup-aiml.sh reading aiml back from it.  A test of the
   # installer, not a build agent: nothing is built here with cosmos.
   server-setup:
