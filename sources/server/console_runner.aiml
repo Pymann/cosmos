@@ -55,7 +55,10 @@
           name: init
           body:
             - decl: [cenv, map<string:string>, { call: [sys.env] }]
-            - set: [<.aiml_bin,  { call: [<.env_or, cenv, "COSMOS_CONSOLE_AIML", "aiml"] }]
+            # Der Compiler wie aiml spec/68 F68-21: ausdruecklich gesetzt, sonst
+            # $AIML der aktiven venv, sonst `aiml` aus PATH — nie ein Bau-Baum.
+            - decl: [venv_aiml, string, { call: [<.env_or, cenv, "AIML", "aiml"] }]
+            - set: [<.aiml_bin,  { call: [<.env_or, cenv, "COSMOS_CONSOLE_AIML", venv_aiml] }]
             - set: [<.exports,   { call: [<.env_or, cenv, "COSMOS_CONSOLE_EXPORTS", "deploy/clearance/console_exports.txt"] }]
             - set: [<.preamble,  { call: [<.env_or, cenv, "COSMOS_CONSOLE_PREAMBLE", "deploy/clearance/console_preamble.aiml"] }]
             - set: [<.offer_lib, { call: [<.env_or, cenv, "COSMOS_CONSOLE_LIB", "libcosmos_console_offer.so"] }]

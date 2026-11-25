@@ -141,7 +141,7 @@ echo "[web] starting cosmosd + static (logs/)"
 # Konsolen-Prozess ein KIND ist und sein Arbeitsverzeichnis nicht geerbt haben muss.
 # Fehlt eines, sagt cosmosd das BEIM START (F108-9b) und die Konsole bleibt zu —
 # statt dass das erste Skript eines Nutzers als Absturz zurueckkommt.
-export COSMOS_CONSOLE_AIML="${COSMOS_CONSOLE_AIML:-$PWD/../aiml/out/aiml/aiml}"
+export COSMOS_CONSOLE_AIML="${COSMOS_CONSOLE_AIML:-${AIML:-$(command -v aiml)}}"   # aiml spec/68 F68-21
 export COSMOS_CONSOLE_EXPORTS="${COSMOS_CONSOLE_EXPORTS:-$PWD/deploy/clearance/console_exports.txt}"
 export COSMOS_CONSOLE_PREAMBLE="${COSMOS_CONSOLE_PREAMBLE:-$PWD/deploy/clearance/console_preamble.aiml}"
 export COSMOS_CONSOLE_LIB="${COSMOS_CONSOLE_LIB:-$PWD/libcosmos_console_offer.so}"

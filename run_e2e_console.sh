@@ -34,7 +34,7 @@ cp cosmosd e2e_console_admin libcosmos_console_offer.so "$WORK/"
 cp deploy/clearance/* "$WORK/deploy/clearance/"
 
 export AIONDB_PATH="$WORK/aiondb"
-export COSMOS_CONSOLE_AIML="$PROJ/../aiml/out/aiml/aiml"
+export COSMOS_CONSOLE_AIML="${AIML:-$(command -v aiml)}"   # aiml spec/68 F68-21
 export COSMOS_CONSOLE_EXPORTS="$WORK/deploy/clearance/console_exports.txt"
 export COSMOS_CONSOLE_PREAMBLE="$WORK/deploy/clearance/console_preamble.aiml"
 export COSMOS_CONSOLE_LIB="$WORK/libcosmos_console_offer.so"
