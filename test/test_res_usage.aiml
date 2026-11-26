@@ -61,8 +61,14 @@
       - decl: [second, ResUsage, { call: [smp.sample] }]
       - set: [fails, { +: [fails, { call: [expect, "zweite Messung sieht Last", { gt: [second.cpu_permille, 0] }] }] }]
       # Ein Faden kann hoechstens einen Kern fuellen; mehr als 1000 Promille waere
-      # ein Rechenfehler, nicht eine ausgelastete Maschine.
-      - set: [fails, { +: [fails, { call: [expect, "CPU <= 1100 Promille (ein Faden)", { le: [second.cpu_permille, 1100] }] }] }]
+      # ein Rechenfehler, nicht eine ausgelastete Maschine.  Die Ticks sind aber
+      # 10 ms grob, und jede der beiden Messungen kann um einen Tick daneben
+      # liegen: zwei Ticks auf die vergangene Zeit sind Messauflösung, kein
+      # Fehler (gesehen 2026-11-26 in CI: 1132 Promille nach ~150 ms).
+      - decl: [span_ms, i64, { -: [second.sampled_ms, first.sampled_ms] }]
+      - if: { condition: { lt: [span_ms, 1] }, then: [{ set: [span_ms, 1] }] }
+      - decl: [cpu_cap, i64, { +: [1000, { /: [20000, span_ms] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "CPU <= 1000 Promille plus zwei Ticks (ein Faden)", { le: [second.cpu_permille, cpu_cap] }] }] }]
       - set: [fails, { +: [fails, { call: [expect, "Zeit schreitet fort", { ge: [second.sampled_ms, first.sampled_ms] }] }] }]
 
       - print: ["  gemessen: cpu=${second.cpu_permille}/1000 rss=${second.rss_kb} kB (sink=${sink})"]
