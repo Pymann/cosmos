@@ -76,3 +76,14 @@ Geprüft wird: Der Job läuft weiter, der Controller hält den Zustand persisten
 (`agent_lost`, Log-Offset), der Agent hängt sich nach dem Neustart wieder an, und Log und
 Exit-Code kommen vollständig an. Die Logs liegen unter `out/probe/agent_disconnect/`,
 der Ablauf ist in [doc/architecture.md](doc/architecture.md#5-probe-probeagent_disconnectsh) beschrieben.
+
+## Lizenz
+
+cosmos ist **kein Open Source**, sondern *source-available* unter der
+[Pymann Commercial Source License 1.0](LICENSE)
+(`LicenseRef-Pymann-Commercial-1.0`). Lesen, Evaluieren (bis 30 Tage) und
+private, nicht kommerzielle Nutzung sind frei. Jeder produktive Einsatz braucht
+eine kommerzielle Lizenz: **5.000 € pro Jahr** je Organisation (zzgl. USt.).
+Kontakt über [github.com/Pymann](https://github.com/Pymann).
+
+Abhängigkeiten wie aiml und exodus behalten ihre eigenen Lizenzen (MIT).
