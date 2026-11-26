@@ -28,6 +28,7 @@
 #
 # Static-Check (aiml spec/49 §14): 1 class.
 - import: "sources/models/catalog_entry.aiml"
+- import: "sources/server/git_mirror.aiml"
 
 - class:
     name: CascReader
@@ -191,6 +192,7 @@
                             else:
                               - call: [out.errors.push, "Eintrag ${idx}: weder 'config:' noch 'catalog:'"]
             - call: [yaml.free, doc]
+            - call: [<.scan_repos, out]
             - return: out
 
       - def:
@@ -199,7 +201,7 @@
           static_off: ["str_cmp"]
           args: [[node, ref<yaml_node>], [out, ref<CascDoc>]]
           body:
-            - decl: [bad_keys_1, list<string>, { call: [<.unknown_keys, node, "roles,grants,secrets,kontor,ldap,saml", "config"] }]
+            - decl: [bad_keys_1, list<string>, { call: [<.unknown_keys, node, "roles,grants,secrets,kontor,ldap,saml,git", "config"] }]
             - call: [out.errors.extend, bad_keys_1]
             # roles
             - decl: [roles, ref<yaml_node>, { call: [yaml.get, node, "roles"] }]
@@ -278,6 +280,19 @@
                   - set: [out.config.kontor.token, { call: [<.text_of, mus, "token"] }]
                   - set: [out.config.kontor.layer_trust, { call: [<.text_of, mus, "layer_trust"] }]
             - if: { condition: { eq: [out.config.kontor.layer_trust.len, 0] }, then: [{ set: [out.config.kontor.layer_trust, "same_host"] }] }
+            # git (doc/spec/114 F114-1)
+            - decl: [gitn, ref<yaml_node>, { call: [yaml.get, node, "git"] }]
+            - if:
+                condition: { neq: [{ call: [yaml.kind, gitn] }, yaml.null] }
+                then:
+                  - decl: [bad_keys_git, list<string>, { call: [<.unknown_keys, gitn, "webhook_secret,token,api_url,status", "git"] }]
+                  - call: [out.errors.extend, bad_keys_git]
+                  - set: [out.git.webhook_secret, { call: [<.text_of, gitn, "webhook_secret"] }]
+                  - set: [out.git.token, { call: [<.text_of, gitn, "token"] }]
+                  - set: [out.git.api_url, { call: [<.text_of, gitn, "api_url"] }]
+                  - decl: [st_txt, string, { call: [<.text_of, gitn, "status"] }]
+                  - set: [out.git.status_on, 1]
+                  - if: { condition: { '||': [{ eq: [st_txt, "off"] }, { eq: [st_txt, "false"] }] }, then: [{ set: [out.git.status_on, 0] }] }
             # ldap
             - decl: [ldn, ref<yaml_node>, { call: [yaml.get, node, "ldap"] }]
             - if:
@@ -325,7 +340,7 @@
           static_off: ["str_cmp"]
           args: [[node, ref<yaml_node>], [out, ref<CascDoc>]]
           body:
-            - decl: [bad_keys_8, list<string>, { call: [<.unknown_keys, node, "jobs,from_dir", "catalog"] }]
+            - decl: [bad_keys_8, list<string>, { call: [<.unknown_keys, node, "jobs,from_dir,from_repo", "catalog"] }]
             - call: [out.errors.extend, bad_keys_8]
             - decl: [jobs, ref<yaml_node>, { call: [yaml.get, node, "jobs"] }]
             - decl: [jix, i32, 0]
@@ -356,6 +371,24 @@
                   - decl: [rel, string, { call: [<.text_of, dnode, "path"] }]
                   - decl: [dtrig, list<string>, { call: [<.list_of, dnode, "triggers"] }]
                   - call: [<.scan_dir, rel, dtrig, out]
+            # from_repo (doc/spec/114 F114-2): only collected here; read after the
+            # whole declaration, when its secrets are known (read_text).
+            - decl: [repos, ref<yaml_node>, { call: [yaml.get, node, "from_repo"] }]
+            - decl: [rpx, i32, 0]
+            - while:
+                condition: { lt: [rpx, { call: [yaml.size, repos] }] }
+                body:
+                  - decl: [rpnode, ref<yaml_node>, { call: [yaml.item, repos, rpx] }]
+                  - set: [rpx, { +: [rpx, 1] }]
+                  - decl: [bad_keys_repo, list<string>, { call: [<.unknown_keys, rpnode, "url,branch,path,triggers", "from_repo"] }]
+                  - call: [out.errors.extend, bad_keys_repo]
+                  - decl: [spec, RepoSpec]
+                  - set: [spec.url, { call: [<.text_of, rpnode, "url"] }]
+                  - set: [spec.branch, { call: [<.text_of, rpnode, "branch"] }]
+                  - if: { condition: { eq: [spec.branch.len, 0] }, then: [{ set: [spec.branch, "main"] }] }
+                  - set: [spec.path, { call: [<.text_of, rpnode, "path"] }]
+                  - set: [spec.triggers, { call: [<.list_of, rpnode, "triggers"] }]
+                  - call: [out.repo_specs.push, spec]
 
       # from_dir: jede *.aiml / *.yaml im Verzeichnis ist ein Job.  Name =
       # Dateistamm, Projekt aus einer Kopfzeile `# project: <name>` (fehlt sie,
@@ -432,6 +465,141 @@
             - set: [ent.origin, "catalog"]
             - call: [out.jobs.push, ent]
             - call: [out.sources.push, src]
+
+      # scan_repos: every from_repo entry, fetched now (F114-5: the catalog's
+      # read waits, 120 s, and fails closed) and read at the head of its branch.
+      - def:
+          name: scan_repos
+          access: public
+          static_off: ["str_cmp"]
+          args: [[out, ref<CascDoc>]]
+          body:
+            - if: { condition: { eq: [out.repo_specs.len, 0] }, then: [{ return: [] }] }
+            - decl: [mirror, ptr<GitMirror>, { new: GitMirror }]
+            - call: [mirror.init, ""]
+            - decl: [token, string, { call: [<.secret_in, out, out.git.token] }]
+            - decl: [six, i32, 0]
+            - while:
+                condition: { lt: [six, out.repo_specs.len] }
+                body:
+                  - decl: [spec, RepoSpec, { at: [out.repo_specs, six] }]
+                  - set: [six, { +: [six, 1] }]
+                  - decl: [key, string, { call: [repo_key_of, spec.url] }]
+                  - decl: [why, string, ""]
+                  - if: { condition: { eq: [key.len, 0] }, then: [{ set: [why, "from_repo: not a repository url: '${spec.url}'"] }] }
+                  - if:
+                      condition: { eq: [why.len, 0] }
+                      then:
+                        - decl: [fetch_err, string, { call: [mirror.fetch_now, spec.url, token, 120000] }]
+                        - if: { condition: { gt: [fetch_err.len, 0] }, then: [{ set: [why, "from_repo: ${fetch_err}"] }] }
+                  - decl: [head, string, ""]
+                  - if:
+                      condition: { eq: [why.len, 0] }
+                      then:
+                        - set: [head, { call: [mirror.rev, spec.url, "refs/remotes/origin/${spec.branch}"] }]
+                        - if: { condition: { eq: [head.len, 0] }, then: [{ set: [why, "from_repo ${spec.url}: no branch '${spec.branch}'"] }] }
+                  - if:
+                      condition: { gt: [why.len, 0] }
+                      then: [{ call: [out.errors.push, why] }]
+                      else: [{ call: [<.scan_repo, spec, key, head, mirror, out] }]
+
+      - def:
+          name: scan_repo
+          access: public
+          static_off: ["str_cmp"]
+          args: [[spec, RepoSpec], [key, string], [head, string], [mirror, ptr<GitMirror>], [out, ref<CascDoc>]]
+          body:
+            - decl: [names, list<string>, { call: [mirror.files, spec.url, head, spec.path] }]
+            - if:
+                condition: { eq: [names.len, 0] }
+                then: [{ call: [out.errors.push, "from_repo ${spec.url}: no *.aiml / *.yaml in '${spec.path}' at ${spec.branch}"] }, { return: [] }]
+            - decl: [prefix, string, { call: [repo_name_of, key] }]
+            - decl: [nix, i32, 0]
+            - while:
+                condition: { lt: [nix, names.len] }
+                body:
+                  - decl: [fname, string, { at: [names, nix] }]
+                  - set: [nix, { +: [nix, 1] }]
+                  - decl: [file, string, fname]
+                  - if: { condition: { gt: [spec.path.len, 0] }, then: [{ set: [file, "${spec.path}/${fname}"] }] }
+                  - decl: [got, list<string>, { call: [mirror.read, spec.url, head, file] }]
+                  - if:
+                      condition: { neq: [{ at: [got, 0] }, "1"] }
+                      then: [{ call: [out.errors.push, "from_repo ${spec.url}: cannot read ${file}"] }]
+                      else:
+                        - decl: [src, string, { at: [got, 1] }]
+                        - decl: [dot, i32, { call: [fname.index_of, "."] }]
+                        - decl: [ent, CatalogEntry]
+                        - decl: [stem, string, { call: [fname.substr, 0, dot] }]
+                        - set: [ent.name, "${prefix}-${stem}"]
+                        - set: [ent.source_file, "${spec.url}@${spec.branch}:${file}"]
+                        - set: [ent.enabled, 1]
+                        - set: [ent.triggers, spec.triggers]
+                        - set: [ent.project, { call: [<.project_header, src] }]
+                        - decl: [before, i32, out.jobs.len]
+                        - call: [<.add_source, ent, src, out]
+                        - if:
+                            condition: { gt: [out.jobs.len, before] }
+                            then:
+                              - decl: [where, RepoSource]
+                              - set: [where.job_id, "cat-${ent.name}"]
+                              - set: [where.url, spec.url]
+                              - set: [where.repo_key, key]
+                              - set: [where.branch, spec.branch]
+                              - set: [where.path, file]
+                              - set: [where.head, head]
+                              - call: [out.repos.push, where]
+
+      # add_source: add_job for a source that is already read (from a repository).
+      - def:
+          name: add_source
+          access: public
+          static_off: ["str_cmp"]
+          args: [[ent, CatalogEntry], [src, string], [out, ref<CascDoc>]]
+          body:
+            - decl: [dup, i32, 0]
+            - while:
+                condition: { lt: [dup, out.jobs.len] }
+                body:
+                  - decl: [other, CatalogEntry, { at: [out.jobs, dup] }]
+                  - set: [dup, { +: [dup, 1] }]
+                  - if:
+                      condition: { eq: [other.name, ent.name] }
+                      then: [{ call: [out.errors.push, "job '${ent.name}' doppelt im Katalog"] }, { return: [] }]
+            - set: [ent.job_id, "cat-${ent.name}"]
+            - set: [ent.origin, "catalog"]
+            - call: [out.jobs.push, ent]
+            - call: [out.sources.push, src]
+
+      # secret_in: a secret's value from the declaration being read (its own
+      # `secrets:`), so a from_repo of the same file can use it.  "" = none.
+      - def:
+          name: secret_in
+          access: public
+          static_off: ["str_cmp"]
+          args: [[doc, ref<CascDoc>], [name, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - if: { condition: { eq: [name.len, 0] }, then: [{ return: "" }] }
+            - decl: [idx, i32, 0]
+            - while:
+                condition: { lt: [idx, doc.config.secrets.len] }
+                body:
+                  - decl: [sec, CascSecret, { at: [doc.config.secrets, idx] }]
+                  - set: [idx, { +: [idx, 1] }]
+                  - if:
+                      condition: { eq: [sec.name, name] }
+                      then:
+                        - if:
+                            condition: { eq: [sec.source, "file"] }
+                            then:
+                              - if: { condition: { eq: [{ call: [io.is_file, sec.ref] }, false] }, then: [{ return: "" }] }
+                              - decl: [raw, string, { call: [io.read_file, sec.ref] }]
+                              - return: { call: [raw.trim] }
+                        - decl: [envm, map<string:string>, { call: [sys.env] }]
+                        - if: { condition: { gt: [{ call: [envm.contains, sec.ref] }, 0] }, then: [{ return: { call: [envm.get, sec.ref] } }] }
+                        - return: ""
+            - return: ""
 
       - def:
           name: project_header

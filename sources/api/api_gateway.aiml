@@ -27,6 +27,7 @@
 - import: "sources/models/api_token.aiml"
 - import: "sources/models/api_token_reqs.aiml"
 - import: "sources/models/kontor_event.aiml"
+- import: "sources/models/git_hook.aiml"
 - import: "sources/models/api_views.aiml"
 - import: "sources/models/api_may.aiml"
 - import: "sources/models/sso_reqs.aiml"
@@ -476,6 +477,30 @@
                 then:
                   - set: [code, 400]
                   - if: { condition: { ge: [{ call: [out.message.index_of, "Signatur"] }, 0] }, then: [{ set: [code, 401] }] }
+            - call: [xch.json, code, { call: [sys.serialize, out, <.style] }]
+
+      # github_hook: POST /hooks/github (doc/spec/114 §114.4).  As kontor_hook: no
+      # bearer, the HMAC signature proves the sender, and cosmosd checks it.
+      - def:
+          name: github_hook
+          access: public
+          args: [[xch, ref<ApiExchange>]]
+          body:
+            - if: { condition: { eq: [{ call: [<.up, xch] }, 0] }, then: [{ return: [] }] }
+            - decl: [req, GitHookReq]
+            - set: [req.event, { call: [xch.header, "x-github-event"] }]
+            - set: [req.delivery, { call: [xch.header, "x-github-delivery"] }]
+            - set: [req.signature, { call: [xch.header, "x-hub-signature-256"] }]
+            - set: [req.body, { call: [xch.text] }]
+            - decl: [out, ptr<GitHookResp>, { new: GitHookResp }]
+            - decl: [got, i32, { call: [<.link.sess.send_and_await, 0, "github_event", req, out, <.link.timeout_ms] }]
+            - if: { condition: { eq: [{ call: [<.no_answer, xch, got] }, 1] }, then: [{ return: [] }] }
+            - decl: [code, i32, 202]
+            - if:
+                condition: { neq: [out.success, 1] }
+                then:
+                  - set: [code, 400]
+                  - if: { condition: { ge: [{ call: [out.message.index_of, "signature"] }, 0] }, then: [{ set: [code, 401] }] }
             - call: [xch.json, code, { call: [sys.serialize, out, <.style] }]
 
       # campaigns: GET /campaigns — Rebuild-Kampagnen (§111.6).

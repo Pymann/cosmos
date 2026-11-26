@@ -1,0 +1,178 @@
+# GitHooks — the stores of the GitHub webhook (doc/spec/114 §114.4–§114.6): seen
+# deliveries, events whose commit is being fetched, where each run came from, and
+# the runs whose commit status is not final yet.  The logic that needs the
+# cluster and the secrets is in git_logic.aiml.
+#
+# Static-Check (aiml spec/49 §14): 1 class.
+
+- import: "sources/models/git_event.aiml"
+- import: "sources/models/git_hook.aiml"
+- import: "sources/server/git_mirror.aiml"
+
+- class:
+    name: GitHooks
+    members:
+      - [seen,    Kv<string:i64>]
+      - [pending, Kv<string:GitPending>]
+      - [origins, Kv<string:GitOrigin>]
+      # run id → time it was opened; a run leaves when its status is final.
+      - [open,    Kv<string:i64>]
+      - [mirror,  GitMirror]
+      - [work,    string, "git_work"]
+    methods:
+      - def:
+          name: init
+          access: public
+          args: [[db_dir, path]]
+          body:
+            - set: [<.seen,    { call: [db.open_kv, "git_deliveries", {persist: true}] }]
+            - set: [<.pending, { call: [db.open_kv, "git_pending", {persist: true}] }]
+            - set: [<.origins, { call: [db.open_kv, "run_git", {persist: true}] }]
+            - set: [<.open,    { call: [db.open_kv, "git_open", {persist: true}] }]
+            - call: [<.mirror.init, ""]
+            - call: [io.mkdir_all, <.work]
+
+      # verify: "sha256=<hex HMAC-SHA256(secret, body)>", compared in constant time (F114-6).
+      - def:
+          name: verify
+          access: public
+          args: [[secret, string], [body, string], [signature, string]]
+          return: i32
+          body:
+            - if: { condition: { eq: [secret.len, 0] }, then: [{ return: 0 }] }
+            - if: { condition: { neq: [{ call: [signature.starts_with, "sha256="] }, 1] }, then: [{ return: 0 }] }
+            - decl: [want, string, { call: [hash.hmac_sha256, secret, body] }]
+            - decl: [got, string, { call: [signature.substr, 7] }]
+            - decl: [low, string, { call: [got.lower] }]
+            - return: { call: [hash.const_time_eq, want, low] }
+
+      - def:
+          name: was_seen
+          access: public
+          args: [[delivery, string]]
+          return: i32
+          body:
+            - if: { condition: { eq: [delivery.len, 0] }, then: [{ return: 0 }] }
+            - return: { call: [<.seen.has, delivery] }
+
+      - def:
+          name: remember
+          access: public
+          args: [[delivery, string]]
+          body:
+            - if: { condition: { gt: [delivery.len, 0] }, then: [{ call: [<.seen.set, delivery, { call: [time.now] }] }] }
+
+      # file names of a delivery's fetch — the delivery id is GitHub's uuid, but a
+      # name from outside never becomes a path unchecked.
+      - def:
+          name: safe_name
+          access: public
+          static_off: ["str_cmp"]
+          args: [[delivery, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [ok_chars, string, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"]
+            - decl: [out, string, ""]
+            - decl: [pos, i32, 0]
+            - while:
+                condition: { '&&': [{ lt: [pos, delivery.len] }, { lt: [pos, 80] }] }
+                body:
+                  - decl: [chv, string, { call: [delivery.substr, pos, 1] }]
+                  - set: [pos, { +: [pos, 1] }]
+                  - if: { condition: { ge: [{ call: [ok_chars.index_of, chv] }, 0] }, then: [{ set: [out, "${out}${chv}"] }] }
+            - if: { condition: { eq: [out.len, 0] }, then: [{ set: [out, "delivery"] }] }
+            - return: out
+
+      # begin: fetch the event's repository detached and remember the event (F114-5).
+      # "" = fetching, else why not.
+      - def:
+          name: begin
+          access: public
+          static_off: ["str_cmp"]
+          args: [[event, GitEvent], [jobs, list<string>], [token, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [stem, string, { call: [<.safe_name, event.delivery] }]
+            - decl: [base, string, "${<.work}/${stem}"]
+            - decl: [item, GitPending]
+            - set: [item.event, event]
+            - set: [item.jobs, jobs]
+            - set: [item.status_file, "${base}.status"]
+            - set: [item.log_file, "${base}.log"]
+            - set: [item.started_ms, { call: [time.now] }]
+            - decl: [why, string, { call: [<.mirror.fetch_start, event.url, token, item.status_file, item.log_file] }]
+            - if: { condition: { gt: [why.len, 0] }, then: [{ return: why }] }
+            - call: [<.pending.set, event.delivery, item]
+            - return: ""
+
+      - def:
+          name: pending_ids
+          access: public
+          return: { type: list<string>, lifetime: producer }
+          body:
+            - decl: [out, list<string>]
+            - decl: [key_it, "iterator<string>", { call: [<.pending.iter] }]
+            - while:
+                condition: { call: [key_it.has_next] }
+                body: [{ call: [out.push, { call: [key_it.next] }] }]
+            - call: [free, key_it]
+            - call: [out.sort]
+            - return: out
+
+      - def:
+          name: pending_of
+          access: public
+          args: [[delivery, string]]
+          return: { type: GitPending, lifetime: producer }
+          body:
+            - decl: [out, GitPending]
+            - if: { condition: { gt: [{ call: [<.pending.has, delivery] }, 0] }, then: [{ set: [out, { call: [<.pending.get_copy, delivery] }] }] }
+            - return: out
+
+      - def:
+          name: finish_pending
+          access: public
+          args: [[delivery, string]]
+          body:
+            - decl: [item, GitPending, { call: [<.pending_of, delivery] }]
+            - if: { condition: { gt: [item.status_file.len, 0] }, then: [{ call: [io.remove, item.status_file] }, { call: [io.remove, item.log_file] }] }
+            - if: { condition: { gt: [{ call: [<.pending.has, delivery] }, 0] }, then: [{ call: [<.pending.delete, delivery] }] }
+
+      # ── where runs came from (F114-12) ───────────────────────────────────
+      - def:
+          name: set_origin
+          access: public
+          static_off: ["str_cmp"]
+          args: [[origin, GitOrigin]]
+          body:
+            - call: [<.origins.set, origin.run_id, origin]
+            - decl: [final, i32, 0]
+            - if: { condition: { '||': [{ eq: [origin.posted, "success"] }, { '||': [{ eq: [origin.posted, "failure"] }, { eq: [origin.posted, "error"] }] }] }, then: [{ set: [final, 1] }] }
+            - if:
+                condition: { eq: [final, 1] }
+                then:
+                  - if: { condition: { gt: [{ call: [<.open.has, origin.run_id] }, 0] }, then: [{ call: [<.open.delete, origin.run_id] }] }
+                else: [{ call: [<.open.set, origin.run_id, { call: [time.now] }] }]
+
+      - def:
+          name: origin_of
+          access: public
+          args: [[run_id, string]]
+          return: { type: GitOrigin, lifetime: producer }
+          body:
+            - decl: [out, GitOrigin]
+            - if: { condition: { gt: [{ call: [<.origins.has, run_id] }, 0] }, then: [{ set: [out, { call: [<.origins.get_copy, run_id] }] }] }
+            - return: out
+
+      - def:
+          name: open_runs
+          access: public
+          return: { type: list<string>, lifetime: producer }
+          body:
+            - decl: [out, list<string>]
+            - decl: [key_it, "iterator<string>", { call: [<.open.iter] }]
+            - while:
+                condition: { call: [key_it.has_next] }
+                body: [{ call: [out.push, { call: [key_it.next] }] }]
+            - call: [free, key_it]
+            - return: out

@@ -1,0 +1,141 @@
+# GitStore — the git part of the declared configuration (doc/spec/114 §114.2):
+# `config.git` in KV `casc_git` and, for each catalog job from a repository,
+# where its file lives (KV `catalog_repo`).  Both beside the stores they belong to
+# (`casc_config`, `catalog_meta`), never as new fields in them (doc/spec/108 F108-2).
+#
+# Static-Check (aiml spec/49 §14): 1 class.
+
+- import: "sources/models/catalog_entry.aiml"
+
+- class:
+    name: GitStore
+    members:
+      - [cfg,   Kv<string:CascGit>]
+      - [repos, Kv<string:RepoSource>]
+    methods:
+      - def:
+          name: init
+          access: public
+          args: [[db_dir, path]]
+          body:
+            - set: [<.cfg,   { call: [db.open_kv, "casc_git", {persist: true}] }]
+            - set: [<.repos, { call: [db.open_kv, "catalog_repo", {persist: true}] }]
+
+      - def:
+          name: current
+          access: public
+          return: { type: CascGit, lifetime: producer }
+          body:
+            - decl: [out, CascGit]
+            - if: { condition: { gt: [{ call: [<.cfg.has, "current"] }, 0] }, then: [{ set: [out, { call: [<.cfg.get_copy, "current"] }] }] }
+            - return: out
+
+      - def:
+          name: api_url
+          access: public
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [cur, CascGit, { call: [<.current] }]
+            - if: { condition: { eq: [cur.api_url.len, 0] }, then: [{ return: "https://api.github.com" }] }
+            - return: cur.api_url
+
+      - def:
+          name: plan_one
+          access: public
+          static_off: ["str_cmp"]
+          args: [[target, string], [want, string], [have, string], [plan, ref<CascPlan>]]
+          body:
+            - if:
+                condition: { neq: [want, have] }
+                then:
+                  - decl: [row, PlanChange]
+                  - set: [row.domain, "config"]
+                  - set: [row.action, "change"]
+                  - set: [row.target, target]
+                  - set: [row.detail, "'${have}' -> '${want}'"]
+                  - call: [plan.changes.push, row]
+
+      # plan: config.git against what is stored (F100-3: touches nothing).
+      - def:
+          name: plan
+          access: public
+          args: [[want, ref<CascGit>], [plan, ref<CascPlan>]]
+          body:
+            - decl: [have, CascGit, { call: [<.current] }]
+            - call: [<.plan_one, "git.webhook_secret", want.webhook_secret, have.webhook_secret, plan]
+            - call: [<.plan_one, "git.token", want.token, have.token, plan]
+            - call: [<.plan_one, "git.api_url", want.api_url, have.api_url, plan]
+            - call: [<.plan_one, "git.status", "${want.status_on}", "${have.status_on}", plan]
+
+      # check: every secret name config.git uses is declared under secrets: (F114-1).
+      - def:
+          name: check
+          access: public
+          static_off: ["str_cmp"]
+          args: [[want, ref<CascGit>], [secrets, list<CascSecret>], [plan, ref<CascPlan>]]
+          body:
+            - decl: [names, list<string>]
+            - decl: [six, i32, 0]
+            - while:
+                condition: { lt: [six, secrets.len] }
+                body:
+                  - decl: [sec, CascSecret, { at: [secrets, six] }]
+                  - set: [six, { +: [six, 1] }]
+                  - call: [names.push, sec.name]
+            - if:
+                condition: { '&&': [{ gt: [want.webhook_secret.len, 0] }, { eq: [{ call: [names.contains, want.webhook_secret] }, 0] }] }
+                then: [{ call: [plan.errors.push, "git.webhook_secret: Geheimnis '${want.webhook_secret}' ist nicht unter secrets: erklaert"] }]
+            - if:
+                condition: { '&&': [{ gt: [want.token.len, 0] }, { eq: [{ call: [names.contains, want.token] }, 0] }] }
+                then: [{ call: [plan.errors.push, "git.token: Geheimnis '${want.token}' ist nicht unter secrets: erklaert"] }]
+
+      - def:
+          name: apply
+          access: public
+          args: [[want, ref<CascGit>]]
+          body:
+            - decl: [copy, CascGit, want]
+            - call: [<.cfg.set, "current", copy]
+
+      # ── where a job's file lives ─────────────────────────────────────────
+      - def:
+          name: repo_of
+          access: public
+          args: [[job_id, string]]
+          return: { type: RepoSource, lifetime: producer }
+          body:
+            - decl: [out, RepoSource]
+            - if: { condition: { gt: [{ call: [<.repos.has, job_id] }, 0] }, then: [{ set: [out, { call: [<.repos.get_copy, job_id] }] }] }
+            - return: out
+
+      - def:
+          name: set_repo
+          access: public
+          args: [[src, RepoSource]]
+          body: [{ call: [<.repos.set, src.job_id, src] }]
+
+      - def:
+          name: drop_repo
+          access: public
+          args: [[job_id, string]]
+          body:
+            - if: { condition: { gt: [{ call: [<.repos.has, job_id] }, 0] }, then: [{ call: [<.repos.delete, job_id] }] }
+
+      # jobs_of: the jobs whose file lives in this repository (F114-7).
+      - def:
+          name: jobs_of
+          access: public
+          static_off: ["str_cmp"]
+          args: [[key, string]]
+          return: { type: list<RepoSource>, lifetime: producer }
+          body:
+            - decl: [out, list<RepoSource>]
+            - decl: [key_it, "iterator<string>", { call: [<.repos.iter] }]
+            - while:
+                condition: { call: [key_it.has_next] }
+                body:
+                  - decl: [job_id, string, { call: [key_it.next] }]
+                  - decl: [src, RepoSource, { call: [<.repos.get_copy, job_id] }]
+                  - if: { condition: { eq: [src.repo_key, key] }, then: [{ call: [out.push, src] }] }
+            - call: [free, key_it]
+            - return: out

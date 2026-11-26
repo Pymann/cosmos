@@ -6,6 +6,7 @@
 #
 # Static-Check (aiml spec/49 §14): 2 models.
 - import: "sources/models/casc_config.aiml"
+- import: "sources/models/git_config.aiml"
 
 - model:
     name: CatalogEntry
@@ -39,3 +40,8 @@
       # damit `plan` nichts mehr von der Platte holt).
       - [sources,     list<string>]
       - [errors,      list<string>]
+      # doc/spec/114: `config.git` and the `from_repo` entries as declared, and
+      # for each job that came from a repository where its file lives.
+      - [git,         CascGit]
+      - [repo_specs,  list<RepoSpec>]
+      - [repos,       list<RepoSource>]

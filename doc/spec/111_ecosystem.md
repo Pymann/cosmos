@@ -126,6 +126,9 @@ Zusätzlich (KV `catalog_meta`): `project` (welches exodus-Projekt der Job baut)
 
 - `from_dir:` nimmt jede `*.aiml`/`*.yaml` darin, sortiert, Name = Dateiname ohne Endung,
   `project` aus einer Kopfzeile `# project: <name>`.
+- `from_repo:` tut dasselbe mit einem Repository statt eines Verzeichnisses, gelesen am Kopf
+  eines Zweigs über ufo; Name = `<repository>-<datei>`, Auslöser `push`, `tag`,
+  `pull_request` (doc/spec/114).
 - **Entfernen schaltet ab, löscht nicht** (F100-15): ein Job, der nicht mehr im Katalog steht,
   wird `enabled: 0`; seine Läufe und Nummern bleiben.
 - Jobs, die von Hand angelegt wurden (`origin` ≠ catalog), fasst der Katalog nicht an.

@@ -58,7 +58,7 @@ jobs:
             echo "::endgroup::"
           done
 
-      # The logic tests (no display, no network): run_tests.sh builds its 28
+      # The logic tests (no display, no network): run_tests.sh builds its 29
       # test configurations with the active venv and runs each in a fresh
       # directory with a time limit.
       - name: Logic tests

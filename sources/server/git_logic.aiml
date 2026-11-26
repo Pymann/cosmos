@@ -1,0 +1,246 @@
+# The GitHub webhook and what follows from it (doc/spec/114 §114.4–§114.6):
+# check the delivery, fetch its commit, start the jobs of the repository with
+# the pipeline of that commit, and post commit statuses back.
+#
+# Group methods of the instance `githooks`, because they need the cluster (start
+# runs), the declared configuration (secrets) and the repository jobs.
+
+- import: "sources/server/git_hooks.aiml"
+- import: "sources/server/git_store.aiml"
+- import: "sources/shared/git_parse.aiml"
+- import: "sources/shared/stage_mark.aiml"
+
+- groupmethods:
+    group: CosmosRuntime
+    instances:
+      - instance: githooks
+        methods:
+          # on_event: signature, delivery, event (F114-6 … F114-9).
+          - def:
+              name: on_event
+              access: public
+              static_off: ["str_cmp"]
+              args: [[req, ref<GitHookReq>]]
+              return: { type: GitHookResp, lifetime: producer }
+              body:
+                - decl: [out, GitHookResp]
+                - decl: [cfg, CascGit, { call: [<.gitcfg.current] }]
+                - decl: [secret, string, { call: [<.casc.secret_value, cfg.webhook_secret] }]
+                - if:
+                    condition: { eq: [secret.len, 0] }
+                    then:
+                      - set: [out.message, "invalid signature: no webhook secret declared (config.git.webhook_secret)"]
+                      - return: out
+                - if:
+                    condition: { eq: [{ call: [<.verify, secret, req.body, req.signature] }, 0] }
+                    then:
+                      - call: [log.warn, "[git] delivery ${req.delivery}: invalid signature — dropped"]
+                      - set: [out.message, "invalid signature"]
+                      - return: out
+                - set: [out.success, 1]
+                - set: [out.message, "ok"]
+                - if:
+                    condition: { eq: [{ call: [<.was_seen, req.delivery] }, 1] }
+                    then: [{ set: [out.outcome, "duplicate"] }, { return: out }]
+                - call: [<.remember, req.delivery]
+                - decl: [event, GitEvent, { call: [parse_github, req.event, req.delivery, req.body] }]
+                - if: { condition: { eq: [event.note, "ping"] }, then: [{ set: [out.outcome, "pong"] }, { return: out }] }
+                - if:
+                    condition: { eq: [event.trigger.len, 0] }
+                    then:
+                      - call: [log.info, "[git] ${req.delivery}: ${event.note} — nothing to run"]
+                      - set: [out.outcome, "ignored: ${event.note}"]
+                      - return: out
+                # F114-7, F114-3: the jobs of this repository that take this trigger.
+                - decl: [sources, list<RepoSource>, { call: [<.gitcfg.jobs_of, event.repo_key] }]
+                - decl: [jobs, list<string>]
+                - decl: [six, i32, 0]
+                - while:
+                    condition: { lt: [six, sources.len] }
+                    body:
+                      - decl: [src, RepoSource, { at: [sources, six] }]
+                      - set: [six, { +: [six, 1] }]
+                      - decl: [meta, CatalogEntry, { call: [<.casc.entry_of, src.job_id] }]
+                      - if: { condition: { gt: [{ call: [meta.triggers.contains, event.trigger] }, 0] }, then: [{ call: [jobs.push, src.job_id] }] }
+                - if:
+                    condition: { eq: [jobs.len, 0] }
+                    then:
+                      - call: [log.info, "[git] ${req.delivery}: ${event.trigger} ${event.repo_key} ${event.ref} — no job takes it"]
+                      - set: [out.outcome, "ignored: no job for ${event.trigger} on ${event.repo_key}"]
+                      - return: out
+                - decl: [token, string, { call: [<.casc.secret_value, cfg.token] }]
+                - decl: [why, string, { call: [<.begin, event, jobs, token] }]
+                - if:
+                    condition: { gt: [why.len, 0] }
+                    then:
+                      - call: [log.error, "[git] ${req.delivery}: fetch not started: ${why}"]
+                      - set: [out.success, 0]
+                      - set: [out.message, why]
+                      - return: out
+                - call: [log.info, "[git] ${req.delivery}: ${event.trigger} ${event.repo_key} ${event.ref} @ ${event.sha} — fetching for ${jobs.len} job(s)"]
+                - set: [out.outcome, "fetching for ${jobs.len} job(s)"]
+                - return: out
+
+          # tick: finished fetches start their runs; open runs get their status.
+          - def:
+              name: tick
+              access: public
+              static_off: ["str_cmp"]
+              body:
+                - decl: [ids, list<string>, { call: [<.pending_ids] }]
+                - decl: [pix, i32, 0]
+                - while:
+                    condition: { lt: [pix, ids.len] }
+                    body:
+                      - decl: [delivery, string, { at: [ids, pix] }]
+                      - set: [pix, { +: [pix, 1] }]
+                      - decl: [item, GitPending, { call: [<.pending_of, delivery] }]
+                      - decl: [state, i32, { call: [<.mirror.fetch_state, item.status_file] }]
+                      - if:
+                          condition: { eq: [state, 0] }
+                          then:
+                            - call: [<.start_runs, item]
+                            - call: [<.finish_pending, delivery]
+                      - if:
+                          condition: { gt: [state, 0] }
+                          then:
+                            - decl: [ufo_log, string, ""]
+                            - if: { condition: { eq: [{ call: [io.is_file, item.log_file] }, true] }, then: [{ set: [ufo_log, { call: [io.read_file, item.log_file] }] }] }
+                            - decl: [ufo_txt, string, { call: [ufo_log.trim] }]
+                            - call: [log.error, "[git] ${delivery}: ufo fetch ${item.event.url} failed (exit ${state}): ${ufo_txt}"]
+                            - call: [<.finish_pending, delivery]
+                      - if:
+                          condition: { '&&': [{ lt: [state, 0] }, { gt: [{ call: [time.now] }, { +: [item.started_ms, 360000] }] }] }
+                          then:
+                            - call: [log.error, "[git] ${delivery}: ufo fetch ${item.event.url} did not end within 6 minutes — dropped"]
+                            - call: [<.finish_pending, delivery]
+                - call: [<.update_statuses]
+
+          # start_runs: each job with its file at the event's commit (F114-10, F114-11).
+          - def:
+              name: start_runs
+              access: public
+              static_off: ["str_cmp"]
+              args: [[item, GitPending]]
+              body:
+                - decl: [event, GitEvent, item.event]
+                - decl: [jix, i32, 0]
+                - while:
+                    condition: { lt: [jix, item.jobs.len] }
+                    body:
+                      - decl: [job_id, string, { at: [item.jobs, jix] }]
+                      - set: [jix, { +: [jix, 1] }]
+                      - decl: [src, RepoSource, { call: [<.gitcfg.repo_of, job_id] }]
+                      - decl: [job, JobDef, { call: [<.cluster.job_of, job_id] }]
+                      - decl: [got, list<string>, { call: [<.mirror.read, event.url, event.sha, src.path] }]
+                      - if:
+                          condition: { neq: [{ at: [got, 0] }, "1"] }
+                          then:
+                            - call: [log.info, "[git] ${job.name}: no ${src.path} at ${event.sha} — no run"]
+                          else:
+                            - decl: [source, string, { at: [got, 1] }]
+                            - decl: [rows, list<ParamRow>, { call: [git_param_rows, event.url, event.sha, event.ref, event.trigger, event.pr_num] }]
+                            - decl: [run_id, string, { call: [<.cluster.start_job_from, job_id, source, rows, "${event.trigger} ${event.ref}"] }]
+                            - decl: [origin, GitOrigin]
+                            - set: [origin.run_id, run_id]
+                            - set: [origin.job_id, job_id]
+                            - set: [origin.job_name, job.name]
+                            - set: [origin.repo_key, event.repo_key]
+                            - set: [origin.sha, event.sha]
+                            - set: [origin.ref, event.ref]
+                            - set: [origin.event, event.trigger]
+                            - set: [origin.pr_num, event.pr_num]
+                            - if:
+                                condition: { eq: [run_id.len, 0] }
+                                then:
+                                  # F114-14: the commit says it was not built, the log says why.
+                                  - set: [origin.run_id, "none-${event.delivery}-${job_id}"]
+                                  - call: [<.post_status, origin, "error", 0, 0]
+                                  - set: [origin.posted, "error"]
+                                else:
+                                  - decl: [started, PipelineRun, { call: [<.cluster.run_of, run_id] }]
+                                  - call: [<.post_status, origin, "pending", started.build_number, 0]
+                                  - set: [origin.posted, "pending"]
+                            - call: [<.set_origin, origin]
+
+          # update_statuses: a run whose commit state changed posts it (F114-14).
+          - def:
+              name: update_statuses
+              access: public
+              static_off: ["str_cmp"]
+              body:
+                - decl: [ids, list<string>, { call: [<.open_runs] }]
+                - decl: [oix, i32, 0]
+                - while:
+                    condition: { lt: [oix, ids.len] }
+                    body:
+                      - decl: [run_id, string, { at: [ids, oix] }]
+                      - set: [oix, { +: [oix, 1] }]
+                      - decl: [origin, GitOrigin, { call: [<.origin_of, run_id] }]
+                      - decl: [run, PipelineRun, { call: [<.cluster.run_of, run_id] }]
+                      - decl: [state, string, { call: [commit_state, run.status] }]
+                      - if:
+                          condition: { eq: [run.run_id.len, 0] }
+                          then: [{ set: [state, "error"] }]
+                      - if:
+                          condition: { neq: [state, origin.posted] }
+                          then:
+                            - decl: [marks, list<StageMark>, { call: [<.cluster.marks.rows_of, run_id] }]
+                            - decl: [magenta, i32, 0]
+                            - decl: [mix, i32, 0]
+                            - while:
+                                condition: { lt: [mix, marks.len] }
+                                body:
+                                  - decl: [mrow, StageMark, { at: [marks, mix] }]
+                                  - set: [mix, { +: [mix, 1] }]
+                                  - if: { condition: { gt: [{ call: [mrow.colours.contains, "magenta"] }, 0] }, then: [{ set: [magenta, { +: [magenta, 1] }] }] }
+                            - call: [<.post_status, origin, state, run.build_number, magenta]
+                            - set: [origin.posted, state]
+                            - call: [<.set_origin, origin]
+
+          # post_status: one commit status (F114-14).  Never changes the run (F114-15).
+          - def:
+              name: post_status
+              access: public
+              static_off: ["str_cmp"]
+              args: [[origin, GitOrigin], [state, string], [build, i32], [magenta, i32]]
+              return: i32
+              body:
+                - decl: [cfg, CascGit, { call: [<.gitcfg.current] }]
+                - if: { condition: { eq: [cfg.status_on, 0] }, then: [{ return: 0 }] }
+                - decl: [token, string, { call: [<.casc.secret_value, cfg.token] }]
+                - if:
+                    condition: { eq: [token.len, 0] }
+                    then: [{ call: [log.warn, "[git] ${origin.job_name}: no token (config.git.token) — no commit status"] }, { return: 0 }]
+                - decl: [api, string, { call: [<.gitcfg.api_url] }]
+                - decl: [repo_path, string, { call: [owner_repo_of, origin.repo_key] }]
+                - decl: [target, url, { call: [http.parse_url, "${api}/repos/${repo_path}/statuses/${origin.sha}"] }]
+                - decl: [desc, string, { call: [commit_description, state, build, magenta] }]
+                - decl: [client, http_client_handle, { call: [http.new_request, "POST", target] }]
+                - call: [client.headers.put, "Authorization", "Bearer ${token}"]
+                - call: [client.headers.put, "Accept", "application/vnd.github+json"]
+                - call: [client.headers.put, "User-Agent", "cosmos"]
+                - call: [client.headers.put, "Content-Type", "application/json"]
+                - set: [client.body, "{\"state\": \"${state}\", \"context\": \"cosmos/${origin.job_name}\", \"description\": \"${desc}\"}"]
+                - set: [client.timeout, 5000]
+                - decl: [resp, http_response_handle, { call: [client.send] }]
+                - decl: [code, i32, resp.status]
+                - if:
+                    condition: { '||': [{ lt: [code, 200] }, { ge: [code, 300] }] }
+                    then: [{ call: [log.warn, "[git] ${origin.job_name} ${origin.sha}: status ${state} refused (HTTP ${code})"] }]
+                    else: [{ call: [log.info, "[git] ${origin.job_name} ${origin.sha}: ${state} — ${desc}"] }]
+                - return: code
+
+      - instance: github_event
+        methods:
+          - def:
+              name: run
+              args: [[rpc, rpc_event], [session, mirror_session]]
+              body:
+                - decl: [req, GitHookReq]
+                - decl: [out, GitHookResp]
+                - if:
+                    condition: { neq: [{ call: [session.decode_rpc, rpc, req] }, 0] }
+                    then: [{ set: [out.message, "unreadable request"] }, { call: [session.reply_rpc, rpc, "set_result", 0, out] }, { return: [] }]
+                - set: [out, { call: [<.githooks.on_event, req] }]
+                - call: [session.reply_rpc, rpc, "set_result", 0, out]

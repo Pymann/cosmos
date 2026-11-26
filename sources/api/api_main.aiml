@@ -33,6 +33,7 @@
 #   DELETE /api/v1/tokens/:id
 #   GET    /api/v1/campaigns
 #   POST   /api/v1/hooks/kontor
+#   POST   /api/v1/hooks/github                 (doc/spec/114)
 #   GET    /api/v1/sso/saml/login?relay=/pfad   (302 zum IdP)
 #   POST   /api/v1/sso/saml/acs                 (SAML POST-Bindung)
 #
@@ -261,6 +262,15 @@
       - call: [g_api.serial.release]
 
 - def:
+    name: on_github_hook
+    args: [[req, http_request_handle], [resp, http_response_handle]]
+    body:
+      - decl: [xch, ptr<ApiExchange>, { call: [wrap, req, resp] }]
+      - call: [g_api.serial.acquire]
+      - call: [g_api.github_hook, xch]
+      - call: [g_api.serial.release]
+
+- def:
     name: on_kontor_hook
     args: [[req, http_request_handle], [resp, http_response_handle]]
     body:
@@ -337,6 +347,7 @@
       - call: [srv.route, "DELETE", "/api/v1/tokens/:id", on_token_del]
       - call: [srv.route, "GET", "/api/v1/campaigns", on_campaigns]
       - call: [srv.route, "POST", "/api/v1/hooks/kontor", on_kontor_hook]
+      - call: [srv.route, "POST", "/api/v1/hooks/github", on_github_hook]
       - call: [srv.route, "GET", "/api/v1/sso/saml/login", on_sso_login]
       - call: [srv.route, "POST", "/api/v1/sso/saml/acs", on_sso_acs]
       - call: [log.info, "cosmos-api: http://${host}:${port}/api/v1 → ${upstream}"]

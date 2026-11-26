@@ -55,9 +55,11 @@
 - import: "sources/server/pipeline_handlers.aiml"
 - import: "sources/server/run_control_handlers.aiml"
 - import: "sources/auth/api_token_store.aiml"        # API-Tokens (doc/spec/111 §111.7)
+- import: "sources/server/git_store.aiml"           # config.git + Repository-Jobs (doc/spec/114)
 - import: "sources/server/casc_store.aiml"           # erklaerte Konfiguration (doc/spec/111)
 - import: "sources/server/casc_catalog.aiml"         # … ihr Katalog-Teil + start_job_now
 - import: "sources/server/casc_handlers.aiml"        # config_plan/apply/read + API-Token-RPCs
+- import: "sources/server/git_logic.aiml"           # GitHub-Webhook (doc/spec/114)
 - import: "sources/server/campaign_logic.aiml"       # Rebuild-Kampagnen (doc/spec/111 §111.6)
 - import: "sources/auth/identity_login.aiml"         # LDAP/SAML (doc/spec/111 §111.5)
 
@@ -333,10 +335,16 @@
         instance: api_tokens
         constructor: [init, db_dir]
 
+      # doc/spec/114: config.git and where repository jobs live — seen by the
+      # catalog (plan/apply) and by the webhook.
+      - class: GitStore
+        instance: gitcfg
+        constructor: [init, db_dir]
+
       - class: CascStore
         instance: casc
         constructor: [init, db_dir]
-        sees: [cluster]
+        sees: [cluster, gitcfg]
 
       # doc/spec/111 §111.6: Rebuild-Kampagnen aus kontor-Webhooks.
       - class: CampaignStore
@@ -347,6 +355,12 @@
       - { class: RpcHandlerBase, instance: saml_finish,      sees: [auth], implements: [mirror.RpcHandler] }
       - { class: RpcHandlerBase, instance: may_call,         sees: [auth], implements: [mirror.RpcHandler] }
       - { class: RpcHandlerBase, instance: kontor_event,     sees: [campaigns], implements: [mirror.RpcHandler] }
+      # doc/spec/114: the GitHub webhook — deliveries, fetches, runs, statuses.
+      - class: GitHooks
+        instance: githooks
+        constructor: [init, db_dir]
+        sees: [casc, gitcfg, cluster]
+      - { class: RpcHandlerBase, instance: github_event,     sees: [githooks], implements: [mirror.RpcHandler] }
       - { class: RpcHandlerBase, instance: list_campaigns,   sees: [auth, campaigns], implements: [mirror.RpcHandler] }
 
       - { class: RpcHandlerBase, instance: config_plan,      sees: [auth, casc], implements: [mirror.RpcHandler] }

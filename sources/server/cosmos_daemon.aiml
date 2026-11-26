@@ -108,6 +108,7 @@
             - call: [disp.register, "saml_finish",       g_runtime.saml_finish]
             - call: [disp.register, "may_call",          g_runtime.may_call]
             - call: [disp.register, "kontor_event",      g_runtime.kontor_event]
+            - call: [disp.register, "github_event",      g_runtime.github_event]
             - call: [disp.register, "list_campaigns",    g_runtime.list_campaigns]
             - call: [<.install_agent_handlers, disp]
             - call: [log.info, "[cosmos_daemon] registered auth + logout + cluster + agent handlers"]
@@ -277,6 +278,8 @@
                         - call: [g_runtime.cluster.expire_leases, nowm]
                         # doc/spec/111 §111.6: laufende Kampagnen-Posten nachsehen.
                         - call: [g_runtime.campaigns.tick]
+                        # doc/spec/114: finished fetches start runs, commit statuses go out.
+                        - call: [g_runtime.githooks.tick]
                   # Disconnect-Sweep (~alle 5s): abgelaufene getrennte Verbindungen aufräumen.
                   - if:
                       condition: { gt: [nowm, { +: [<.last_sweep_ms, 5000] }] }

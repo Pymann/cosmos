@@ -1,0 +1,21 @@
+# A GitHub webhook, passed on by the REST gateway to cosmosd (doc/spec/114 §114.4).
+# As with kontor (sources/models/kontor_event.aiml) the gateway does not check the
+# signature: only cosmosd knows the secret.  It forwards the raw bytes.
+#
+# Static-Check (aiml spec/49 §14): 2 models.
+
+- model:
+    name: GitHookReq
+    fields:
+      - [event,     string]   # X-GitHub-Event
+      - [delivery,  string]   # X-GitHub-Delivery
+      - [signature, string]   # X-Hub-Signature-256 ("sha256=<hex>")
+      - [body,      string]
+
+- model:
+    name: GitHookResp
+    fields:
+      - [success, i32]
+      - [message, string]
+      # "ignored", "duplicate", "pong", "fetching <n> job(s)", …
+      - [outcome, string]

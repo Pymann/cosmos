@@ -21,6 +21,7 @@
 - import: "sources/shared/job_params.aiml"
 - import: "sources/models/pipeline_submit.aiml"
 - import: "sources/shared/pipeline_run.aiml"
+- import: "sources/shared/git_parse.aiml"
 
 - groupmethods:
     group: CosmosRuntime
@@ -85,6 +86,27 @@
                             - decl: [ojob, JobDef, { call: [<.cluster.job_of, old.job_id] }]
                             - if: { condition: { neq: [ojob.enabled, 0] }, then: [{ call: [<.catalog_change, plan, "disable", "job ${old.name}", "nicht mehr im Katalog — abgeschaltet, Geschichte bleibt"] }] }
 
+          # set_git_params: the job's parameters with its git_* rows replaced by `rows`
+          # (F114-11); the job's own parameters stay.
+          - def:
+              name: set_git_params
+              access: public
+              static_off: ["str_cmp"]
+              args: [[job_id, string], [rows, list<ParamRow>]]
+              body:
+                - decl: [own, JobParams, { call: [<.cluster.jobcfg.params_of_job, job_id] }]
+                - decl: [bag, JobParams]
+                - set: [bag.owner_id, job_id]
+                - decl: [oix, i32, 0]
+                - while:
+                    condition: { lt: [oix, own.rows.len] }
+                    body:
+                      - decl: [orow, ParamRow, { at: [own.rows, oix] }]
+                      - set: [oix, { +: [oix, 1] }]
+                      - if: { condition: { eq: [{ call: [orow.name.starts_with, "git_"] }, 0] }, then: [{ call: [bag.rows.push, orow] }] }
+                - call: [bag.rows.extend, rows]
+                - call: [<.cluster.jobcfg.set_job_params, job_id, bag]
+
           - def:
               name: joined
               access: public
@@ -147,6 +169,9 @@
                     then:
                       - call: [<.check_config, doc.config, out]
                       - call: [<.plan_config, doc.config, out]
+                      # doc/spec/114 F114-1: config.git, beside config (F108-2).
+                      - call: [<.gitcfg.check, doc.git, doc.config.secrets, out]
+                      - call: [<.gitcfg.plan, doc.git, out]
                 - if:
                     condition: { eq: [doc.has_catalog, 1] }
                     then: [{ call: [<.plan_catalog, doc, out] }]
@@ -166,7 +191,7 @@
               body:
                 - decl: [out, CascPlan, { call: [<.plan, doc] }]
                 - if: { condition: { eq: [out.success, 0] }, then: [{ return: out }] }
-                - if: { condition: { eq: [doc.has_config, 1] }, then: [{ call: [<.apply_config, doc.config] }] }
+                - if: { condition: { eq: [doc.has_config, 1] }, then: [{ call: [<.apply_config, doc.config] }, { call: [<.gitcfg.apply, doc.git] }] }
                 - if: { condition: { eq: [doc.has_catalog, 0] }, then: [{ return: out }] }
                 - decl: [declared, list<string>]
                 - decl: [jix, i32, 0]
@@ -192,6 +217,21 @@
                             - set: [out.success, 0]
                             - return: out
                       - call: [<.set_entry, ent]
+                      # doc/spec/114 F114-2: where the file of a repository job lives.
+                      - call: [<.gitcfg.drop_repo, ent.job_id]
+                      - decl: [rpx, i32, 0]
+                      - while:
+                          condition: { lt: [rpx, doc.repos.len] }
+                          body:
+                            - decl: [where, RepoSource, { at: [doc.repos, rpx] }]
+                            - set: [rpx, { +: [rpx, 1] }]
+                            - if:
+                                condition: { eq: [where.job_id, ent.job_id] }
+                                then:
+                                  - call: [<.gitcfg.set_repo, where]
+                                  # F114-11: a run by hand or by schedule has the
+                                  # git_* values too — the head the catalog read.
+                                  - call: [<.set_git_params, ent.job_id, { call: [git_param_rows, where.url, where.head, "refs/heads/${where.branch}", "manual", 0] }]
                 - decl: [owned, list<CatalogEntry>, { call: [<.all_entries] }]
                 - decl: [oix, i32, 0]
                 - while:
@@ -226,15 +266,48 @@
               return: { type: string, lifetime: producer }
               body:
                 - decl: [job, JobDef, { call: [<.job_of, job_id] }]
+                - decl: [none, list<ParamRow>]
+                - return: { call: [<.start_job_from, job_id, job.source, none, reason] }
+
+          # start_job_from: the same, with the pipeline from `source` instead of the
+          # job's own, and `extra` parameters over the job's (doc/spec/114 F114-10/11:
+          # the file at the event's commit, prm.git_*).  A row of `extra` replaces a
+          # job parameter of the same name.
+          - def:
+              name: start_job_from
+              access: public
+              static_off: ["str_cmp"]
+              args: [[job_id, string], [source, string], [extra, list<ParamRow>], [reason, string]]
+              return: { type: string, lifetime: producer }
+              body:
+                - decl: [job, JobDef, { call: [<.job_of, job_id] }]
                 - if:
                     condition: { eq: [job.job_id.len, 0] }
                     then: [{ call: [log.warn, "[start] ${job_id}: unbekannter Job (${reason})"] }, { return: "" }]
                 - if:
                     condition: { eq: [job.enabled, 0] }
                     then: [{ call: [log.warn, "[start] ${job.name}: abgeschaltet (${reason})"] }, { return: "" }]
-                - decl: [bag, JobParams, { call: [<.jobcfg.params_of_job, job_id] }]
+                - decl: [own, JobParams, { call: [<.jobcfg.params_of_job, job_id] }]
+                - decl: [bag, JobParams]
+                - set: [bag.owner_id, own.owner_id]
+                - decl: [extra_names, list<string>]
+                - decl: [exi, i32, 0]
+                - while:
+                    condition: { lt: [exi, extra.len] }
+                    body:
+                      - decl: [xrow, ParamRow, { at: [extra, exi] }]
+                      - set: [exi, { +: [exi, 1] }]
+                      - call: [extra_names.push, xrow.name]
+                - decl: [owi, i32, 0]
+                - while:
+                    condition: { lt: [owi, own.rows.len] }
+                    body:
+                      - decl: [orow, ParamRow, { at: [own.rows, owi] }]
+                      - set: [owi, { +: [owi, 1] }]
+                      - if: { condition: { eq: [{ call: [extra_names.contains, orow.name] }, 0] }, then: [{ call: [bag.rows.push, orow] }] }
+                - call: [bag.rows.extend, extra]
                 - decl: [chk_prm, string, { call: [<.submitter.prm_bundle, bag, "${job_id}-vorschau"] }]
-                - decl: [chk, SubmitCheck, { call: [<.submitter.check, job.source, chk_prm] }]
+                - decl: [chk, SubmitCheck, { call: [<.submitter.check, source, chk_prm] }]
                 - if:
                     condition: { eq: [chk.accepted, 0] }
                     then: [{ call: [log.warn, "[start] ${job.name}: Quelle abgelehnt: ${chk.message} (${reason})"] }, { return: "" }]
@@ -243,7 +316,7 @@
                 - decl: [run_prm, string, { call: [<.submitter.prm_bundle, bag, run_id] }]
                 - call: [<.jobcfg.freeze_run_params, run_id, bag]
                 - call: [<.jobcfg.freeze_run_priority, run_id, { call: [<.jobcfg.priority_of_job, job_id] }]
-                - decl: [run, PipelineRun, { call: [<.submitter.expand, job.source, run_id, run_prm] }]
+                - decl: [run, PipelineRun, { call: [<.submitter.expand, source, run_id, run_prm] }]
                 - if:
                     condition: { eq: [run.run_id.len, 0] }
                     then: [{ call: [log.error, "[start] ${job.name} #${build}: Ausfaltung scheiterte (${reason})"] }, { return: "" }]
@@ -253,6 +326,6 @@
                 - set: [run.started_ms, { call: [time.now] }]
                 - set: [run.status, "queued"]
                 - call: [<.add_pipeline, run]
-                - call: [<.set_base, run_id, { call: [<.submitter.base_in, job.source, run_prm] }]
+                - call: [<.set_base, run_id, { call: [<.submitter.base_in, source, run_prm] }]
                 - call: [log.info, "[start] ${job.name} #${build} als ${run_id} (${reason})"]
                 - return: run_id

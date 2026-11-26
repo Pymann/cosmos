@@ -1,0 +1,220 @@
+# Reading git events and naming repositories (doc/spec/114).  Pure functions, no
+# store, no network: what can be tested without a server.
+#
+# Static-Check (aiml spec/49 §14): 9 functions.
+
+- import: "sources/models/git_event.aiml"
+- import: "sources/shared/pipe_status.aiml"
+- import: "sources/shared/job_params.aiml"
+
+# repo_key_of: host/owner/name in lower case, for any way of writing the url
+# (F114-7): https://host/o/n(.git), http://…, ssh://git@host[:port]/o/n(.git),
+# git@host:o/n(.git).  "" when it names no owner/name.
+- def:
+    name: repo_key_of
+    static_off: ["str_cmp"]
+    args: [[url, string]]
+    return: { type: string, lifetime: producer }
+    body:
+      - decl: [rest, string, { call: [url.trim] }]
+      - decl: [scheme_at, i32, { call: [rest.index_of, "://"] }]
+      - if:
+          condition: { ge: [scheme_at, 0] }
+          then:
+            - set: [rest, { call: [rest.substr, { +: [scheme_at, 3] }] }]
+          else:
+            # scp form: git@host:owner/name
+            - decl: [colon, i32, { call: [rest.index_of, ":"] }]
+            - if:
+                condition: { gt: [colon, 0] }
+                then:
+                  - decl: [scp_host, string, { call: [rest.substr, 0, colon] }]
+                  - decl: [scp_path, string, { call: [rest.substr, { +: [colon, 1] }] }]
+                  - set: [rest, "${scp_host}/${scp_path}"]
+      # user@ in front of the host
+      - decl: [at_sign, i32, { call: [rest.index_of, "@"] }]
+      - decl: [slash1, i32, { call: [rest.index_of, "/"] }]
+      - if:
+          condition: { '&&': [{ ge: [at_sign, 0] }, { '||': [{ lt: [slash1, 0] }, { lt: [at_sign, slash1] }] }] }
+          then: [{ set: [rest, { call: [rest.substr, { +: [at_sign, 1] }] }] }]
+      - decl: [parts, list<string>, { call: [rest.split, "/"] }]
+      - decl: [kept, list<string>]
+      - decl: [pix, i32, 0]
+      - while:
+          condition: { lt: [pix, parts.len] }
+          body:
+            - decl: [one, string, { at: [parts, pix] }]
+            - set: [pix, { +: [pix, 1] }]
+            - if: { condition: { gt: [one.len, 0] }, then: [{ call: [kept.push, one] }] }
+      - if: { condition: { lt: [kept.len, 3] }, then: [{ return: "" }] }
+      - decl: [host, string, { at: [kept, 0] }]
+      # a port belongs to the transport, not to the repository
+      - decl: [port_at, i32, { call: [host.index_of, ":"] }]
+      - if: { condition: { gt: [port_at, 0] }, then: [{ set: [host, { call: [host.substr, 0, port_at] }] }] }
+      - decl: [owner, string, { at: [kept, { -: [kept.len, 2] }] }]
+      - decl: [name, string, { at: [kept, { -: [kept.len, 1] }] }]
+      - if:
+          condition: { eq: [{ call: [name.ends_with, ".git"] }, 1] }
+          then: [{ set: [name, { call: [name.substr, 0, { -: [name.len, 4] }] }] }]
+      - if: { condition: { '||': [{ eq: [owner.len, 0] }, { eq: [name.len, 0] }] }, then: [{ return: "" }] }
+      - decl: [key, string, "${host}/${owner}/${name}"]
+      - return: { call: [key.lower] }
+
+# owner/name of a repository key — the path the GitHub API wants.
+- def:
+    name: owner_repo_of
+    args: [[key, string]]
+    return: { type: string, lifetime: producer }
+    body:
+      - decl: [slash, i32, { call: [key.index_of, "/"] }]
+      - if: { condition: { lt: [slash, 0] }, then: [{ return: "" }] }
+      - return: { call: [key.substr, { +: [slash, 1] }] }
+
+# The name of a repository for job names (F114-2): the last part of the key.
+- def:
+    name: repo_name_of
+    args: [[key, string]]
+    return: { type: string, lifetime: producer }
+    body:
+      - decl: [parts, list<string>, { call: [key.split, "/"] }]
+      - if: { condition: { eq: [parts.len, 0] }, then: [{ return: "" }] }
+      - return: { at: [parts, { -: [parts.len, 1] }] }
+
+# The repository of an event body: clone_url, else html_url.
+- def:
+    name: repo_url_of
+    static_off: ["str_cmp"]
+    args: [[repo, ref<yaml_node>]]
+    return: { type: string, lifetime: producer }
+    body:
+      - decl: [clone, string, { call: [yaml.scalar, { call: [yaml.get, repo, "clone_url"] }] }]
+      - if: { condition: { gt: [clone.len, 0] }, then: [{ return: clone }] }
+      - return: { call: [yaml.scalar, { call: [yaml.get, repo, "html_url"] }] }
+
+# parse_github: what a delivery means (F114-8, F114-9).  JSON is YAML 1.2, so the
+# yaml reader reads it, as for kontor.  `trigger` stays "" for everything that
+# starts nothing, and `note` says why.
+- def:
+    name: parse_github
+    static_off: ["str_cmp"]
+    args: [[event, string], [delivery, string], [body, string]]
+    return: { type: GitEvent, lifetime: producer }
+    body:
+      - decl: [out, GitEvent]
+      - set: [out.delivery, delivery]
+      - if: { condition: { eq: [event, "ping"] }, then: [{ set: [out.note, "ping"] }, { return: out }] }
+      - decl: [doc, ptr<yaml_doc>, { call: [yaml.parse, body] }]
+      - decl: [perr, string, { call: [yaml.error, doc] }]
+      - if: { condition: { gt: [perr.len, 0] }, then: [{ call: [yaml.free, doc] }, { set: [out.note, "unreadable body"] }, { return: out }] }
+      - decl: [root, ref<yaml_node>, { call: [yaml.root, doc] }]
+      - decl: [repo, ref<yaml_node>, { call: [yaml.get, root, "repository"] }]
+      - set: [out.url, { call: [repo_url_of, repo] }]
+      - set: [out.repo_key, { call: [repo_key_of, out.url] }]
+      - if:
+          condition: { eq: [event, "push"] }
+          then:
+            - set: [out.ref, { call: [yaml.scalar, { call: [yaml.get, root, "ref"] }] }]
+            - set: [out.sha, { call: [yaml.scalar, { call: [yaml.get, root, "after"] }] }]
+            - decl: [deleted, string, { call: [yaml.scalar, { call: [yaml.get, root, "deleted"] }] }]
+            - decl: [zero, i32, { call: [out.sha.starts_with, "0000000000"] }]
+            - if:
+                condition: { '||': [{ eq: [deleted, "true"] }, { eq: [zero, 1] }] }
+                then: [{ set: [out.note, "deleted ${out.ref}"] }]
+                else:
+                  - if: { condition: { eq: [{ call: [out.ref.starts_with, "refs/heads/"] }, 1] }, then: [{ set: [out.trigger, "push"] }] }
+                  - if: { condition: { eq: [{ call: [out.ref.starts_with, "refs/tags/"] }, 1] }, then: [{ set: [out.trigger, "tag"] }] }
+                  - if: { condition: { eq: [out.trigger.len, 0] }, then: [{ set: [out.note, "push to ${out.ref}"] }] }
+      - if:
+          condition: { eq: [event, "pull_request"] }
+          then:
+            - decl: [action, string, { call: [yaml.scalar, { call: [yaml.get, root, "action"] }] }]
+            - decl: [num_txt, string, { call: [yaml.scalar, { call: [yaml.get, root, "number"] }] }]
+            - set: [out.pr_num, { call: [num_txt.parse_i32] }]
+            - set: [out.ref, "refs/pull/${out.pr_num}/head"]
+            - decl: [pull, ref<yaml_node>, { call: [yaml.get, root, "pull_request"] }]
+            - decl: [head, ref<yaml_node>, { call: [yaml.get, pull, "head"] }]
+            - decl: [base, ref<yaml_node>, { call: [yaml.get, pull, "base"] }]
+            - set: [out.sha, { call: [yaml.scalar, { call: [yaml.get, head, "sha"] }] }]
+            - decl: [head_name, string, { call: [yaml.scalar, { call: [yaml.get, { call: [yaml.get, head, "repo"] }, "full_name"] }] }]
+            - decl: [base_name, string, { call: [yaml.scalar, { call: [yaml.get, { call: [yaml.get, base, "repo"] }, "full_name"] }] }]
+            - decl: [wanted, i32, 0]
+            - if: { condition: { '||': [{ eq: [action, "opened"] }, { '||': [{ eq: [action, "synchronize"] }, { eq: [action, "reopened"] }] }] }, then: [{ set: [wanted, 1] }] }
+            - if:
+                condition: { eq: [wanted, 0] }
+                then: [{ set: [out.note, "pull_request ${action}"] }]
+                else:
+                  # F114-9: a fork's pipeline is code from someone who cannot push.
+                  - decl: [same, i32, 0]
+                  - if: { condition: { '&&': [{ gt: [head_name.len, 0] }, { eq: [{ call: [head_name.lower] }, { call: [base_name.lower] }] }] }, then: [{ set: [same, 1] }] }
+                  - if:
+                      condition: { eq: [same, 1] }
+                      then: [{ set: [out.trigger, "pull_request"] }]
+                      else: [{ set: [out.note, "pull request #${out.pr_num} from a fork (${head_name}) is not run"] }]
+      - if:
+          condition: { '&&': [{ eq: [out.trigger.len, 0] }, { eq: [out.note.len, 0] }] }
+          then: [{ set: [out.note, "event ${event}"] }]
+      - if:
+          condition: { '&&': [{ gt: [out.trigger.len, 0] }, { '||': [{ eq: [out.repo_key.len, 0] }, { lt: [out.sha.len, 40] }] }] }
+          then:
+            - set: [out.note, "${out.trigger} without repository or commit"]
+            - set: [out.trigger, ""]
+      - call: [yaml.free, doc]
+      - return: out
+
+# commit_state: the commit status of a run (F114-14).
+- def:
+    name: commit_state
+    static_off: ["str_cmp"]
+    args: [[run_status, string]]
+    return: { type: string, lifetime: producer }
+    body:
+      - decl: [code, i32, { call: [pipe_status_of, run_status] }]
+      - if: { condition: { eq: [code, PipeStatus.done] }, then: [{ return: "success" }] }
+      - if: { condition: { eq: [code, PipeStatus.failed] }, then: [{ return: "failure" }] }
+      - return: "pending"
+
+# commit_description: one line for the status (F114-14).  A version mismatch is
+# said, never turned into the state.
+- def:
+    name: commit_description
+    static_off: ["str_cmp"]
+    args: [[state, string], [build, i32], [magenta_steps, i32]]
+    return: { type: string, lifetime: producer }
+    body:
+      - decl: [out, string, "#${build} running"]
+      - if: { condition: { eq: [state, "success"] }, then: [{ set: [out, "#${build} passed"] }] }
+      - if: { condition: { eq: [state, "failure"] }, then: [{ set: [out, "#${build} failed"] }] }
+      - if: { condition: { eq: [state, "error"] }, then: [{ set: [out, "not started"] }] }
+      - if:
+          condition: { gt: [magenta_steps, 0] }
+          then:
+            - decl: [unit, string, "steps"]
+            - if: { condition: { eq: [magenta_steps, 1] }, then: [{ set: [unit, "step"] }] }
+            - set: [out, "${out} — version mismatch in ${magenta_steps} ${unit}"]
+      - return: out
+
+- def:
+    name: param_row
+    args: [[name, string], [kind, string], [value, string]]
+    return: { type: ParamRow, lifetime: producer }
+    body:
+      - decl: [row, ParamRow]
+      - set: [row.name, name]
+      - set: [row.kind, kind]
+      - set: [row.value, value]
+      - return: row
+
+# git_param_rows: where a run comes from, as prm.git_* (F114-11).  The names
+# git_* are reserved: a job parameter of that name is replaced.
+- def:
+    name: git_param_rows
+    args: [[url, string], [sha, string], [ref, string], [event, string], [pr_num, i32]]
+    return: { type: list<ParamRow>, lifetime: producer }
+    body:
+      - decl: [out, list<ParamRow>]
+      - call: [out.push, { call: [param_row, "git_url", "text", url] }]
+      - call: [out.push, { call: [param_row, "git_sha", "text", sha] }]
+      - call: [out.push, { call: [param_row, "git_ref", "text", ref] }]
+      - call: [out.push, { call: [param_row, "git_event", "text", event] }]
+      - call: [out.push, { call: [param_row, "git_pr", "zahl", "${pr_num}"] }]
+      - return: out

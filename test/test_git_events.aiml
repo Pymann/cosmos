@@ -1,0 +1,89 @@
+# Git events (doc/spec/114): what a delivery means, how a repository is named,
+# which commit status a run gets.  No network, no server.
+# Expected exit code: 0
+
+- import: "sources/server/git_mirror.aiml"
+
+- def:
+    name: expect
+    args: [[label, string], [cond, i32]]
+    return: i32
+    body:
+      - if: { condition: { eq: [cond, 1] }, then: [{ print: ["  ok   ${label}"] }, { return: 0 }] }
+      - print: ["  FAIL ${label}"]
+      - return: 1
+
+- def:
+    name: push_body
+    args: [[ref, string], [after, string], [deleted, string]]
+    return: { type: string, lifetime: producer }
+    body:
+      - return: "{\"ref\": \"${ref}\", \"after\": \"${after}\", \"deleted\": ${deleted}, \"repository\": {\"full_name\": \"Pymann/cosmos\", \"clone_url\": \"https://github.com/Pymann/cosmos.git\", \"html_url\": \"https://github.com/Pymann/cosmos\"}}"
+
+- def:
+    name: pr_body
+    args: [[action, string], [head_repo, string]]
+    return: { type: string, lifetime: producer }
+    body:
+      - return: "{\"action\": \"${action}\", \"number\": 12, \"pull_request\": {\"head\": {\"sha\": \"1111111111111111111111111111111111111111\", \"repo\": {\"full_name\": \"${head_repo}\"}}, \"base\": {\"repo\": {\"full_name\": \"Pymann/cosmos\"}}}, \"repository\": {\"clone_url\": \"https://github.com/Pymann/cosmos.git\"}}"
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      - decl: [sha, string, "cc76bc4939a8918f4cf9a0f682cc8d368dbfc4f2"]
+
+      # ── F114-7: one repository, many urls ────────────────────────────────
+      - decl: [key, string, "github.com/pymann/cosmos"]
+      - set: [fails, { +: [fails, { call: [expect, "https with .git", { eq: [{ call: [repo_key_of, "https://github.com/Pymann/cosmos.git"] }, key] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "html url", { eq: [{ call: [repo_key_of, "https://github.com/Pymann/cosmos"] }, key] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "scp form", { eq: [{ call: [repo_key_of, "git@github.com:Pymann/cosmos.git"] }, key] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "ssh url with port", { eq: [{ call: [repo_key_of, "ssh://git@github.com:22/Pymann/cosmos.git"] }, key] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "local http with port", { eq: [{ call: [repo_key_of, "http://127.0.0.1:8931/me/srv.git"] }, "127.0.0.1/me/srv"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "no owner: no key", { eq: [{ call: [repo_key_of, "https://github.com/cosmos"] }, ""] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "owner/name for the API", { eq: [{ call: [owner_repo_of, key] }, "pymann/cosmos"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "the name for jobs", { eq: [{ call: [repo_name_of, key] }, "cosmos"] }] }] }]
+
+      # ── F114-8: push, tag, pull request ──────────────────────────────────
+      - decl: [ev1, GitEvent, { call: [parse_github, "push", "d1", { call: [push_body, "refs/heads/main", sha, "false"] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "push to a branch is push", { '&&': [{ eq: [ev1.trigger, "push"] }, { '&&': [{ eq: [ev1.sha, sha] }, { eq: [ev1.ref, "refs/heads/main"] }] }] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "the event names the repository", { '&&': [{ eq: [ev1.repo_key, key] }, { eq: [ev1.delivery, "d1"] }] }] }] }]
+      - decl: [ev2, GitEvent, { call: [parse_github, "push", "d2", { call: [push_body, "refs/tags/v1.0", sha, "false"] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "push of a tag is tag", { eq: [ev2.trigger, "tag"] }] }] }]
+      - decl: [ev3, GitEvent, { call: [parse_github, "push", "d3", { call: [push_body, "refs/heads/old", "0000000000000000000000000000000000000000", "true"] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "a deleted branch starts nothing (${ev3.note})", { eq: [ev3.trigger, ""] }] }] }]
+      - decl: [ev4, GitEvent, { call: [parse_github, "pull_request", "d4", { call: [pr_body, "synchronize", "Pymann/cosmos"] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "a pull request is run at its head", { '&&': [{ eq: [ev4.trigger, "pull_request"] }, { '&&': [{ eq: [ev4.pr_num, 12] }, { '&&': [{ eq: [ev4.ref, "refs/pull/12/head"] }, { eq: [ev4.sha, "1111111111111111111111111111111111111111"] }] }] }] }] }] }]
+      - decl: [ev5, GitEvent, { call: [parse_github, "pull_request", "d5", { call: [pr_body, "opened", "someone/cosmos"] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "F114-9: a fork is not run (${ev5.note})", { '&&': [{ eq: [ev5.trigger, ""] }, { ge: [{ call: [ev5.note.index_of, "fork"] }, 0] }] }] }] }]
+      - decl: [ev6, GitEvent, { call: [parse_github, "pull_request", "d6", { call: [pr_body, "closed", "Pymann/cosmos"] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "a closed pull request starts nothing", { eq: [ev6.trigger, ""] }] }] }]
+      - decl: [ev7, GitEvent, { call: [parse_github, "issues", "d7", "{\"action\": \"opened\"}"] }]
+      - set: [fails, { +: [fails, { call: [expect, "another event starts nothing", { '&&': [{ eq: [ev7.trigger, ""] }, { gt: [ev7.note.len, 0] }] }] }] }]
+      - decl: [ev8, GitEvent, { call: [parse_github, "ping", "d8", "{}"] }]
+      - set: [fails, { +: [fails, { call: [expect, "ping is a ping", { '&&': [{ eq: [ev8.trigger, ""] }, { eq: [ev8.note, "ping"] }] }] }] }]
+      - decl: [ev9, GitEvent, { call: [parse_github, "push", "d9", "not json {"] }]
+      - set: [fails, { +: [fails, { call: [expect, "an unreadable body starts nothing", { eq: [ev9.trigger, ""] }] }] }]
+
+      # ── F114-4: where a mirror lives ─────────────────────────────────────
+      - decl: [mirror, ptr<GitMirror>, { new: GitMirror }]
+      - call: [mirror.init, "mirrors_test"]
+      - set: [fails, { +: [fails, { call: [expect, "one mirror per repository", { eq: [{ call: [mirror.dir_for, key] }, "mirrors_test/github.com/pymann/cosmos.git"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "no key, no directory", { eq: [{ call: [mirror.dir_for, ""] }, ""] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "a fetch without status file is running", { eq: [{ call: [mirror.fetch_state, "mirrors_test/none.status"] }, -1] }] }] }]
+
+      # ── F114-14: commit states ───────────────────────────────────────────
+      - set: [fails, { +: [fails, { call: [expect, "done is success", { eq: [{ call: [commit_state, "done"] }, "success"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "failed is failure", { eq: [{ call: [commit_state, "failed"] }, "failure"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "queued and running are pending", { '&&': [{ eq: [{ call: [commit_state, "queued"] }, "pending"] }, { eq: [{ call: [commit_state, "running"] }, "pending"] }] }] }] }]
+      - decl: [desc, string, { call: [commit_description, "success", 7, 1] }]
+      - set: [fails, { +: [fails, { call: [expect, "magenta is said, not turned red (${desc})", { eq: [desc, "#7 passed — version mismatch in 1 step"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "no mismatch, no words", { eq: [{ call: [commit_description, "failure", 3, 0] }, "#3 failed"] }] }] }]
+
+      - if:
+          condition: { neq: [fails, 0] }
+          then: [{ print: ["test_git_events FAIL (${fails})"] }, { return: 1 }]
+      - print: ["test_git_events PASS"]
+      - return: 0

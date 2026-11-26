@@ -1,0 +1,244 @@
+# GitMirror — one bare mirror per repository, driven through the ufo command line
+# (doc/spec/114 §114.3).  Nothing is checked out on the server: files are read
+# with `ufo cat-file -p <commit>:<path>` and listed with `ufo ls-tree`.
+#
+# The ufo binary is $COSMOS_UFO, else `ufo` from PATH (F114-4).  A token reaches
+# ufo as UFO_HTTP_TOKEN in the child's environment only — never on a command line
+# and never in a log.
+#
+# Static-Check (aiml spec/49 §14): 1 class.
+
+- import: "sources/shared/git_parse.aiml"
+
+- class:
+    name: GitMirror
+    members:
+      - [root, string, "git_mirrors"]
+      - [ufo,  string, "ufo"]
+    methods:
+      - def:
+          name: init
+          access: public
+          args: [[root_dir, string]]
+          body:
+            - if: { condition: { gt: [root_dir.len, 0] }, then: [{ set: [<.root, root_dir] }] }
+            - decl: [envm, map<string:string>, { call: [sys.env] }]
+            - if: { condition: { gt: [{ call: [envm.contains, "COSMOS_UFO"] }, 0] }, then: [{ set: [<.ufo, { call: [envm.get, "COSMOS_UFO"] }] }] }
+
+      # dir_for: <root>/<host>/<owner>/<name>.git — "" for a key that is no key.
+      - def:
+          name: dir_for
+          access: public
+          args: [[key, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - if: { condition: { eq: [key.len, 0] }, then: [{ return: "" }] }
+            - if: { condition: { ge: [{ call: [key.index_of, ".."] }, 0] }, then: [{ return: "" }] }
+            - return: "${<.root}/${key}.git"
+
+      # The child's environment: ours, with the token added when there is one.
+      - def:
+          name: env_with
+          access: public
+          args: [[token, string]]
+          return: { type: "map<string:string>", lifetime: producer }
+          body:
+            - decl: [envm, map<string:string>, { call: [sys.env] }]
+            - if: { condition: { gt: [token.len, 0] }, then: [{ call: [envm.put, "UFO_HTTP_TOKEN", token] }] }
+            - return: envm
+
+      # run: one ufo call, waited for, output captured.  `rc` < 0: did not start.
+      - def:
+          name: run
+          access: public
+          args: [[argv, list<string>], [token, string], [timeout_ms, i32]]
+          return: { type: "list<string>", lifetime: producer }
+          body:
+            - decl: [envm, map<string:string>, { call: [<.env_with, token] }]
+            - decl: [proc, process, { call: [sys.exe, argv, {capture: true, env: envm, timeout: timeout_ms}] }]
+            - decl: [out, list<string>]
+            - if:
+                condition: { eq: [proc, null] }
+                then: [{ call: [out.push, "-1"] }, { call: [out.push, ""] }, { call: [out.push, "${<.ufo} could not be started"] }, { return: out }]
+            - decl: [exit_rc, i32, { call: [proc.wait] }]
+            - call: [out.push, "${exit_rc}"]
+            - call: [out.push, proc.stdout_buffer]
+            - call: [out.push, proc.stderr_buffer]
+            - return: out
+
+      # prepare: the mirror exists and its origin is `url`.  "" = fine, else why not.
+      - def:
+          name: prepare
+          access: public
+          static_off: ["str_cmp"]
+          args: [[url, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [key, string, { call: [repo_key_of, url] }]
+            - decl: [dir, string, { call: [<.dir_for, key] }]
+            - if: { condition: { eq: [dir.len, 0] }, then: [{ return: "not a repository url: ${url}" }] }
+            - if: { condition: { eq: [{ call: [io.is_dir, dir] }, true] }, then: [{ return: "" }] }
+            - call: [io.mkdir_all, dir]
+            - decl: [init_argv, list<string>]
+            - call: [init_argv.push, <.ufo]
+            - call: [init_argv.push, "init"]
+            - call: [init_argv.push, "--bare"]
+            - call: [init_argv.push, dir]
+            - decl: [res_init, list<string>, { call: [<.run, init_argv, "", 30000] }]
+            - decl: [r1_err, string, { at: [res_init, 2] }]
+            - if: { condition: { neq: [{ at: [res_init, 0] }, "0"] }, then: [{ call: [io.remove_all, dir] }, { return: "ufo init: ${r1_err}" }] }
+            - decl: [add_argv, list<string>]
+            - call: [add_argv.push, <.ufo]
+            - call: [add_argv.push, "-C"]
+            - call: [add_argv.push, dir]
+            - call: [add_argv.push, "remote"]
+            - call: [add_argv.push, "add"]
+            - call: [add_argv.push, "origin"]
+            - call: [add_argv.push, url]
+            - decl: [res_add, list<string>, { call: [<.run, add_argv, "", 30000] }]
+            - decl: [r2_err, string, { at: [res_add, 2] }]
+            - if: { condition: { neq: [{ at: [res_add, 0] }, "0"] }, then: [{ call: [io.remove_all, dir] }, { return: "ufo remote add: ${r2_err}" }] }
+            - return: ""
+
+      # fetch_now: fetch and wait (the catalog's read, F114-5).  "" = fetched.
+      - def:
+          name: fetch_now
+          access: public
+          static_off: ["str_cmp"]
+          args: [[url, string], [token, string], [timeout_ms, i32]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [why, string, { call: [<.prepare, url] }]
+            - if: { condition: { gt: [why.len, 0] }, then: [{ return: why }] }
+            - decl: [argv, list<string>, { call: [<.fetch_argv, url] }]
+            - decl: [res, list<string>, { call: [<.run, argv, token, timeout_ms] }]
+            - if: { condition: { eq: [{ at: [res, 0] }, "0"] }, then: [{ return: "" }] }
+            - decl: [err_txt, string, { at: [res, 2] }]
+            - decl: [err_rc, string, { at: [res, 0] }]
+            - decl: [err_line, string, { call: [err_txt.trim] }]
+            - return: "ufo fetch ${url}: exit ${err_rc}: ${err_line}"
+
+      - def:
+          name: fetch_argv
+          access: public
+          args: [[url, string]]
+          return: { type: "list<string>", lifetime: producer }
+          body:
+            - decl: [argv, list<string>]
+            - call: [argv.push, <.ufo]
+            - call: [argv.push, "-C"]
+            - call: [argv.push, { call: [<.dir_for, { call: [repo_key_of, url] }] }]
+            - call: [argv.push, "fetch"]
+            - call: [argv.push, "origin"]
+            - return: argv
+
+      # fetch_start: fetch detached (an event's fetch, F114-5).  The exit status lands
+      # in `status_file`, ufo's output in `log_file`.  "" = started, else why not.
+      - def:
+          name: fetch_start
+          access: public
+          static_off: ["str_cmp"]
+          args: [[url, string], [token, string], [status_file, string], [log_file, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [why, string, { call: [<.prepare, url] }]
+            - if: { condition: { gt: [why.len, 0] }, then: [{ return: why }] }
+            - call: [io.remove, status_file]
+            - decl: [argv, list<string>, { call: [<.fetch_argv, url] }]
+            - decl: [envm, map<string:string>, { call: [<.env_with, token] }]
+            - decl: [proc, process, { call: [sys.exe, argv, {detach: true, env: envm, stdout: log_file, stderr: log_file, status_file: status_file, timeout: 300000}] }]
+            - if: { condition: { eq: [proc, null] }, then: [{ return: "${<.ufo} could not be started" }] }
+            - return: ""
+
+      # fetch_state: -1 still running, otherwise the exit status.
+      - def:
+          name: fetch_state
+          access: public
+          args: [[status_file, string]]
+          return: i32
+          body:
+            - if: { condition: { eq: [{ call: [io.is_file, status_file] }, false] }, then: [{ return: -1 }] }
+            - decl: [raw, string, { call: [io.read_file, status_file] }]
+            - decl: [txt, string, { call: [raw.trim] }]
+            - if: { condition: { eq: [txt.len, 0] }, then: [{ return: -1 }] }
+            - return: { call: [txt.parse_i32] }
+
+      # rev: the commit a name points at in the mirror ("" = none).  The mirror keeps
+      # branches as refs/remotes/origin/<branch> and tags as refs/tags/<tag>.
+      - def:
+          name: rev
+          access: public
+          static_off: ["str_cmp"]
+          args: [[url, string], [name, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [argv, list<string>]
+            - call: [argv.push, <.ufo]
+            - call: [argv.push, "-C"]
+            - call: [argv.push, { call: [<.dir_for, { call: [repo_key_of, url] }] }]
+            - call: [argv.push, "rev-parse"]
+            - call: [argv.push, name]
+            - decl: [res, list<string>, { call: [<.run, argv, "", 30000] }]
+            - if: { condition: { neq: [{ at: [res, 0] }, "0"] }, then: [{ return: "" }] }
+            - decl: [txt, string, { at: [res, 1] }]
+            - return: { call: [txt.trim] }
+
+      # files: the *.aiml / *.yaml directly in `dir` at `commit`, sorted (F114-2).
+      - def:
+          name: files
+          access: public
+          static_off: ["str_cmp"]
+          args: [[url, string], [commit, string], [dir, string]]
+          return: { type: "list<string>", lifetime: producer }
+          body:
+            - decl: [out, list<string>]
+            - decl: [argv, list<string>]
+            - call: [argv.push, <.ufo]
+            - call: [argv.push, "-C"]
+            - call: [argv.push, { call: [<.dir_for, { call: [repo_key_of, url] }] }]
+            - call: [argv.push, "ls-tree"]
+            - call: [argv.push, "${commit}:${dir}"]
+            - decl: [res, list<string>, { call: [<.run, argv, "", 30000] }]
+            - if: { condition: { neq: [{ at: [res, 0] }, "0"] }, then: [{ return: out }] }
+            - decl: [text, string, { at: [res, 1] }]
+            - decl: [lines, list<string>, { call: [text.split, "\n"] }]
+            - decl: [lix, i32, 0]
+            - while:
+                condition: { lt: [lix, lines.len] }
+                body:
+                  - decl: [line, string, { at: [lines, lix] }]
+                  - set: [lix, { +: [lix, 1] }]
+                  # "<mode> <type> <id>\t<name>" — only blobs
+                  - decl: [tab, i32, { call: [line.index_of, "\t"] }]
+                  - if:
+                      condition: { '&&': [{ gt: [tab, 0] }, { ge: [{ call: [line.index_of, " blob "] }, 0] }] }
+                      then:
+                        - decl: [fname, string, { call: [line.substr, { +: [tab, 1] }] }]
+                        - if:
+                            condition: { '||': [{ eq: [{ call: [fname.ends_with, ".aiml"] }, 1] }, { eq: [{ call: [fname.ends_with, ".yaml"] }, 1] }] }
+                            then: [{ call: [out.push, fname] }]
+            - call: [out.sort]
+            - return: out
+
+      # read: a file at a commit.  [found ("1"/"0"), content].
+      - def:
+          name: read
+          access: public
+          static_off: ["str_cmp"]
+          args: [[url, string], [commit, string], [file, string]]
+          return: { type: "list<string>", lifetime: producer }
+          body:
+            - decl: [argv, list<string>]
+            - call: [argv.push, <.ufo]
+            - call: [argv.push, "-C"]
+            - call: [argv.push, { call: [<.dir_for, { call: [repo_key_of, url] }] }]
+            - call: [argv.push, "cat-file"]
+            - call: [argv.push, "-p"]
+            - call: [argv.push, "${commit}:${file}"]
+            - decl: [res, list<string>, { call: [<.run, argv, "", 30000] }]
+            - decl: [out, list<string>]
+            - if:
+                condition: { eq: [{ at: [res, 0] }, "0"] }
+                then: [{ call: [out.push, "1"] }, { call: [out.push, { at: [res, 1] }] }]
+                else: [{ call: [out.push, "0"] }, { call: [out.push, ""] }]
+            - return: out

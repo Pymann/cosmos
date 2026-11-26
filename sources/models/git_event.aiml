@@ -1,0 +1,42 @@
+# A git event and the runs it starts (doc/spec/114 §114.4, §114.5).
+#
+# Static-Check (aiml spec/49 §14): 3 models.
+
+# What a GitHub delivery means for cosmos (F114-8).  `trigger` "" = it starts
+# nothing; `note` says why.
+- model:
+    name: GitEvent
+    fields:
+      - [delivery, string]
+      - [trigger,  string]   # push | tag | pull_request | ""
+      - [repo_key, string]
+      - [url,      string]   # clone url
+      - [sha,      string]
+      - [ref,      string]
+      - [pr_num,   i32]
+      - [note,     string]
+
+# An event whose commit is being fetched (F114-5); KV `git_pending`, keyed by delivery.
+- model:
+    name: GitPending
+    fields:
+      - [event,       GitEvent]
+      - [jobs,        list<string>]
+      - [status_file, string]
+      - [log_file,    string]
+      - [started_ms,  i64]
+
+# Where a run came from (F114-12); KV `run_git`, keyed by run id.
+- model:
+    name: GitOrigin
+    fields:
+      - [run_id,   string]
+      - [job_id,   string]
+      - [job_name, string]
+      - [repo_key, string]
+      - [sha,      string]
+      - [ref,      string]
+      - [event,    string]
+      - [pr_num,   i32]
+      # The last commit state posted (F114-14): "" | pending | success | failure | error.
+      - [posted,   string]

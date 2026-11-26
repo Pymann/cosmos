@@ -1,0 +1,37 @@
+# What the declared configuration says about git (doc/spec/114 §114.2).
+#
+# Beside CascConfig, not in it: CascConfig is stored in KV `casc_config`, and a new
+# field would change its schema fingerprint and make the stored configuration
+# unreadable (doc/spec/108 F108-2).  Hence its own KV `casc_git`.
+#
+# Static-Check (aiml spec/49 §14): 3 models.
+
+- model:
+    name: CascGit
+    fields:
+      # Secret NAMES (F114-1), never the values.
+      - [webhook_secret, string]
+      - [token,          string]
+      - [api_url,        string]   # "" = https://api.github.com
+      - [status_on,      i32]      # 1 = post commit statuses (F114-14)
+
+# One `from_repo` entry as declared (F114-2).
+- model:
+    name: RepoSpec
+    fields:
+      - [url,      string]
+      - [branch,   string]
+      - [path,     string]
+      - [triggers, list<string>]
+
+# Where a catalog job's source lives in a repository, keyed by job id in KV
+# `catalog_repo` (beside `catalog_meta` for the same reason as above).
+- model:
+    name: RepoSource
+    fields:
+      - [job_id,   string]
+      - [url,      string]
+      - [repo_key, string]   # host/owner/name, lower case (F114-7)
+      - [branch,   string]
+      - [path,     string]   # the file in the repository, e.g. ci/build.aiml
+      - [head,     string]   # the commit of `branch` when the catalog was read
