@@ -1,14 +1,14 @@
 # 113 — Version incompatibility: a magenta step
 
-Status: decided 2026-11-26.  The language side is aiml `spec/68` §7.2 (the pins and the
+Status: decided 2026-11-26.  The language side is aiml `spec/68` §7.5 (the pins and the
 `version-mismatch` line) and aiml `spec/62` F62-47/F62-48 (magenta, the set of colours).  This
 chapter says what cosmos does with them.
 
 ## 113.1 Why
 
 A tool pins the aiml it is built with, and the neighbours it works with, in its build
-configuration (aiml `spec/68` F68-95).  `aiml build` checks the pins before compiling and writes
-one line per mismatch, then builds on (F68-99): a stale pin is information, not breakage.  In a
+configuration (aiml `spec/68` F68-114).  `aiml build` checks the pins before compiling and writes
+one line per mismatch, then builds on (F68-118): a stale pin is information, not breakage.  In a
 pipeline that line scrolls past in a log nobody reads while the step is green.  The person who
 maintains the pin needs to see it in the run itself, without it turning the run red.
 
@@ -16,7 +16,7 @@ maintains the pin needs to see it in the run itself, without it turning the run 
 
 - **F113-1** The signal is the line, not an exit code.  A step whose output — stdout or stderr —
   contains `aiml: version-mismatch ` is marked **magenta**.  The form of the line is aiml's
-  (F68-99); cosmos only recognises it, so `exodus build` (F68-100) and any other tool that writes
+  (F68-118); cosmos only recognises it, so `exodus build` (F68-119) and any other tool that writes
   the same line count the same way.
 - **F113-2** The server looks, not the agent.  The output is already in the run store (doc/spec/90
   §AP1.5a); when the step is reported (`report_step`), the server scans both streams of that step
