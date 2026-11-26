@@ -1,4 +1,5 @@
-# Prüfungen für den CAS⇄OCI-Wandler (doc/spec/110 §110.25).
+# Prüfungen für den CAS⇄OCI-Wandler (doc/spec/110 §110.25) — seit 2026-11-26
+# ufo's layer kit (`@ufo/lib/kit`), erreicht nur über `ufo.kit.LayerKit`.
 #
 # Gebündelt in EINER Datei (wie runtime/test_rt.aiml): jedes Testziel hier
 # übersetzt eigens, und eine Datei je Behauptung kostet mehr Bauzeit als sie an
@@ -19,7 +20,20 @@
 #
 # Expected exit code: 0
 
-- import: "sources/runtime/rt_oci.aiml"
+- import: "@ufo/lib/kit/api.aiml"
+- import: "@ufo/lib/kit/layout.aiml"
+- import: "sources/runtime/oci_bundle.aiml"
+
+# blob_text: a small blob (JSON) into a layout.  Hashed is what is WRITTEN.
+- def:
+    name: blob_text
+    args: [[image, string], [body, string]]
+    return: { type: string, lifetime: producer }
+    body:
+      - decl: [hex, string, { call: [hash.sha256, body] }]
+      - call: [io.mkdir_all, "${image}/blobs/sha256"]
+      - call: [io.write_file, "${image}/blobs/sha256/${hex}", body]
+      - return: hex
 
 - def:
     name: expect
@@ -103,18 +117,9 @@
       - decl: [root, string, "logs/oci_test"]
       - call: [io.remove_all, root]
 
-      # run_tests.sh laeuft jede Probe in einem EIGENEN Verzeichnis; Vorlage und
-      # Binaerdatei liegen aber im Projekt (COSMOS_ROOT, doc/spec/108).
-      - decl: [envm, map<string:string>, { call: [sys.env] }]
-      - decl: [proj, string, "."]
-      - if: { condition: { gt: [{ call: [envm.contains, "COSMOS_ROOT"] }, 0] }, then: [{ set: [proj, { call: [envm.get, "COSMOS_ROOT"] }] }] }
-      - decl: [base_at, string, "${proj}/deploy/rt_base"]
-      - if:
-          condition: { eq: [{ call: [io.is_dir, base_at] }, false] }
-          then: [{ call: [log.info, "test_oci SKIP — ${base_at} fehlt (tools/make_base_rootfs.sh)"] }, { return: 0 }]
-      - decl: [tool, ptr<RtOci>, { new: RtOci }]
-      - call: [tool.init, base_at, "${proj}/cosmos-rt", "${root}/work"]
-      - set: [tool.quiet, 1]
+      - call: [io.mkdir_all, "${root}/work"]
+      - decl: [kit, ptr<ufo.kit.LayerKit>, { new: ufo.kit.LayoutKit, root: "${root}/registry", git_dir: "", work_dir: "${root}/work" }]
+      - decl: [bundler, ptr<OciBundle>, { new: OciBundle }]
 
       # ── Baum 1: der untere Stand ────────────────────────────────────────
       - call: [put_file, "${root}/src1/etc", "marke", "hallo-cas"]
@@ -122,7 +127,7 @@
       - call: [put_file, "${root}/src1/opt", "bleibt.txt", "unberuehrt"]
 
       # ── 1. Hinaus: Cut → Image ──────────────────────────────────────────
-      - decl: [rc1, i32, { call: [tool.export_cut, "${root}/src1", "${root}/image", "probe", "amd64"] }]
+      - decl: [rc1, i32, { call: [kit.images.export_dir, "${root}/src1", "${root}/image", "probe", "amd64"] }]
       - set: [fails, { +: [fails, { call: [expect, "export endet mit 0", { eq: [rc1, 0] }] }] }]
       - set: [fails, { +: [fails, { call: [expect, "oci-layout liegt da", { call: [io.is_file, "${root}/image/oci-layout"] }] }] }]
       - decl: [lay_raw, string, { call: [io.read_file, "${root}/image/oci-layout"] }]
@@ -151,7 +156,7 @@
       - set: [fails, { +: [fails, { call: [expect, "Medientyp ist tar+gzip", { eq: [lay1.mediaType, "application/vnd.oci.image.layer.v1.tar+gzip"] }] }] }]
 
       # ── 3. Herein: Image → Bundle ───────────────────────────────────────
-      - decl: [rc2, i32, { call: [tool.import_image, "${root}/image", "${root}/back", "amd64"] }]
+      - decl: [rc2, i32, { call: [bundler.import_image, kit, "${root}/image", "${root}/back", "amd64"] }]
       - set: [fails, { +: [fails, { call: [expect, "import endet mit 0", { eq: [rc2, 0] }] }] }]
       - set: [fails, { +: [fails, { call: [expect, "Inhalt kommt zurueck", { eq: [{ call: [io.read_file, "${root}/back/rootfs/etc/marke"] }, "hallo-cas"] }] }] }]
       - set: [fails, { +: [fails, { call: [expect, "auch tiefer liegendes", { eq: [{ call: [io.read_file, "${root}/back/rootfs/opt/alt/eins.txt"] }, "unten"] }] }] }]
@@ -166,7 +171,7 @@
       - call: [put_file, "${root}/src2/etc", ".wh.marke", ""]
       - call: [put_file, "${root}/src2/opt/alt", ".wh..wh..opq", ""]
       - call: [put_file, "${root}/src2/opt/alt", "zwei.txt", "oben"]
-      - decl: [rc3, i32, { call: [tool.export_cut, "${root}/src2", "${root}/image", "oben", "amd64"] }]
+      - decl: [rc3, i32, { call: [kit.images.export_dir, "${root}/src2", "${root}/image", "oben", "amd64"] }]
       - set: [fails, { +: [fails, { call: [expect, "zweite Schicht gebaut", { eq: [rc3, 0] }] }] }]
       - decl: [lay2, OciDesc, { call: [layer_of, "${root}/image"] }]
 
@@ -180,13 +185,13 @@
       - set: [lean.bare, 1]
       - set: [lean.skip_empty, 1]
       - decl: [cfg2_json, string, { call: [sys.serialize, cfg2, lean] }]
-      - decl: [cfg2_hex, string, { call: [tool.blob_text, "${root}/image", cfg2_json] }]
+      - decl: [cfg2_hex, string, { call: [blob_text, "${root}/image", cfg2_json] }]
       - set: [two.config.digest, "sha256:${cfg2_hex}"]
       - set: [two.config.size, { cast: [cfg2_json.len, i64] }]
       - call: [two.layers.push, lay1]
       - call: [two.layers.push, lay2]
       - decl: [two_json, string, { call: [sys.serialize, two, lean] }]
-      - decl: [two_hex, string, { call: [tool.blob_text, "${root}/image", two_json] }]
+      - decl: [two_hex, string, { call: [blob_text, "${root}/image", two_json] }]
       - decl: [idx2, OciIndex]
       - decl: [ref2, OciRef]
       - set: [ref2.mediaType, "application/vnd.oci.image.manifest.v1+json"]
@@ -196,7 +201,7 @@
       - call: [idx2.manifests.push, ref2]
       - call: [io.write_file, "${root}/image/index.json", { call: [sys.serialize, idx2, lean] }]
 
-      - decl: [rc4, i32, { call: [tool.import_image, "${root}/image", "${root}/zwei", "amd64"] }]
+      - decl: [rc4, i32, { call: [bundler.import_image, kit, "${root}/image", "${root}/zwei", "amd64"] }]
       - set: [fails, { +: [fails, { call: [expect, "zwei Schichten lassen sich auflegen", { eq: [rc4, 0] }] }] }]
       - set: [fails, { +: [fails, { call: [expect, "Whiteout loescht etc/marke", { eq: [{ call: [io.is_file, "${root}/zwei/rootfs/etc/marke"] }, false] }] }] }]
       - set: [fails, { +: [fails, { call: [expect, "der Marker selbst bleibt NICHT liegen", { eq: [{ call: [io.is_file, "${root}/zwei/rootfs/etc/.wh.marke"] }, false] }] }] }]
@@ -206,11 +211,11 @@
 
       # ── 5. Gegenproben ──────────────────────────────────────────────────
       - call: [io.mkdir_all, "${root}/leer"]
-      - decl: [rc5, i32, { call: [tool.import_image, "${root}/leer", "${root}/nirgends", ""] }]
+      - decl: [rc5, i32, { call: [bundler.import_image, kit, "${root}/leer", "${root}/nirgends", ""] }]
       - set: [fails, { +: [fails, { call: [expect, "Image ohne index.json wird abgelehnt", { neq: [rc5, 0] }] }] }]
-      - decl: [rc6, i32, { call: [tool.export_cut, "${root}/gibtesnicht", "${root}/image_x", "x", "amd64"] }]
+      - decl: [rc6, i32, { call: [kit.images.export_dir, "${root}/gibtesnicht", "${root}/image_x", "x", "amd64"] }]
       - set: [fails, { +: [fails, { call: [expect, "fehlende Quelle wird abgelehnt", { neq: [rc6, 0] }] }] }]
-      - decl: [rc7, i32, { call: [tool.import_image, "${root}/image", "${root}/arm", "arm64"] }]
+      - decl: [rc7, i32, { call: [bundler.import_image, kit, "${root}/image", "${root}/arm", "arm64"] }]
       - set: [fails, { +: [fails, { call: [expect, "kein Manifest fuer arm64 → Fehler, keine halbe Arbeit", { neq: [rc7, 0] }] }] }]
 
       # ── 6. Der STAPEL: eine Schicht JE STUFE ────────────────────────────
@@ -221,7 +226,7 @@
       - call: [put_file, "${root}/stapel/0/upper/etc", "stufe-eins", "eins"]
       - call: [put_file, "${root}/stapel/1/upper/etc", "stufe-zwei", "zwei"]
       - call: [put_file, "${root}/stapel/2/upper/etc", ".wh.stufe-eins", ""]
-      - decl: [rc8, i32, { call: [tool.export_layers, "${root}/stapel", "${root}/image_s", "stapel", "amd64"] }]
+      - decl: [rc8, i32, { call: [kit.images.export_layers, "${root}/stapel", "${root}/image_s", "stapel", "amd64"] }]
       - set: [fails, { +: [fails, { call: [expect, "Stapel laesst sich schneiden", { eq: [rc8, 0] }] }] }]
       - decl: [man_s, OciManifest, { call: [man_of, "${root}/image_s"] }]
       - set: [fails, { +: [fails, { call: [expect, "drei Stufen → drei Schichten", { eq: [man_s.layers.len, 3] }] }] }]
@@ -229,12 +234,12 @@
       - decl: [l_a, OciDesc, { at: [man_s.layers, 0] }]
       - decl: [l_b, OciDesc, { at: [man_s.layers, 1] }]
       - set: [fails, { +: [fails, { call: [expect, "jede Schicht ist ihr eigener Blob", { neq: [l_a.digest, l_b.digest] }] }] }]
-      - decl: [rc9, i32, { call: [tool.import_image, "${root}/image_s", "${root}/drei", "amd64"] }]
+      - decl: [rc9, i32, { call: [bundler.import_image, kit, "${root}/image_s", "${root}/drei", "amd64"] }]
       - set: [fails, { +: [fails, { call: [expect, "der Stapel laesst sich zurueckholen", { eq: [rc9, 0] }] }] }]
       - set: [fails, { +: [fails, { call: [expect, "Stufe 1 liegt im Endstand", { eq: [{ call: [io.read_file, "${root}/drei/rootfs/etc/stufe-zwei"] }, "zwei"] }] }] }]
       - set: [fails, { +: [fails, { call: [expect, "Stufe 2 hat Stufe 0 geloescht", { eq: [{ call: [io.is_file, "${root}/drei/rootfs/etc/stufe-eins"] }, false] }] }] }]
       - call: [io.mkdir_all, "${root}/stapel_leer"]
-      - decl: [rc10, i32, { call: [tool.export_layers, "${root}/stapel_leer", "${root}/image_l", "leer", "amd64"] }]
+      - decl: [rc10, i32, { call: [kit.images.export_layers, "${root}/stapel_leer", "${root}/image_l", "leer", "amd64"] }]
       - set: [fails, { +: [fails, { call: [expect, "ein Stapel ohne Schichten wird abgelehnt", { neq: [rc10, 0] }] }] }]
 
       # ── 7. Ein Upper, wie der KERNEL es schreibt ───────────────────────
@@ -260,9 +265,9 @@
             - call: [log.info, "  skip Kernel-Upper (mknod/xattr nicht erlaubt — braucht root)"]
           else:
             - call: [io.write_file, "${root}/ovl/1/layer.meta", "stage=bauen\nbindings=arch=amd64\nagent=a7\nrun=r42\n"]
-            - decl: [rc11, i32, { call: [tool.export_layers, "${root}/ovl", "${root}/image_o", "ovl", "amd64"] }]
+            - decl: [rc11, i32, { call: [kit.images.export_layers, "${root}/ovl", "${root}/image_o", "ovl", "amd64"] }]
             - set: [fails, { +: [fails, { call: [expect, "Kernel-Upper laesst sich schneiden", { eq: [rc11, 0] }] }] }]
-            - decl: [rc12, i32, { call: [tool.import_image, "${root}/image_o", "${root}/ovl_back", "amd64"] }]
+            - decl: [rc12, i32, { call: [bundler.import_image, kit, "${root}/image_o", "${root}/ovl_back", "amd64"] }]
             - set: [fails, { +: [fails, { call: [expect, "und zurueckholen", { eq: [rc12, 0] }] }] }]
             - decl: [back, string, "${root}/ovl_back/rootfs"]
             - set: [fails, { +: [fails, { call: [expect, "Geraetedatei 0:0 loescht etc/marke", { lt: [{ call: [fsmeta.stat, "${back}/etc/marke", 0] }, 0] }] }] }]
@@ -273,7 +278,7 @@
             - set: [fails, { +: [fails, { call: [expect, "user-xattr ueberlebt", { eq: [{ call: [bytes.text, { call: [fsmeta.xattr_get, "${back}/usr/bin/werkzeug", "user.cosmos"] }] }, "probe"] }] }] }]
             - set: [fails, { +: [fails, { call: [expect, "setuid ueberlebt", { eq: [{ band: [{ call: [fsmeta.stat, "${back}/usr/bin/werkzeug", 0] }, 4095] }, 2541] }] }] }]
             # Derselbe Stand → derselbe Digest (pax-Koepfe ohne PID/atime).
-            - decl: [rc13, i32, { call: [tool.export_layers, "${root}/ovl", "${root}/image_o2", "ovl", "amd64"] }]
+            - decl: [rc13, i32, { call: [kit.images.export_layers, "${root}/ovl", "${root}/image_o2", "ovl", "amd64"] }]
             - decl: [man_o, OciManifest, { call: [man_of, "${root}/image_o"] }]
             - decl: [man_o2, OciManifest, { call: [man_of, "${root}/image_o2"] }]
             - decl: [lo_a, OciDesc, { at: [man_o.layers, 1] }]

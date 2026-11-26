@@ -80,19 +80,11 @@ jobs:
         if: matrix.suite == 'run_e2e_console.sh'
         run: aiml build -c exodus-console-offer.json
 
-      # run_e2e_git.sh needs ufo (Pymann/ufo), built with the same venv.
-      - name: Checkout ufo
+      # run_e2e_git.sh needs the ufo program: setup-aiml.sh installed it into the
+      # venv together with the ufo package (.github/ci/aiml-packages).
+      - name: ufo from the venv
         if: matrix.suite == 'run_e2e_git.sh'
-        uses: actions/checkout@v4
-        with:
-          repository: Pymann/ufo
-          path: ufo-src
-          token: ${{ secrets.UFO_READ_TOKEN || github.token }}
-      - name: Build ufo
-        if: matrix.suite == 'run_e2e_git.sh'
-        run: |
-          (cd ufo-src && aiml build -c exodus.json)
-          echo "UFO_BIN=$GITHUB_WORKSPACE/ufo-src/ufo" >> "$GITHUB_ENV"
+        run: echo "UFO_BIN=$AIML_VENV/bin/ufo" >> "$GITHUB_ENV"
 
       # run_mem_check.sh drives the binaries run_e2e.sh builds and builds none itself.
       - name: Build for the memory check

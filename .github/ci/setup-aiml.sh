@@ -124,6 +124,15 @@ printf -- '- call: [sys.exit, 42]\n' > "$probe/smoke.aiml"
 set +e; (cd "$probe" && "$AIML" smoke.aiml); rc=$?; set -e
 [ "$rc" -eq 42 ] || { echo "::error::aiml smoke test exited $rc, expected 42"; exit 1; }
 
+# The packages cosmos imports (@ufo/lib/kit, …), pinned in aiml-packages beside
+# this script.  `install` builds each with this venv's compiler (aiml spec/68 §6).
+while read -r pname purl pref; do
+    case "$pname" in ''|'#'*) continue ;; esac
+    "$AIML" venv "$AIML_VENV" install "$pname" --git "$purl" --ref "$pref" > "$DL/pkg-$pname.log" 2>&1 \
+        || { tail -n 30 "$DL/pkg-$pname.log"; echo "::error::aiml package $pname ($pref) did not install"; exit 1; }
+    echo "aiml package: $pname $pref"
+done < "$(dirname "$0")/aiml-packages"
+
 if [ -n "${GITHUB_ENV:-}" ]; then
     { echo "AIML_VENV=$AIML_VENV"; echo "AIML=$AIML"; echo "AIML_BIN=$AIML"; } >> "$GITHUB_ENV"
     echo "$AIML_VENV/bin" >> "$GITHUB_PATH"

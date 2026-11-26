@@ -814,8 +814,12 @@ baut und sonst nicht.  Dazu: solange es kein overlay gibt, ist Bereitstellung ei
 Ein Cut ist ein Baum, der über seinen Inhalt adressiert ist.  Ein OCI-Image ist ein Baum aus
 Blobs, die über ihren Inhalt adressiert sind.  Das ist **dieselbe Idee in zwei Formaten** —
 darum ist die Wandlung eine Umschreibung und kein Übersetzungsverlust, und darum geht sie in
-**beide** Richtungen.  `cosmos-oci` (`runtime/rt_oci.aiml`, Ziel `runtime/exodus-rt-oci.json`)
-tut genau das:
+**beide** Richtungen.  `cosmos-oci` (`sources/runtime/rt_oci_main.aiml`, Ziel
+`runtime/exodus-rt-oci.json`) tut genau das.  Since 2026-11-26 the work itself is ufo's layer kit,
+imported as the aiml package `@ufo/lib/kit` (ufo `doc/kit.md`): `cosmos-oci` is the composition root
+that builds one `ufo.kit.LayoutKit` and then names only the contract `ufo.kit.LayerKit`;
+`sources/runtime/oci_bundle.aiml` adds the cosmos-rt `config.json` from the image configuration.
+cosmos-kontor does the same with `ufo.kit.KontorKit`.  cosmos has no OCI code of its own any more.
 
 ```
 cosmos-oci --cut deploy/rt_cuts/stufe1 --image deploy/oci/stufe1 --ref-name stufe1

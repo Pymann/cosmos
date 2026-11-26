@@ -10,7 +10,12 @@
 # Kommandozeile: die waere fuer jeden Nutzer des Rechners in `ps` lesbar.
 # Ausgabe auf stdout: die Manifest-Digest (eine Zeile) — sonst nichts.
 
-- import: "sources/registry/kontor_client.aiml"
+# The client is ufo's layer kit (`ufo.kit.KontorKit`, ufo doc/kit.md §3), imported
+# as an aiml package.  This program builds it once and then names only the
+# contract `ufo.kit.LayerKit`.
+
+- import: "@ufo/lib/kit/api.aiml"
+- import: "@ufo/lib/kit/kontor.aiml"
 
 - model:
     name: RegArgs
@@ -46,36 +51,37 @@
             - decl: [env_name, string, "COSMOS_KONTOR_TOKEN"]
             - if: { condition: { gt: [args.token_env.len, 0] }, then: [{ set: [env_name, args.token_env] }] }
             - if: { condition: { gt: [{ call: [envm.contains, env_name] }, 0] }, then: [{ set: [token, { call: [envm.get, env_name] }] }] }
-      # <repo>@sha256:<hex> oder <repo>:<tag> — der Tag ist alles nach dem
-      # LETZTEN ':' hinter dem letzten '/', damit "host/a:b" nicht zerfaellt.
-      - decl: [repo, string, args.ref]
-      - decl: [reference, string, "latest"]
-      - decl: [at_pos, i32, { call: [args.ref.index_of, "@"] }]
+      # <repo>@sha256:<hex> or <repo>:<tag>; a bare <repo> means :latest.  The tag
+      # is after the LAST ':' behind the last '/', so "host:5000/a" has none.
+      - decl: [reference, string, args.ref]
+      - decl: [segs, list<string>, { call: [args.ref.split, "/"] }]
+      - decl: [tail, string, { call: [segs.get, { -: [segs.len, 1] }] }]
       - if:
-          condition: { ge: [at_pos, 0] }
-          then:
-            - set: [repo, { call: [args.ref.substr, 0, at_pos] }]
-            - set: [reference, { call: [args.ref.substr, { +: [at_pos, 1] }] }]
-          else:
-            - decl: [parts, list<string>, { call: [args.ref.split, ":"] }]
-            - if:
-                condition: { gt: [parts.len, 1] }
-                then:
-                  - set: [reference, { call: [parts.get, { -: [parts.len, 1] }] }]
-                  - set: [repo, { call: [args.ref.substr, 0, { -: [{ -: [args.ref.len, reference.len] }, 1] }] }]
-      - decl: [client, ptr<KontorClient>, { new: KontorClient }]
-      - call: [client.init, args.url, token, repo]
+          condition: { '&&': [{ lt: [{ call: [args.ref.index_of, "@"] }, 0] }, { lt: [{ call: [tail.index_of, ":"] }, 0] }] }
+          then: [{ set: [reference, "${args.ref}:latest"] }]
+      - decl: [work, string, "logs/kontor_work"]
+      - call: [io.mkdir_all, work]
+      - decl: [kit, ptr<ufo.kit.LayerKit>, { new: ufo.kit.KontorKit, url: args.url, token: token, git_dir: "", work_dir: work }]
+      - return: { call: [transfer, kit, args, reference] }
+
+# transfer: push or pull through the contract only.  Prints the manifest digest.
+- def:
+    name: transfer
+    static_off: ["str_cmp"]
+    args: [[kit, ref<ufo.kit.LayerKit>], [args, RegArgs], [reference, string]]
+    return: i32
+    body:
       - if:
           condition: { eq: [args.mode, "push"] }
           then:
-            - decl: [pushed, string, { call: [client.push, args.layout, reference, args.artifact_type] }]
+            - decl: [pushed, string, { call: [kit.registry.push, args.layout, reference, args.artifact_type] }]
             - if: { condition: { eq: [pushed.len, 0] }, then: [{ return: 1 }] }
             - print: ["${pushed}"]
             - return: 0
       - if:
           condition: { eq: [args.mode, "pull"] }
           then:
-            - decl: [pulled, string, { call: [client.pull, reference, args.layout, reference] }]
+            - decl: [pulled, string, { call: [kit.registry.pull, reference, args.layout] }]
             - if: { condition: { eq: [pulled.len, 0] }, then: [{ return: 1 }] }
             - print: ["${pulled}"]
             - return: 0

@@ -1,0 +1,173 @@
+# OciBundle — an OCI image layout becomes a cosmos-rt bundle (doc/spec/110 §110.25).
+#
+# The layers are applied by the layer kit of ufo (`ufo.kit.LayerKit`, ufo doc/kit.md
+# §2.3), handed in by the caller on each call — this class keeps no kit and no state.  What stays here is the part only cosmos knows: turning the image
+# configuration (Entrypoint, Cmd, Env, WorkingDir) into the bundle's config.json.
+#
+# Static-Check (aiml spec/49 §14): 1 class.
+
+- import: "@ufo/lib/kit/api.aiml"
+- import: "sources/runtime/rt_model_config.aiml"
+- import: "sources/runtime/rt_model_oci_img.aiml"
+- import: "sources/runtime/rt_model_oci_cfg.aiml"
+
+- class:
+    name: OciBundle
+    methods:
+      - def:
+          name: hex_of
+          access: public
+          static_off: ["str_cmp"]
+          args: [[digest, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [mark, i32, { call: [digest.index_of, ":"] }]
+            - if: { condition: { lt: [mark, 0] }, then: [{ return: digest }] }
+            - return: { call: [digest.substr, { +: [mark, 1] }] }
+
+      # image_config: the configuration of the manifest for `arch` ("" = the first).
+      # [found ("1"/"0"), why]; the config lands in `out`.
+      - def:
+          name: image_config
+          access: public
+          static_off: ["str_cmp"]
+          args: [[image, string], [arch, string], [out, ref<OciImgCfg>]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [idx_raw, string, { call: [io.read_file, "${image}/index.json"] }]
+            - if: { condition: { eq: [idx_raw.len, 0] }, then: [{ return: "${image}/index.json fehlt — kein Image-Layout" }] }
+            - decl: [idx, OciIndex, { call: [sys.deserialize, idx_raw, "OciIndex"] }]
+            - decl: [pick, OciRef]
+            - decl: [found, i32, 0]
+            - decl: [idi, i32, 0]
+            - while:
+                condition: { '&&': [{ lt: [idi, idx.manifests.len] }, { eq: [found, 0] }] }
+                body:
+                  - decl: [cand, OciRef, { at: [idx.manifests, idi] }]
+                  - set: [idi, { +: [idi, 1] }]
+                  - if:
+                      condition: { '||': [{ eq: [arch.len, 0] }, { eq: [cand.platform.architecture, arch] }] }
+                      then: [{ set: [pick, cand] }, { set: [found, 1] }]
+            - if: { condition: { eq: [found, 0] }, then: [{ return: "kein Manifest fuer '${arch}'" }] }
+            - decl: [mhex, string, { call: [<.hex_of, pick.digest] }]
+            - decl: [man_raw, string, { call: [io.read_file, "${image}/blobs/sha256/${mhex}"] }]
+            - if: { condition: { eq: [man_raw.len, 0] }, then: [{ return: "Blob ${mhex} fehlt" }] }
+            - decl: [man, OciManifest, { call: [sys.deserialize, man_raw, "OciManifest"] }]
+            - decl: [chex, string, { call: [<.hex_of, man.config.digest] }]
+            - decl: [cfg_raw, string, { call: [io.read_file, "${image}/blobs/sha256/${chex}"] }]
+            - if: { condition: { eq: [cfg_raw.len, 0] }, then: [{ return: "Konfiguration ${chex} fehlt" }] }
+            - decl: [icfg, OciImgCfg, { call: [sys.deserialize, cfg_raw, "OciImgCfg"] }]
+            - set: [out, icfg]
+            - return: ""
+
+      # import_image: layers → <bundle>/rootfs (by the kit), then config.json.
+      - def:
+          name: import_image
+          access: public
+          static_off: ["str_cmp"]
+          args: [[kit, ref<ufo.kit.LayerKit>], [image, string], [bundle, string], [arch, string]]
+          return: i32
+          body:
+            - decl: [icfg, OciImgCfg]
+            - decl: [why, string, { call: [<.image_config, image, arch, icfg] }]
+            - if: { condition: { gt: [why.len, 0] }, then: [{ call: [log.error, "[oci] ${why}"] }, { return: 1 }] }
+            - decl: [code, i32, { call: [kit.images.import_image, image, "${bundle}/rootfs", arch] }]
+            - if: { condition: { neq: [code, 0] }, then: [{ return: 1 }] }
+            - return: { call: [<.write_bundle, bundle, icfg] }
+
+      - def:
+          name: write_bundle
+          access: public
+          static_off: ["str_cmp"]
+          args: [[bundle, string], [icfg, OciImgCfg]]
+          return: i32
+          body:
+            - decl: [conf, RtConfig]
+            - set: [conf.ociVersion, "1.0.2"]
+            - set: [conf.hostname, "oci-import"]
+            - decl: [eix, i32, 0]
+            - while:
+                condition: { lt: [eix, icfg.config.Entrypoint.len] }
+                body:
+                  - call: [conf.process.args.push, { at: [icfg.config.Entrypoint, eix] }]
+                  - set: [eix, { +: [eix, 1] }]
+            - decl: [cix, i32, 0]
+            - while:
+                condition: { lt: [cix, icfg.config.Cmd.len] }
+                body:
+                  - call: [conf.process.args.push, { at: [icfg.config.Cmd, cix] }]
+                  - set: [cix, { +: [cix, 1] }]
+            - if:
+                condition: { eq: [conf.process.args.len, 0] }
+                then: [{ call: [conf.process.args.push, "/bin/sh"] }]
+            - decl: [vix, i32, 0]
+            - while:
+                condition: { lt: [vix, icfg.config.Env.len] }
+                body:
+                  - call: [conf.process.env.push, { at: [icfg.config.Env, vix] }]
+                  - set: [vix, { +: [vix, 1] }]
+            - if:
+                condition: { eq: [conf.process.env.len, 0] }
+                then: [{ call: [conf.process.env.push, "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"] }]
+            - set: [conf.process.cwd, "/"]
+            - if: { condition: { gt: [icfg.config.WorkingDir.len, 0] }, then: [{ set: [conf.process.cwd, icfg.config.WorkingDir] }] }
+            - set: [conf.process.noNewPrivileges, true]
+            - set: [conf.root.path, "rootfs"]
+            - set: [conf.root.readonly, false]
+
+            # Ein Image-rootfs bringt ein LEERES /dev mit — die Geraete bindet
+            # der Host hinein, und ein Bind braucht ein vorhandenes Ziel
+            # (F110-45: ohne /dev/urandom stirbt schon apts HTTP-Helfer).
+            - call: [io.mkdir_all, "${bundle}/rootfs/dev"]
+            - decl: [devs, list<string>, ["null"]]
+            - call: [devs.push, "zero"]
+            - call: [devs.push, "full"]
+            - call: [devs.push, "random"]
+            - call: [devs.push, "urandom"]
+            - decl: [dix, i32, 0]
+            - while:
+                condition: { lt: [dix, devs.len] }
+                body:
+                  - decl: [dev, string, { at: [devs, dix] }]
+                  - set: [dix, { +: [dix, 1] }]
+                  - if:
+                      condition: { eq: [{ call: [io.is_file, "${bundle}/rootfs/dev/${dev}"] }, false] }
+                      then: [{ call: [io.write_file, "${bundle}/rootfs/dev/${dev}", ""] }]
+                  - decl: [mdev, RtMount]
+                  - set: [mdev.destination, "/dev/${dev}"]
+                  - set: [mdev.source, "/dev/${dev}"]
+                  - call: [mdev.options.push, "bind"]
+                  - call: [conf.mounts.push, mdev]
+            - decl: [mproc, RtMount]
+            - set: [mproc.destination, "/proc"]
+            - set: [mproc.type, "proc"]
+            - set: [mproc.source, "proc"]
+            - call: [conf.mounts.push, mproc]
+            - decl: [mtmp, RtMount]
+            - set: [mtmp.destination, "/tmp"]
+            - set: [mtmp.type, "tmpfs"]
+            - set: [mtmp.source, "tmpfs"]
+            - call: [mtmp.options.push, "nosuid"]
+            - call: [mtmp.options.push, "nodev"]
+            - call: [mtmp.options.push, "mode=1777"]
+            - call: [conf.mounts.push, mtmp]
+            - decl: [kinds, list<string>, ["pid"]]
+            - call: [kinds.push, "mount"]
+            - call: [kinds.push, "user"]
+            - call: [kinds.push, "ipc"]
+            - call: [kinds.push, "uts"]
+            - decl: [kix, i32, 0]
+            - while:
+                condition: { lt: [kix, kinds.len] }
+                body:
+                  - decl: [nsx, RtNamespace]
+                  - set: [nsx.type, { at: [kinds, kix] }]
+                  - call: [conf.linux.namespaces.push, nsx]
+                  - set: [kix, { +: [kix, 1] }]
+            - call: [conf.linux.maskedPaths.push, "/proc/sysrq-trigger"]
+
+            - decl: [style, JsonStyle]
+            - set: [style.bare, 1]
+            - set: [style.pretty, 1]
+            - call: [io.write_file, "${bundle}/config.json", { call: [sys.serialize, conf, style] }]
+            - return: 0

@@ -65,7 +65,7 @@ flowchart LR
             agent["agent<br/>sys.exec(Bundle)"]
             rt["cosmos-rt<br/>Container: userns · seccomp"]
             overlay["overlayfs<br/>lower = Schichten · upper = Stufe"]
-            oci["cosmos-oci<br/>Schnitt → OCI-Layout"]
+            oci["cosmos-oci · cosmos-kontor<br/>über @ufo/lib/kit"]
             ckontor["cosmos-kontor<br/>push · pull"]
         end
     end
@@ -148,6 +148,7 @@ flowchart LR
     uimage --> ukit
     ukit -->|"KontorKit ⟨/v2/, UFO_REGISTRY_TOKEN⟩"| reg
     ukit -->|"LayoutKit ⟨Verzeichnis⟩"| oci
+    oci -.->|"importiert als aiml-Paket<br/>ptr&lt;ufo.kit.LayerKit&gt;"| ukit
     uimage -->|"record: eine Schicht je Stufe"| ulayer
     overlay -.->|"ufo layer commit &lt;upper&gt;"| ulayer
     ulayer -->|"layer apply / --upper / --oci"| overlay

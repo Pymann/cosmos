@@ -55,6 +55,8 @@ keine venv aktiv ist; von Hand:
 ```bash
 aiml venv ../../aimlvenv        # einmal, mit dem gebauten Compiler
 . ../../aimlvenv/env
+# die aiml-Pakete, die cosmos importiert (@ufo/lib/kit, …) — Pins in .github/ci/aiml-packages
+aiml venv ../../aimlvenv install ufo --git https://github.com/Pymann/ufo --ref <commit>
 ```
 
 ```bash
