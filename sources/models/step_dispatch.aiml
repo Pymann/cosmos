@@ -30,3 +30,10 @@
       - [lease_until, i64]
       - [attempt,     i32]   # F101-7: diese Nummer gehoert in jede Rueckmeldung
       - [timeout_ms,  i32]   # F103-17: Millisekunden; 0 = Vorgabe des Agenten
+      # The step cache (doc/spec/96 §96.6, sources/server/stage_keys.aiml):
+      # the stage's reuse class (0 = opaque, run it), its probe, and the key
+      # the previous stage ended with.  The agent forms the key itself,
+      # because only it sees what the probe prints.
+      - [cache_class, i32]
+      - [resolve,     string]
+      - [prev_key,    string]

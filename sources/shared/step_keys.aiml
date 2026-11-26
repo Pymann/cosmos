@@ -1,0 +1,74 @@
+# The key of a stage (aiml spec/62 §8, doc/spec/96 §96.6 step 2).
+#
+# A hit REPLACES the run, so the only dangerous property is a false hit.  The
+# key therefore holds every input that can change what the stage leaves
+# behind, each one length-prefixed (doc/spec/92 §92.2, finding 4): with a
+# separator, ("ab","c") and ("a","bc") would be one key.
+#
+# The previous stage's key is part of the material.  A stage runs on the
+# layers of all stages before it, so the same command on a different lower
+# stack is a different step.  That is what makes one opaque stage end the
+# chain: it has no key, so nothing after it can have one either.
+#
+# Static-Check (aiml spec/49 §14): 1 model, 1 class.
+- namespace: cosmos.cache
+
+- model:
+    name: StageKeyIn
+    fields:
+      - [cache_class, i32]     # ReuseClass: 0 opaque, 1 resolved, 2 pure
+      - [command,     string]
+      - [bindings,    string]  # the lane ("arch=x86_64")
+      - [image,       string]  # what the stage runs in ("" = the host)
+      - [shares,      string]  # "name:/target:mode,…" — names, not content
+      - [prev_key,    string]  # the previous stage's key; "" = first stage
+      - [probe_out,   string]  # what `resolve:` printed (resolved only)
+
+- class:
+    name: StepKeys
+    methods:
+      # "" = no key: the stage is opaque and runs every time.
+      - def:
+          name: stage_key
+          access: public
+          static_off: ["str_cmp"]
+          args: [[kin, cosmos.cache.StageKeyIn]]
+          return: { type: string, lifetime: producer }
+          body:
+            - if: { condition: { le: [kin.cache_class, 0] }, then: [{ return: "" }] }
+            - decl: [material, string, "cosmos-stage-1"]
+            - set: [material, { call: [<.put, material, "${kin.cache_class}"] }]
+            - set: [material, { call: [<.put, material, kin.command] }]
+            - set: [material, { call: [<.put, material, kin.bindings] }]
+            - set: [material, { call: [<.put, material, kin.image] }]
+            - set: [material, { call: [<.put, material, kin.shares] }]
+            - set: [material, { call: [<.put, material, kin.prev_key] }]
+            # `pure` claims the stage reads nothing outside its inputs, so the
+            # probe has nothing to add; `resolved` moves with what it printed.
+            - decl: [probe, string, ""]
+            - if: { condition: { eq: [kin.cache_class, 1] }, then: [{ set: [probe, kin.probe_out] }] }
+            - set: [material, { call: [<.put, material, probe] }]
+            - return: { call: [hash.sha256, material] }
+
+      - def:
+          name: put
+          access: public
+          args: [[material, string], [field, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - return: "${material}${field.len}:${field}"
+
+      # stage_nr: "<run>-<lane>-<nr>" → nr, the index of the stage's layer.
+      # -1 = unknown form; then there is no layer and no key.
+      - def:
+          name: stage_nr
+          access: public
+          static_off: ["str_cmp"]
+          args: [[stage_id, string]]
+          return: i32
+          body:
+            - decl: [parts, list<string>, { call: [stage_id.split, "-"] }]
+            - if: { condition: { lt: [parts.len, 2] }, then: [{ return: { -: [0, 1] } }] }
+            - decl: [tail, string, { at: [parts, { -: [parts.len, 1] }] }]
+            - if: { condition: { eq: [tail.len, 0] }, then: [{ return: { -: [0, 1] } }] }
+            - return: { call: [tail.parse_i32] }

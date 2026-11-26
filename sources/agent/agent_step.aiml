@@ -13,6 +13,8 @@
 - import: "sources/models/agent_proto.aiml"   # OutStream
 - import: "sources/shared/out_pump.aiml"
 - import: "sources/shared/dir_stat.aiml"
+- import: "sources/shared/step_cache_api.aiml"
+- import: "sources/shared/step_keys.aiml"
 
 - class:
     name: StepWorker
@@ -624,7 +626,10 @@
           name: claim
           access: public
           static_off: ["str_cmp"]
-          args: [[sess, mirror_session], [now_ms, i64]]
+          # The step cache comes IN, per call (doc/spec/96 §96.6): the worker
+          # holds no cache state of its own, and which store answers is the
+          # composition root's choice.
+          args: [[sess, mirror_session], [now_ms, i64], [cache, ref<cosmos.cache.StepCache>]]
           return: i32
           body:
             - if: { condition: { eq: [{ call: [<.busy] }, 1] }, then: [{ return: 0 }] }
@@ -770,6 +775,15 @@
                         # Leser des Abbilds (ufo layer pull), welche Stufe sie schrieb.
                         - call: [io.mkdir_all, ldir]
                         - call: [io.write_file, "${ldir}/layer.meta", "stage=${got.stage_name}\nbindings=${got.bindings}\nagent=${<.agent_id}\nrun=${got.run_id}\n"]
+                        # doc/spec/96 §96.6 steps 1–4: probe, key, lookup.  A
+                        # hit puts the kept layer in place and writes the
+                        # status the run would have written — `tick` reports
+                        # it like any other ending, nothing runs.
+                        - if:
+                            condition: { eq: [{ call: [<.try_reuse, cache, got, ldir] }, 1] }
+                            then:
+                              - call: [log.info, "[cache] ${got.stage_name}: ohne Ausfuehrung entschieden (Schritt-Cache oder Sonde)"]
+                              - return: 1
                         - call: [io.write_file, script, { call: [<.layer_script, ldir, { call: [<.lower_chain, got.run_id, sidx, got.base] }, <.step_dir, got.requires, <.run_ws] }]
                         - call: [argv.push, "unshare"]
                         - call: [argv.push, "-m"]
@@ -1085,7 +1099,7 @@
           name: tick
           access: public
           static_off: ["str_cmp"]
-          args: [[sess, mirror_session], [now_ms, i64]]
+          args: [[sess, mirror_session], [now_ms, i64], [cache, ref<cosmos.cache.StepCache>]]
           body:
             # Zuerst die Nachtraege: der Agent ist gerade erst zurueckgekehrt
             # und hat die Antworten schon in der Hand.  Ergebnisse vor
@@ -1124,6 +1138,8 @@
             # Erst festhalten, dann melden, erst nach Antwort vergessen
             # (F103-16).  Die Reihenfolge ist der ganze Punkt.
             - call: [<.mark_done, <.stage_id, code]
+            # doc/spec/96 §96.6 step 6: a run that had a key keeps its layer.
+            - call: [<.keep_layer, cache, code]
             # 124 ist die Zeitgrenze (spec/23 §5.3).  Ohne Begruendung sieht ein
             # abgebrochener Schritt wie ein beliebiger Fehlschlag aus.
             - decl: [why, string, ""]
@@ -1141,6 +1157,116 @@
             - call: [<.forget, <.stage_id]
             - set: [<.run_id, ""]
             - set: [<.stage_id, ""]
+
+      # ── Schritt-Cache (doc/spec/96 §96.6) ───────────────────────────────
+      # read_word: a one-line file, trimmed; "" when it is not there.
+      - def:
+          name: read_word
+          access: public
+          args: [[file, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [file_p, path, file]
+            - if: { condition: { eq: [{ call: [io.is_file, file_p] }, false] }, then: [{ return: "" }] }
+            - decl: [raw, string, { call: [io.read_file, file] }]
+            - return: { call: [raw.trim] }
+
+      # probe: runs `resolve:` (aiml spec/62 §9) — always, never from the
+      # cache.  It asks the OUTSIDE world (which commit a branch is on), so it
+      # runs on the agent, not on the stage's layers.  "" + failure = no key.
+      - def:
+          name: probe
+          access: public
+          args: [[resolve, string]]
+          return: { type: list<string>, lifetime: producer }
+          body:
+            - decl: [out, list<string>]
+            - decl: [argv, list<string>, ["/bin/sh"]]
+            - call: [argv.push, "-lc"]
+            - call: [argv.push, resolve]
+            - decl: [proc, process, { call: [sys.exe, argv, { capture: true, timeout: 60000, cwd: "${<.run_ws}" }] }]
+            - if: { condition: { eq: [proc, null] }, then: [{ call: [out.push, "-1"] }, { call: [out.push, ""] }, { return: out }] }
+            - decl: [code, i32, { call: [proc.wait] }]
+            - decl: [said, string, proc.stdout_buffer]
+            - call: [out.push, "${code}"]
+            - call: [out.push, { call: [said.trim] }]
+            - return: out
+
+      # try_reuse: 1 = the stage is decided without running — its layer came
+      # out of the cache, or its probe failed — and its status is written;
+      # 0 = it runs.  Leaves `step_key` in the step's directory
+      # when the stage has a key, so the ending can keep and report it.
+      - def:
+          name: try_reuse
+          access: public
+          static_off: ["str_cmp"]
+          args: [[cache, ref<cosmos.cache.StepCache>], [got, StepAssignment], [ldir, string]]
+          return: i32
+          body:
+            - decl: [key_file, path, "${<.step_dir}/step_key"]
+            - decl: [used_file, path, "${<.step_dir}/reused"]
+            - if: { condition: { eq: [{ call: [io.is_file, key_file] }, true] }, then: [{ call: [io.remove, key_file] }] }
+            - if: { condition: { eq: [{ call: [io.is_file, used_file] }, true] }, then: [{ call: [io.remove, used_file] }] }
+            - if: { condition: { le: [got.cache_class, 0] }, then: [{ return: 0 }] }
+            - decl: [kin, cosmos.cache.StageKeyIn]
+            - set: [kin.cache_class, got.cache_class]
+            - set: [kin.command, got.command]
+            - set: [kin.bindings, got.bindings]
+            - set: [kin.image, <.image]
+            - set: [kin.shares, <.shares]
+            - set: [kin.prev_key, got.prev_key]
+            - if:
+                condition: { eq: [got.cache_class, 1] }
+                then:
+                  # `resolved` without a probe claims nothing it could prove.
+                  - if:
+                      condition: { eq: [got.resolve.len, 0] }
+                      then:
+                        - call: [log.warn, "[cache] ${got.stage_name}: resolved ohne resolve: — laeuft ohne Cache"]
+                        - return: 0
+                  - decl: [answer, list<string>, { call: [<.probe, got.resolve] }]
+                  # A failed probe FAILS the stage (aiml F62-160, §9): an
+                  # unknown key must not turn into "nothing has changed".
+                  - if:
+                      condition: { neq: [{ at: [answer, 0] }, "0"] }
+                      then:
+                        - call: [log.warn, "[cache] ${got.stage_name}: Sonde endete mit ${{ at: [answer, 0] }} — Stufe fehlgeschlagen"]
+                        - call: [io.write_file, "${<.step_dir}/err", "[cosmos] resolve: endete mit ${{ at: [answer, 0] }} — der Schluessel ist unbekannt, die Stufe schlaegt fehl (aiml spec/62 F62-160)\n"]
+                        - call: [io.write_file, "${<.step_dir}/status", "125\n"]
+                        - return: 1
+                  - set: [kin.probe_out, { at: [answer, 1] }]
+            - decl: [keys, cosmos.cache.StepKeys]
+            - decl: [step_key, string, { call: [keys.stage_key, kin] }]
+            - if: { condition: { eq: [step_key.len, 0] }, then: [{ return: 0 }] }
+            - call: [io.write_file, "${<.step_dir}/step_key", "${step_key}\n"]
+            - if: { condition: { eq: [{ call: [cache.store.has, step_key] }, 0] }, then: [{ return: 0 }] }
+            - if: { condition: { neq: [{ call: [cache.store.restore, step_key, "${ldir}/upper"] }, 0] }, then: [{ return: 0 }] }
+            - decl: [code, i32, { call: [cache.store.exit_of, step_key] }]
+            - call: [io.write_file, "${<.step_dir}/reused", "1\n"]
+            - call: [io.write_file, "${<.step_dir}/out", "[cosmos] Schicht aus dem Schritt-Cache (Schluessel ${step_key}) — nicht ausgefuehrt\n"]
+            - call: [io.write_file, "${<.step_dir}/status", "${code}\n"]
+            - return: 1
+
+      # keep_layer: a stage that RAN with a key and succeeded hands its layer
+      # to the cache.  A reused one is there already; a failed one is not a
+      # result anyone should build on.
+      - def:
+          name: keep_layer
+          access: public
+          static_off: ["str_cmp"]
+          args: [[cache, ref<cosmos.cache.StepCache>], [code, i32]]
+          body:
+            - if: { condition: { neq: [code, 0] }, then: [{ return: null }] }
+            - decl: [step_key, string, { call: [<.read_word, "${<.step_dir}/step_key"] }]
+            - if: { condition: { eq: [step_key.len, 0] }, then: [{ return: null }] }
+            - if: { condition: { eq: [{ call: [<.read_word, "${<.step_dir}/reused"] }, "1"] }, then: [{ return: null }] }
+            - decl: [sidx, i32, { call: [<.stage_index, <.stage_id] }]
+            - if: { condition: { lt: [sidx, 0] }, then: [{ return: null }] }
+            - decl: [upper, string, "${{ call: [<.layer_root, <.run_id] }}/${sidx}/upper"]
+            - if:
+                condition: { eq: [{ call: [cache.store.keep, step_key, upper, code] }, 0] }
+                then: [{ call: [log.info, "[cache] ${<.stage_id}: Schicht unter ${step_key} aufgehoben"] }]
+                else: [{ call: [log.warn, "[cache] ${<.stage_id}: Schicht liess sich nicht aufheben — der naechste Lauf fuehrt die Stufe aus"] }]
 
       # Rueckgabe: 1 = der Server hat GEANTWORTET (angenommen oder abgelehnt —
       # beides ist eine Entscheidung), 0 = die Nachricht kam nicht durch.
@@ -1163,6 +1289,14 @@
             - set: [rep.attempt, <.attempt]
             - set: [rep.exit_code, code]
             - set: [rep.output, note]
+            # The key the stage ENDED with (doc/spec/96 §96.6): only a
+            # success has one — a failed stage ends the chain.
+            - decl: [key_dir, string, "${<.work_root}/${run_id}/${stage_id}"]
+            - if:
+                condition: { eq: [code, 0] }
+                then:
+                  - set: [rep.step_key, { call: [<.read_word, "${key_dir}/step_key"] }]
+                  - if: { condition: { eq: [{ call: [<.read_word, "${key_dir}/reused"] }, "1"] }, then: [{ set: [rep.reused, 1] }] }
             # Die eigene Schicht messen (doc/spec/107 §107.1c): nur hier ist sie
             # sichtbar, und nur jetzt ist sie fertig.  Die Zahlen reisen mit dem
             # Bericht, damit es keinen zweiten Kanal fuer denselben Umstand gibt.

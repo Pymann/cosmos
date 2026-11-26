@@ -1,0 +1,157 @@
+# StageKeyStore — what each stage claims about reuse, and the key it ended with
+# (doc/spec/96 §96.6, aiml spec/62 §7–§9).
+#
+# Its own KV `stage_keys` for the reason run_layers has one: a field on
+# PipelineStage changes the schema fingerprint and every stored run becomes
+# unreadable (doc/spec/108 F108-2).  One row per stage, keyed by its stage id
+# "<run>-<lane>-<nr>": the chain is a chain of LAYERS, and stage nr of a lane
+# runs on that lane's layers 0..nr-1.
+#
+# The server does not compute keys.  It hands out the claim (class, probe) and
+# the previous stage's key; the agent runs the probe and forms the key,
+# because only it sees the probe's answer.  The report brings the key back.
+#
+# Static-Check (aiml spec/49 §14): 2 models, 1 class.
+- import: "sources/shared/step_keys.aiml"
+- import: "sources/models/step_dispatch.aiml"
+
+- model:
+    name: StageKeyRow
+    fields:
+      - [stage_id,    string]
+      - [cache_class, i32]      # ReuseClass as declared; 0 opaque
+      - [resolve,     string]   # the probe command (resolved only)
+      - [step_key,    string]   # what the agent reported; "" = none
+      - [reported,    i32]      # 1 = a report set step_key
+
+# What a claim hands the agent.  cache_class 0 = run it, no key.
+- model:
+    name: CacheClaim
+    fields:
+      - [cache_class, i32]
+      - [resolve,     string]
+      - [prev_key,    string]
+
+- class:
+    name: StageKeyStore
+    members:
+      - [rows, Kv<string:StageKeyRow>]
+      - [keys, cosmos.cache.StepKeys]
+    methods:
+      - def:
+          name: init
+          access: public
+          body:
+            - set: [<.rows, { call: [db.open_kv, "stage_keys", {persist: true}] }]
+
+      # slot: the row of stage `stage_nr` in the LANE of `stage_id`.  Stage
+      # ids are "<run>-<lane>-<nr>" and the run id may hold "-" itself, so
+      # only the last part is replaced.  Per lane, because two lanes are two
+      # stacks of layers: lane 1's stage 2 does not run on lane 0's stage 1.
+      - def:
+          name: slot
+          access: public
+          static_off: ["str_cmp"]
+          args: [[stage_id, string], [stage_nr, i32]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [parts, list<string>, { call: [stage_id.split, "-"] }]
+            - decl: [head, string, ""]
+            - decl: [pix, i32, 0]
+            - while:
+                condition: { lt: [pix, { -: [parts.len, 1] }] }
+                body:
+                  - set: [head, "${head}${{ at: [parts, pix] }}-"]
+                  - set: [pix, { +: [pix, 1] }]
+            - return: "${head}${stage_nr}"
+
+      # declare: what the pipeline says about this stage — `stg.cache` and
+      # `stg.resolve` (aiml spec/62 §9.1, F62-164).  An undeclared stage is
+      # opaque, the safe default: nothing is skipped.
+      - def:
+          name: declare
+          access: public
+          args: [[stage_id, string], [cache_class, i32], [resolve, string]]
+          body:
+            - decl: [slot_nr, i32, { call: [<.keys.stage_nr, stage_id] }]
+            - if: { condition: { lt: [slot_nr, 0] }, then: [{ return: null }] }
+            - decl: [row, StageKeyRow]
+            - set: [row.stage_id, stage_id]
+            - set: [row.cache_class, cache_class]
+            - set: [row.resolve, resolve]
+            - call: [<.rows.set, { call: [<.slot, stage_id, slot_nr] }, row]
+
+      # claim_of: what the agent gets.  The class falls to opaque when the
+      # chain is broken — a stage on unknown layers has no key (spec/62 §8).
+      # The chain is broken when the run sits on a base (its layers are not
+      # in the key yet) or when the previous stage ended without a key.
+      - def:
+          name: claim_of
+          access: public
+          static_off: ["str_cmp"]
+          args: [[stage_id, string], [base, string]]
+          return: { type: CacheClaim, lifetime: producer }
+          body:
+            - decl: [out, CacheClaim]
+            - set: [out.cache_class, 0]
+            - decl: [slot_nr, i32, { call: [<.keys.stage_nr, stage_id] }]
+            - if: { condition: { lt: [slot_nr, 0] }, then: [{ return: out }] }
+            - if: { condition: { gt: [base.len, 0] }, then: [{ return: out }] }
+            - decl: [here, string, { call: [<.slot, stage_id, slot_nr] }]
+            - if: { condition: { eq: [{ call: [<.rows.has, here] }, 0] }, then: [{ return: out }] }
+            - decl: [own, StageKeyRow, { call: [<.rows.get_copy, here] }]
+            - if: { condition: { neq: [own.stage_id, stage_id] }, then: [{ return: out }] }
+            - if:
+                condition: { gt: [slot_nr, 0] }
+                then:
+                  - decl: [before, string, { call: [<.slot, stage_id, { -: [slot_nr, 1] }] }]
+                  - if: { condition: { eq: [{ call: [<.rows.has, before] }, 0] }, then: [{ return: out }] }
+                  - decl: [prev, StageKeyRow, { call: [<.rows.get_copy, before] }]
+                  - if: { condition: { eq: [prev.step_key.len, 0] }, then: [{ return: out }] }
+                  - set: [out.prev_key, prev.step_key]
+            - set: [out.cache_class, own.cache_class]
+            - set: [out.resolve, own.resolve]
+            - return: out
+
+      # fill: the claim, straight into the assignment (base already set).
+      - def:
+          name: fill
+          access: public
+          args: [[out, ref<StepAssignment>], [stage_id, string]]
+          body:
+            - decl: [got, CacheClaim, { call: [<.claim_of, stage_id, out.base] }]
+            - set: [out.cache_class, got.cache_class]
+            - set: [out.resolve, got.resolve]
+            - set: [out.prev_key, got.prev_key]
+
+      # record: the key a stage ENDED with, from an accepted report.  "" is a
+      # value too: a stage that failed or was opaque ends the chain here, and
+      # a stale key from an earlier attempt must not keep it alive.
+      - def:
+          name: record
+          access: public
+          args: [[stage_id, string], [step_key, string]]
+          body:
+            - decl: [slot_nr, i32, { call: [<.keys.stage_nr, stage_id] }]
+            - if: { condition: { lt: [slot_nr, 0] }, then: [{ return: null }] }
+            - decl: [here, string, { call: [<.slot, stage_id, slot_nr] }]
+            - decl: [row, StageKeyRow]
+            - if: { condition: { gt: [{ call: [<.rows.has, here] }, 0] }, then: [{ set: [row, { call: [<.rows.get_copy, here] }] }] }
+            - set: [row.stage_id, stage_id]
+            - set: [row.step_key, step_key]
+            - set: [row.reported, 1]
+            - call: [<.rows.set, here, row]
+
+      # key_of: the recorded key of a stage ("" = none).  For tests and views.
+      - def:
+          name: key_of
+          access: public
+          args: [[stage_id, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [slot_nr, i32, { call: [<.keys.stage_nr, stage_id] }]
+            - if: { condition: { lt: [slot_nr, 0] }, then: [{ return: "" }] }
+            - decl: [here, string, { call: [<.slot, stage_id, slot_nr] }]
+            - if: { condition: { eq: [{ call: [<.rows.has, here] }, 0] }, then: [{ return: "" }] }
+            - decl: [row, StageKeyRow, { call: [<.rows.get_copy, here] }]
+            - return: row.step_key

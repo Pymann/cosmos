@@ -12,6 +12,7 @@
 - import: "sources/models/agent_exec.aiml"
 - import: "sources/shared/res_usage.aiml"
 - import: "sources/agent/agent_step.aiml"
+- import: "sources/agent/host_step_cache.aiml"
 - import: "sources/models/agent_cfg.aiml"
 - import: "sources/shared/out_pump.aiml"
 
@@ -20,6 +21,10 @@
     members:
       # doc/spec/103: die Schritt-Kette, getrennt von der AP1-Kommandokette.
       - [worker,     StepWorker]
+      # doc/spec/96 §96.6: the step cache.  Built HERE, the composition root,
+      # and handed to the worker per call — the worker only knows the
+      # interface.  On the host today; a kontor-backed one plugs in the same.
+      - [cache,      ptr<cosmos.cache.StepCache>]
       # doc/spec/109: die eigene Last.  Der Sampler haelt den Bezugspunkt der
       # letzten Messung — CPU ist eine Ableitung und braucht zwei Punkte (F109-2).
       - [res,        ResSampler]
@@ -53,6 +58,7 @@
             # Grenze, und sie gehoeren zum Wirt, nicht zur Kennung des Agenten.
             - call: [<.worker.set_shares, cfg.shares]
             - set: [<.worker.image, cfg.image]
+            - set: [<.cache, { new: cosmos.cache.HostStepCache, root: "${<.worker.work_root}/cache" }]
 
       - def:
           name: register
@@ -288,8 +294,8 @@
                               # Steht VOR dem Herzschlag, damit ein langer
                               # Schritt ihn nicht verzoegert — er laeuft
                               # detached, `tick` sieht nur nach.
-                              - call: [<.worker.tick, sess, nowm]
-                              - call: [<.worker.claim, sess, nowm]
+                              - call: [<.worker.tick, sess, nowm, <.cache]
+                              - call: [<.worker.claim, sess, nowm, <.cache]
                               - if:
                                   condition: { gt: [nowm, { +: [last_beat, 3000] }] }
                                   then:

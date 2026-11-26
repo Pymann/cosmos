@@ -1,0 +1,161 @@
+# The step cache without network and without an agent (doc/spec/96 §96.6).
+#
+# Three parts, each against its contract:
+#   - the key (sources/shared/step_keys.aiml): what moves it, what does not;
+#   - the store, ONLY through cosmos.cache.StepCache (the interface the agent
+#     sees), with the host implementation behind it;
+#   - the server's chain (sources/server/stage_keys.aiml): who may have a key.
+# Expected exit code: 0
+
+- import: "sources/shared/step_cache_api.aiml"
+- import: "sources/shared/step_keys.aiml"
+- import: "sources/agent/host_step_cache.aiml"
+- import: "sources/server/stage_keys.aiml"
+
+- def:
+    name: expect
+    args: [[what, string], [cond, i32]]
+    return: i32
+    body:
+      - if:
+          condition: { eq: [cond, 1] }
+          then: [{ call: [log.info, "  ok   ${what}"] }, { return: 0 }]
+      - call: [log.info, "  FAIL ${what}"]
+      - return: 1
+
+- def:
+    name: key_in
+    args: [[cache_class, i32], [command, string], [bindings, string], [prev_key, string], [probe_out, string]]
+    return: { type: cosmos.cache.StageKeyIn, lifetime: producer }
+    body:
+      - decl: [out, cosmos.cache.StageKeyIn]
+      - set: [out.cache_class, cache_class]
+      - set: [out.command, command]
+      - set: [out.bindings, bindings]
+      - set: [out.image, "ubuntu-base"]
+      - set: [out.prev_key, prev_key]
+      - set: [out.probe_out, probe_out]
+      - return: out
+
+- def:
+    name: key_case
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      - decl: [keys, cosmos.cache.StepKeys]
+      - decl: [base_key, string, { call: [keys.stage_key, { call: [key_in, 2, "make", "arch=x86_64", "", ""] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "pure stage has a 64-hex key", { eq: [base_key.len, 64] }] }] }]
+      - decl: [opaque, string, { call: [keys.stage_key, { call: [key_in, 0, "make", "arch=x86_64", "", ""] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "opaque stage has no key", { eq: [opaque.len, 0] }] }] }]
+      - decl: [again, string, { call: [keys.stage_key, { call: [key_in, 2, "make", "arch=x86_64", "", ""] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "same stage, same key", { eq: [again, base_key] }] }] }]
+      - decl: [other_cmd, string, { call: [keys.stage_key, { call: [key_in, 2, "make all", "arch=x86_64", "", ""] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "another command moves the key", { neq: [other_cmd, base_key] }] }] }]
+      - decl: [chained, string, { call: [keys.stage_key, { call: [key_in, 2, "make", "arch=x86_64", base_key, ""] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "another lower stack moves the key", { neq: [chained, base_key] }] }] }]
+      # Length-prefixed: shifting a byte from one field into the next is a
+      # different stage, not the same material.
+      - decl: [left, string, { call: [keys.stage_key, { call: [key_in, 2, "ab", "c", "", ""] }] }]
+      - decl: [right, string, { call: [keys.stage_key, { call: [key_in, 2, "a", "bc", "", ""] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "(ab,c) and (a,bc) are two keys", { neq: [left, right] }] }] }]
+      # resolved moves with what the probe printed; pure does not look.
+      - decl: [res_one, string, { call: [keys.stage_key, { call: [key_in, 1, "git clone", "", "", "c0ffee1"] }] }]
+      - decl: [res_two, string, { call: [keys.stage_key, { call: [key_in, 1, "git clone", "", "", "c0ffee2"] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "a new commit moves a resolved key", { neq: [res_one, res_two] }] }] }]
+      - decl: [pure_one, string, { call: [keys.stage_key, { call: [key_in, 2, "git clone", "", "", "c0ffee1"] }] }]
+      - decl: [pure_two, string, { call: [keys.stage_key, { call: [key_in, 2, "git clone", "", "", "c0ffee2"] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "a pure key ignores the probe", { eq: [pure_one, pure_two] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "the class is part of the key", { neq: [pure_one, res_one] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "stage_nr reads <run>-<lane>-<nr>", { eq: [{ call: [keys.stage_nr, "run-7-0-3"] }, 3] }] }] }]
+      - return: fails
+
+# The store, seen the way the agent sees it: only the interface.
+- def:
+    name: store_case
+    static_off: ["str_cmp"]
+    args: [[cache, ref<cosmos.cache.StepCache>], [work, string]]
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      - decl: [keys, cosmos.cache.StepKeys]
+      - decl: [step_key, string, { call: [keys.stage_key, { call: [key_in, 2, "apt-get install gcc", "", "", ""] }] }]
+      - decl: [made, path, "${work}/made/upper/usr/bin"]
+      - call: [io.mkdir_all, made]
+      - call: [io.write_file, "${work}/made/upper/usr/bin/gcc", "binary\n"]
+      - set: [fails, { +: [fails, { call: [expect, "unknown key is not there", { eq: [{ call: [cache.store.has, step_key] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "keep takes the layer", { eq: [{ call: [cache.store.keep, step_key, "${work}/made/upper", 0] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "then it is there", { eq: [{ call: [cache.store.has, step_key] }, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "with its exit code", { eq: [{ call: [cache.store.exit_of, step_key] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "keeping twice is fine", { eq: [{ call: [cache.store.keep, step_key, "${work}/made/upper", 0] }, 0] }] }] }]
+      # The target holds a stale file from an earlier attempt: after restore
+      # it must be exactly the kept layer, nothing more.
+      - decl: [into, path, "${work}/next/upper"]
+      - call: [io.mkdir_all, into]
+      - call: [io.write_file, "${work}/next/upper/stale", "old\n"]
+      - set: [fails, { +: [fails, { call: [expect, "restore puts it back", { eq: [{ call: [cache.store.restore, step_key, "${work}/next/upper"] }, 0] }] }] }]
+      - decl: [got, string, { call: [io.read_file, "${work}/next/upper/usr/bin/gcc"] }]
+      - set: [fails, { +: [fails, { call: [expect, "with the content", { eq: [got, "binary\n"] }] }] }]
+      - decl: [stale, path, "${work}/next/upper/stale"]
+      - set: [fails, { +: [fails, { call: [expect, "and without the stale file", { eq: [{ call: [io.is_file, stale] }, false] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "a key that is a path is refused", { neq: [{ call: [cache.store.keep, "../../etc", "${work}/made/upper", 0] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "restore of an unknown key fails", { neq: [{ call: [cache.store.restore, { call: [zero_key] }, "${work}/next/upper"] }, 0] }] }] }]
+      - return: fails
+
+- def:
+    name: zero_key
+    return: { type: string, lifetime: producer }
+    body:
+      - return: "0000000000000000000000000000000000000000000000000000000000000000"
+
+- def:
+    name: chain_case
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      - decl: [store, StageKeyStore]
+      - call: [store.init]
+      - call: [store.declare, "r1-0-0", 2, ""]
+      - call: [store.declare, "r1-0-1", 1, "git rev-parse HEAD"]
+      - decl: [first, CacheClaim, { call: [store.claim_of, "r1-0-0", ""] }]
+      - set: [fails, { +: [fails, { call: [expect, "first stage keeps its class", { eq: [first.cache_class, 2] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "and has no previous key", { eq: [first.prev_key.len, 0] }] }] }]
+      - decl: [early, CacheClaim, { call: [store.claim_of, "r1-0-1", ""] }]
+      - set: [fails, { +: [fails, { call: [expect, "second stage before the first reported: opaque", { eq: [early.cache_class, 0] }] }] }]
+      - call: [store.record, "r1-0-0", "abc123"]
+      - decl: [later, CacheClaim, { call: [store.claim_of, "r1-0-1", ""] }]
+      - set: [fails, { +: [fails, { call: [expect, "after the report it chains on that key", { eq: [later.prev_key, "abc123"] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "with its own class and probe", { '&&': [{ eq: [later.cache_class, 1] }, { eq: [later.resolve, "git rev-parse HEAD"] }] }] }] }]
+      - decl: [based, CacheClaim, { call: [store.claim_of, "r1-0-1", "run:r0"] }]
+      - set: [fails, { +: [fails, { call: [expect, "a run on a base is opaque (base not in the key yet)", { eq: [based.cache_class, 0] }] }] }]
+      - call: [store.record, "r1-0-0", ""]
+      - decl: [broken, CacheClaim, { call: [store.claim_of, "r1-0-1", ""] }]
+      - set: [fails, { +: [fails, { call: [expect, "a failed first stage ends the chain", { eq: [broken.cache_class, 0] }] }] }]
+      # Another lane is another stack: its stage 1 does not chain on lane 0.
+      - call: [store.declare, "r1-1-1", 2, ""]
+      - call: [store.record, "r1-0-0", "abc123"]
+      - decl: [lane_two, CacheClaim, { call: [store.claim_of, "r1-1-1", ""] }]
+      - set: [fails, { +: [fails, { call: [expect, "a stage chains only within its lane", { eq: [lane_two.cache_class, 0] }] }] }]
+      - decl: [silent, CacheClaim, { call: [store.claim_of, "r1-0-2", ""] }]
+      - set: [fails, { +: [fails, { call: [expect, "an undeclared stage is opaque", { eq: [silent.cache_class, 0] }] }] }]
+      - return: fails
+
+- def:
+    name: main
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      - call: [log.info, "step key"]
+      - set: [fails, { +: [fails, { call: [key_case] }] }]
+      - call: [log.info, "layer store (cosmos.cache.StepCache)"]
+      - decl: [work, string, "cache_work"]
+      - decl: [work_p, path, work]
+      - if: { condition: { eq: [{ call: [io.is_dir, work_p] }, true] }, then: [{ call: [io.remove_all, work_p] }] }
+      - decl: [cache, ptr<cosmos.cache.StepCache>, { new: cosmos.cache.HostStepCache, root: "${work}/cache" }]
+      - set: [fails, { +: [fails, { call: [store_case, cache, work] }] }]
+      - call: [log.info, "key chain (server)"]
+      - set: [fails, { +: [fails, { call: [chain_case] }] }]
+      - if: { condition: { gt: [fails, 0] }, then: [{ call: [log.info, "${fails} check(s) FAILED"] }, { return: 1 }] }
+      - call: [log.info, "all step cache checks PASS"]
+      - return: 0

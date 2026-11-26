@@ -1,0 +1,129 @@
+# cosmos.cache.HostStepCache — the step cache on the agent's own host.
+#
+# Layers are kept as plain directories, one per key:
+#
+#   <root>/<step_key>/upper/   the stage's overlayfs upper, whiteouts included
+#   <root>/<step_key>/exit     the exit code it ended with
+#
+# Copies go through `cp -a`, which keeps owners, modes, device nodes and the
+# whiteout character devices — everything overlayfs reads back.  A key is
+# written to `<key>.part` first and renamed into place, so a store that dies
+# half way never leaves a half layer under a real key.
+#
+# Static-Check (aiml spec/49 §14): 1 class, 1 classgroup.
+- namespace: cosmos.cache
+
+- import: "sources/shared/step_cache_api.aiml"
+
+- class:
+    name: DirLayerStore
+    implements: [cosmos.cache.LayerStore]
+    members:
+      - [root, string, "steps/cache"]
+    methods:
+      - def:
+          name: setup
+          args: [[root, string]]
+          body:
+            - if: { condition: { gt: [root.len, 0] }, then: [{ set: [<.root, root] }] }
+
+      # A key is 64 hex.  Anything else is refused, so a key can never name a
+      # path outside the store ("../", "/").
+      - def:
+          name: key_ok
+          args: [[step_key, string]]
+          return: i32
+          body:
+            - if: { condition: { neq: [step_key.len, 64] }, then: [{ return: 0 }] }
+            - if: { condition: { gt: [{ call: [step_key.index_of, "/"] }, -1] }, then: [{ return: 0 }] }
+            - if: { condition: { gt: [{ call: [step_key.index_of, "."] }, -1] }, then: [{ return: 0 }] }
+            - return: 1
+
+      - def:
+          name: copy_tree
+          args: [[from_dir, string], [to_dir, string]]
+          return: i32
+          body:
+            - decl: [argv, list<string>, ["cp"]]
+            - call: [argv.push, "-a"]
+            - call: [argv.push, "${from_dir}/."]
+            - call: [argv.push, to_dir]
+            - decl: [proc, process, { call: [sys.exe, argv, { capture: true, timeout: 600000 }] }]
+            - if: { condition: { eq: [proc, null] }, then: [{ return: 1 }] }
+            - decl: [code, i32, { call: [proc.wait] }]
+            - if:
+                condition: { neq: [code, 0] }
+                then: [{ call: [log.warn, "[cache] cp ${from_dir} -> ${to_dir} ended with ${code}: ${proc.stderr_buffer}"] }]
+            - return: code
+
+      - def:
+          name: has
+          args: [[step_key, string]]
+          return: i32
+          body:
+            - if: { condition: { eq: [{ call: [<.key_ok, step_key] }, 0] }, then: [{ return: 0 }] }
+            - decl: [mark, path, "${<.root}/${step_key}/exit"]
+            - if: { condition: { eq: [{ call: [io.is_file, mark] }, true] }, then: [{ return: 1 }] }
+            - return: 0
+
+      - def:
+          name: exit_of
+          args: [[step_key, string]]
+          return: i32
+          body:
+            - if: { condition: { eq: [{ call: [<.has, step_key] }, 0] }, then: [{ return: -1 }] }
+            - decl: [raw, string, { call: [io.read_file, "${<.root}/${step_key}/exit"] }]
+            - decl: [clean, string, { call: [raw.trim] }]
+            - return: { call: [clean.parse_i32] }
+
+      - def:
+          name: restore
+          args: [[step_key, string], [upper, string]]
+          return: i32
+          body:
+            - if: { condition: { eq: [{ call: [<.has, step_key] }, 0] }, then: [{ return: 1 }] }
+            - decl: [up_p, path, upper]
+            - if: { condition: { eq: [{ call: [io.is_dir, up_p] }, true] }, then: [{ call: [io.remove_all, up_p] }] }
+            - call: [io.mkdir_all, up_p]
+            - decl: [code, i32, { call: [<.copy_tree, "${<.root}/${step_key}/upper", upper] }]
+            # Half a layer is worse than none: the stage would run on a stack
+            # nobody ever built.  Empty it, the caller then runs the stage.
+            - if:
+                condition: { neq: [code, 0] }
+                then:
+                  - call: [io.remove_all, up_p]
+                  - call: [io.mkdir_all, up_p]
+            - return: code
+
+      - def:
+          name: keep
+          args: [[step_key, string], [upper, string], [exit_code, i32]]
+          return: i32
+          body:
+            - if: { condition: { eq: [{ call: [<.key_ok, step_key] }, 0] }, then: [{ return: 1 }] }
+            - if: { condition: { eq: [{ call: [<.has, step_key] }, 1] }, then: [{ return: 0 }] }
+            - decl: [up_p, path, upper]
+            - if: { condition: { eq: [{ call: [io.is_dir, up_p] }, false] }, then: [{ return: 1 }] }
+            - decl: [part, string, "${<.root}/${step_key}.part"]
+            - decl: [part_p, path, part]
+            - if: { condition: { eq: [{ call: [io.is_dir, part_p] }, true] }, then: [{ call: [io.remove_all, part_p] }] }
+            - decl: [part_up, path, "${part}/upper"]
+            - call: [io.mkdir_all, part_up]
+            - if:
+                condition: { neq: [{ call: [<.copy_tree, upper, "${part}/upper"] }, 0] }
+                then:
+                  - call: [io.remove_all, part_p]
+                  - return: 1
+            - call: [io.write_file, "${part}/exit", "${exit_code}\n"]
+            - decl: [dest_p, path, "${<.root}/${step_key}"]
+            - call: [io.rename, part_p, dest_p]
+            # 0 = kept: has() is 1 once the rename landed.
+            - return: { -: [1, { call: [<.has, step_key] }] }
+
+- classgroup:
+    name: HostStepCache
+    implements: [cosmos.cache.StepCache]
+    params: [[root, string]]
+    instances:
+      - { class: cosmos.cache.DirLayerStore, instance: store, constructor: [setup, root] }
+    export: [store]

@@ -1,0 +1,30 @@
+# cosmos.cache — the step cache contract (doc/spec/96 §96.6, aiml spec/62 §7–§9).
+#
+# A stage that declares reuse (`pure` or `resolved`) and whose key is known
+# may be skipped: its layer comes out of a store instead of out of a run.
+# Callers program against THIS file only.  Which store sits behind it is the
+# composition root's choice (agent_exec builds a HostStepCache today; a store
+# that talks to kontor through ufo's LayerKit comes later), and the instance
+# is handed in per call — no global holds cache state.
+#
+# Static-Check (aiml spec/49 §14): 1 interface, 1 groupinterface.
+- namespace: cosmos.cache
+
+- interface:
+    name: LayerStore
+    methods:
+      # 1 = a layer for this key is kept, 0 = not.
+      - [has, i32, [[step_key, string]]]
+      # The exit code the kept stage ended with (only exit 0 is kept today).
+      - [exit_of, i32, [[step_key, string]]]
+      # Replaces `upper` with the kept layer.  0 = done, else it failed and
+      # `upper` must be treated as empty (the stage then runs).
+      - [restore, i32, [[step_key, string], [upper, string]]]
+      # Keeps `upper` under `step_key`.  0 = kept.  Twice the same key keeps
+      # the first: a key names one content, and the first one is as good.
+      - [keep, i32, [[step_key, string], [upper, string], [exit_code, i32]]]
+
+- groupinterface:
+    name: StepCache
+    exports:
+      - [store, LayerStore]

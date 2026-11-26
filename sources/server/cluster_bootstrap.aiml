@@ -15,6 +15,7 @@
 - import: "sources/shared/job_policy.aiml"
 - import: "sources/server/job_config.aiml"
 - import: "sources/server/stage_marks.aiml"
+- import: "sources/server/stage_keys.aiml"
 - import: "sources/models/rt_spawn.aiml"
 - import: "sources/shared/cluster_view.aiml"
 - import: "sources/shared/res_usage.aiml"
@@ -51,6 +52,8 @@
       - [jobcfg, JobConfig]
       # doc/spec/113: colours a step carries beside its outcome (magenta).
       - [marks, StageMarkStore]
+      # doc/spec/96 §96.6: reuse claims and the keys stages ended with.
+      - [keys, StageKeyStore]
       # Wem wurde WANN ein Container-Auftrag gegeben (doc/spec/110 §110.36).
       # Im Speicher, nicht auf Platte: ein Auftrag ueberlebt den Controller
       # nicht — der neue fragt ohnehin neu.
@@ -69,6 +72,7 @@
             - set: [<.run_layers, { call: [db.open_kv, "run_layers", {persist: true}] }]
             - call: [<.jobcfg.init]
             - call: [<.marks.init]
+            - call: [<.keys.init]
 
       - def:
           name: make_stage
@@ -241,56 +245,41 @@
                         - set: [out.lease_until, got.lease_until]
                         - set: [out.attempt, got.attempt]
                         - set: [out.timeout_ms, got.timeout_ms]
-                        - set: [out.command, { call: [<.command_of, rkey, got.stage_id] }]
+                        - decl: [srow, PipelineStage, { call: [<.stage_row, rkey, got.stage_id] }]
+                        - set: [out.command, srow.command]
                         # Diagnose: der Agent weiss selbst, worin er laeuft —
                         # aber in der Zuteilung steht, worin die Stufe laufen
                         # WOLLTE.  Stimmen beide nicht ueberein, ist das ein
                         # Fehler der Zuteilung und kein Raetsel im Protokoll.
                         - set: [out.image, "${who.image}"]
-                        - set: [out.requires, { call: [<.requires_of, rkey, got.stage_id] }]
+                        - set: [out.requires, srow.requires]
                         - set: [out.base, { call: [<.base_of, rkey] }]
+                        - call: [<.keys.fill, out, got.stage_id]
                         - call: [<.stamp_stage, rkey, { call: [<.sched.bare_name, got.stage_name] }, got.bindings, now_ms, 1]
                         - return: out
             - return: out
 
-      # Die Vorbedingungen der Stufe (aiml F62-126) — wie `command_of`.
+      # Die Zeile der Stufe im Lauf: Befehl (doc/spec/103 §103.3) und
+      # Vorbedingungen (aiml F62-126).  Getrennt vom Scheduler, weil der nichts
+      # ueber Befehle wissen muss.  Eine leere Zeile, wenn es sie nicht gibt.
       - def:
-          name: requires_of
+          name: stage_row
           access: public
           static_off: ["str_cmp"]
           args: [[run_id, string], [stage_id, string]]
-          return: { type: string, lifetime: producer }
+          return: { type: PipelineStage, lifetime: producer }
           body:
-            - if: { condition: { eq: [{ call: [<.pipelines.has, run_id] }, 0] }, then: [{ return: "" }] }
-            - decl: [prun, PipelineRun, { call: [<.pipelines.get_copy, run_id] }]
-            - decl: [rqx, i32, 0]
-            - while:
-                condition: { lt: [rqx, prun.stages.len] }
-                body:
-                  - decl: [one, PipelineStage, { at: [prun.stages, rqx] }]
-                  - set: [rqx, { +: [rqx, 1] }]
-                  - if: { condition: { eq: [one.stage_id, stage_id] }, then: [{ return: one.requires }] }
-            - return: ""
-
-      # Der Befehl der Stufe (doc/spec/103 §103.3).  Getrennt, weil der
-      # Scheduler nichts ueber Befehle wissen muss.
-      - def:
-          name: command_of
-          access: public
-          static_off: ["str_cmp"]
-          args: [[run_id, string], [stage_id, string]]
-          return: { type: string, lifetime: producer }
-          body:
-            - if: { condition: { eq: [{ call: [<.pipelines.has, run_id] }, 0] }, then: [{ return: "" }] }
+            - decl: [none, PipelineStage]
+            - if: { condition: { eq: [{ call: [<.pipelines.has, run_id] }, 0] }, then: [{ return: none }] }
             - decl: [run, ref<PipelineRun>, { call: [<.pipelines.get, run_id] }]
             - decl: [cix, i32, 0]
             - while:
                 condition: { lt: [cix, run.stages.len] }
                 body:
                   - decl: [stg_row, PipelineStage, { at: [run.stages, cix] }]
-                  - if: { condition: { eq: [stg_row.stage_id, stage_id] }, then: [{ return: stg_row.command }] }
+                  - if: { condition: { eq: [stg_row.stage_id, stage_id] }, then: [{ return: stg_row }] }
                   - set: [cix, { +: [cix, 1] }]
-            - return: ""
+            - return: none
 
       # set_base / base_of: worauf ein Lauf aufsetzt (aiml spec/62 §18.4).
       # Neben dem Lauf, im selben Datensatz wie seine Schichten — es ist
@@ -475,6 +464,9 @@
                   - set: [row_new.bytes, rep.layer_bytes]
                   - set: [row_new.files, rep.layer_files]
                   - set: [row_new.reuse, ReuseClass.opaque]
+                  # A layer out of the step cache is content that is stored
+                  # already (doc/spec/96 §96.6 step 4).
+                  - set: [row_new.stored, rep.reused]
                   - call: [fresh.push, row_new]
                   - set: [bag.rows, fresh]
                   - call: [<.run_layers.set, rep.run_id, bag]
@@ -509,7 +501,7 @@
             # Die Schicht gehoert zur Meldung, nicht zur Annahme: auch ein
             # fehlgeschlagener Schritt hat etwas hinterlassen, und wer „ab hier
             # nochmal" drueckt, soll sehen, wie viel das war.
-            - if: { condition: { eq: [took, 0] }, then: [{ call: [<.note_layer, rep, run] }] }
+            - if: { condition: { eq: [took, 0] }, then: [{ call: [<.note_layer, rep, run] }, { call: [<.keys.record, stage_id, rep.step_key] }] }
             - if:
                 condition: { eq: [took, 0] }
                 then:

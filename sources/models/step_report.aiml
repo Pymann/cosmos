@@ -21,6 +21,11 @@
       # hat nichts geschrieben).
       - [layer_bytes, i64]
       - [layer_files, i32]
+      # The key this stage ended with ("" = none: opaque, failed, or no
+      # layer) and whether its layer came out of the step cache instead of a
+      # run (doc/spec/96 §96.6).  The next stage's key chains on this one.
+      - [step_key,    string]
+      - [reused,      i32]
 
 - model:
     name: StepAck

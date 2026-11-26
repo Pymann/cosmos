@@ -99,6 +99,33 @@ Nach einigen Wochen ist damit belegt, welche Deklarationen tragen — statt es z
    `step_key → Adresse` beim Server melden.
 7. `cache: opaque` → Schritte 3–5 entfallen vollständig.
 
+### 96.6a Implementation (2026-11)
+
+- **Contract:** `sources/shared/step_cache_api.aiml`, namespace `cosmos.cache`. The interface
+  `LayerStore` (`has`, `exit_of`, `restore`, `keep`) is exported by the groupinterface
+  `StepCache`. The agent sees only that interface. The composition root (`AgentExec`) builds
+  `HostStepCache(root)` (`sources/agent/host_step_cache.aiml`, layers under
+  `<work_root>/cache/<key>/`) and hands it to `StepWorker.claim/tick` per call, so no global
+  holds cache state. A store backed by kontor through ufo's LayerKit plugs in behind the same
+  interface.
+- **Key:** `cosmos.cache.StepKeys.stage_key` (`sources/shared/step_keys.aiml`), length-prefixed.
+  It covers the class, command, lane bindings, image, shares, the previous stage's key and the
+  probe output (`resolved` only). Chaining on the previous key makes a stage on a different
+  lower stack a different stage.
+- **Chain on the server:** `StageKeyStore` (`sources/server/stage_keys.aiml`) keeps its own KV
+  `stage_keys`, one row per stage id (F108-2).
+  - The claim hands out class, probe and previous key (`StepAssignment.cache_class/resolve/prev_key`).
+  - The report brings back the key the stage ended with (`StepReportReq.step_key/reused`).
+  - The class falls to opaque when the run sits on a `base:`, when the previous stage of the
+    **same lane** has no key, or when the stage was not declared.
+- **Agent:** probe → key → `has` → `restore` into `layers/<nr>/upper`, then write the status
+  file. Nothing runs, and `tick` reports as usual. Without a hit the stage runs. On exit 0 its
+  upper is kept under the key. Only successes are kept, and a failed stage ends the chain. A probe that exits
+  non-zero fails the stage with 125 (aiml F62-160): an unknown key never means "unchanged".
+- **Where the class comes from:** `stg.cache` and `stg.resolve` (aiml spec/62 §9.1, F62-159 to
+  F62-164: the weakest step decides the stage). Until cosmos builds against an aiml release with
+  those readers, no stage is declared and everything stays opaque.
+
 ## 96.7 Abnahme
 
 - **A96-1** Derselbe Lauf zweimal: der zweite überspringt alle `pure`- und `resolved`-Schritte,
