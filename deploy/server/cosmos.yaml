@@ -1,0 +1,14 @@
+# Erklaerung des kontor-Servers (doc/spec/111 §111.1, doc/spec/112 §112.5).
+# Liegt auf dem Server unter /etc/cosmos/cosmos.yaml; cosmosd wendet sie bei
+# jedem Start an (COSMOS_CASC) und startet NICHT, wenn sie fehlerhaft ist.
+# Pfade sind relativ zu dieser Datei.
+#
+# Jede *.yaml in /etc/cosmos/pipelines ist ein Job cat-<dateistamm> (Projekt
+# aus der Kopfzeile `# project: <name>`); nach einer neuen Datei:
+# systemctl restart cosmosd.  Anfangs ist das Verzeichnis leer — aiml liefert
+# sein Buendel selbst nach kontor (§112.6).  Mit Zeitplan stattdessen hier:
+#   jobs:
+#     - job: { name: <name>, source: pipelines/<name>.yaml, project: <p>, interval_s: 3600 }
+- catalog:
+    from_dir:
+      - path: pipelines

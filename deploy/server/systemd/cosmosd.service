@@ -1,0 +1,30 @@
+# cosmosd auf dem kontor-Server (doc/spec/112 §112.3).
+# Ports und Adressen: /etc/cosmos/cosmos.env.  Die Erklaerung
+# /etc/cosmos/cosmos.yaml wird bei jedem Start angewandt; ist sie fehlerhaft,
+# startet cosmosd nicht (doc/spec/111 §111.1, F112-9).
+[Unit]
+Description=cosmos control plane (cosmosd)
+After=network.target
+
+[Service]
+Type=simple
+User=cosmos
+Group=cosmos
+WorkingDirectory=/var/lib/cosmos
+Environment=AIONDB_PATH=/var/lib/cosmos/aiondb
+Environment=AIML_MEM_V3=1
+Environment=COSMOS_CASC=/etc/cosmos/cosmos.yaml
+Environment=COSMOS_BIND=ws://127.0.0.1:8770
+EnvironmentFile=/etc/cosmos/cosmos.env
+ExecStart=/opt/cosmos/bin/cosmosd
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/cosmos
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

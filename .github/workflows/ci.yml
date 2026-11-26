@@ -34,10 +34,17 @@ jobs:
       # The prebuilt compiler and runtime from Pymann/aiml, as a venv
       # (aiml spec/68): every exodus.json here takes $AIML and $AIML_VENV/lib.
       # Repository variable AIML_RELEASE pins a release for every run.
+      # aiml with its libraries comes from kontor first: the bundle aiml's own
+      # CI puts there (generic/aiml/<tag|latest>/aiml-x86_64-linux.tar.gz).
+      # Secrets KONTOR_URL and KONTOR_CA, the same names as in Pymann/aiml;
+      # without them, or if kontor does not answer, GitHub as before.
       - name: Download aiml
         env:
           GH_TOKEN: ${{ github.token }}
           AIML_RELEASE: ${{ github.event.inputs.aiml_release || vars.AIML_RELEASE }}
+          AIML_KONTOR_URL: ${{ secrets.KONTOR_URL }}
+          AIML_KONTOR_CA: ${{ secrets.KONTOR_CA }}
+          AIML_KONTOR_TOKEN: ${{ secrets.AIML_KONTOR_TOKEN || secrets.KONTOR_TOKEN }}
         run: bash .github/ci/setup-aiml.sh "$RUNNER_TEMP/aimlvenv"
 
       # The programs a venv install places (aiml.tool.json "configs"), plus
@@ -69,3 +76,46 @@ jobs:
           name: test-results
           path: tests.log
           if-no-files-found: ignore
+
+  # doc/spec/112 §112.7: the runner plays the kontor server once -- install.sh,
+  # three systemd services, a pipeline from /etc/cosmos/pipelines putting a blob into a kontor
+  # stand-in, and setup-aiml.sh reading aiml back from it.  A test of the
+  # installer, not a build agent: nothing is built here with cosmos.
+  server-setup:
+    name: Server setup (kontor host, doc/spec/112)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      AIML_MEM_V3: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: System packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends g++ libssl-dev curl jq shellcheck libldap-dev xmlsec1
+
+      - name: Shellcheck
+        run: shellcheck -S warning deploy/server/*.sh deploy/server/libexec/* .github/ci/setup-aiml.sh
+
+      - name: Download aiml
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AIML_RELEASE: ${{ github.event.inputs.aiml_release || vars.AIML_RELEASE }}
+          AIML_KONTOR_URL: ${{ secrets.KONTOR_URL }}
+          AIML_KONTOR_CA: ${{ secrets.KONTOR_CA }}
+          AIML_KONTOR_TOKEN: ${{ secrets.AIML_KONTOR_TOKEN || secrets.KONTOR_TOKEN }}
+        run: bash .github/ci/setup-aiml.sh "$RUNNER_TEMP/aimlvenv"
+
+      - name: Build cosmosd, cosmos-api, agent
+        run: |
+          for cfg in exodus-cosmosd.json exodus-api.json exodus-agent.json; do
+            echo "::group::aiml build -c $cfg"
+            aiml build -c "$cfg"
+            echo "::endgroup::"
+          done
+
+      - name: Install and accept
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash deploy/server/test_install.sh

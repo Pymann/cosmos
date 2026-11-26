@@ -1,0 +1,74 @@
+#!/bin/bash
+# kontor-blob — Dateien in kontors generisches Repository legen und holen
+# (doc/spec/112 §112.5).  Fuer Pipeline-Schritte auf dem Knoten-Agenten: der
+# Sandkasten sieht /usr und /etc des Wirts, sonst nichts (F112-2) — darum liegt
+# dieses Werkzeug unter /usr/local/libexec/cosmos und der Zugang unter
+# /etc/cosmos-agent.
+#
+#   kontor-blob put <datei> <pfad>     PUT  $KONTOR_URL/generic/<pfad>  (mit X-Checksum-Sha256)
+#   kontor-blob get <pfad> <datei>     GET  …; Rueckgabe 3, wenn es <pfad> nicht gibt
+#   kontor-blob has <pfad>             0 = vorhanden, 3 = fehlt
+#
+# Zugang (KONTOR_ENV, Vorgabe /etc/cosmos-agent/kontor.env):
+#   KONTOR_URL=https://127.0.0.1:8443
+#   KONTOR_CA=/etc/cosmos-agent/kontor-ca.pem       (optional, selbstsigniertes Zertifikat)
+#   KONTOR_TOKEN_FILE=/etc/cosmos-agent/kontor.token (Rolle writer; nur fuer put)
+#
+# Das Token geht ueber eine Kopfzeilen-Datei an curl, nie auf die Kommandozeile
+# (Argumente stehen in /proc fuer jeden lesbar).
+set -euo pipefail
+
+ENV_FILE="${KONTOR_ENV:-/etc/cosmos-agent/kontor.env}"
+# Gelesen, nicht ausgefuehrt: nur die drei bekannten Schluessel.
+conf() { [ -r "$ENV_FILE" ] && sed -n "s/^$1=//p" "$ENV_FILE" | tail -1; }
+URL="${KONTOR_URL:-$(conf KONTOR_URL)}"
+CA="${KONTOR_CA:-$(conf KONTOR_CA)}"
+TOKEN_FILE="${KONTOR_TOKEN_FILE:-$(conf KONTOR_TOKEN_FILE)}"
+[ -n "$URL" ] || { echo "kontor-blob: KONTOR_URL fehlt ($ENV_FILE)" >&2; exit 2; }
+URL="${URL%/}"
+
+CURL=(curl -sS --retry 3 --retry-delay 2 --connect-timeout 15)
+[ -n "$CA" ] && CURL+=(--cacert "$CA")
+
+check_path() {
+    case "$1" in
+        ""|/*|*..*|*//*) echo "kontor-blob: ungueltiger Pfad '$1'" >&2; exit 2 ;;
+    esac
+}
+
+cmd="${1:-}"; shift || true
+case "$cmd" in
+    put)
+        file="${1:?Datei}"; path="${2:?Pfad}"; check_path "$path"
+        [ -f "$file" ] || { echo "kontor-blob: $file fehlt" >&2; exit 2; }
+        [ -n "$TOKEN_FILE" ] && [ -r "$TOKEN_FILE" ] || {
+            echo "kontor-blob: kein lesbares Token (KONTOR_TOKEN_FILE=$TOKEN_FILE)" >&2; exit 2; }
+        hdr="$(mktemp)"; trap 'rm -f "$hdr"' EXIT
+        chmod 600 "$hdr"
+        printf 'Authorization: Bearer %s\n' "$(tr -d '\r\n' < "$TOKEN_FILE")" > "$hdr"
+        sum="$(sha256sum "$file" | cut -d' ' -f1)"
+        code="$("${CURL[@]}" -o /dev/null -w '%{http_code}' -H @"$hdr" \
+            -H "X-Checksum-Sha256: $sum" -X PUT --data-binary @"$file" "$URL/generic/$path")"
+        case "$code" in
+            200|201) echo "kontor-blob: $path ($(stat -c%s "$file") Bytes, sha256 $sum)" ;;
+            *) echo "kontor-blob: PUT $path → HTTP $code" >&2; exit 1 ;;
+        esac ;;
+    get)
+        path="${1:?Pfad}"; out="${2:?Datei}"; check_path "$path"
+        code="$("${CURL[@]}" -o "$out.part" -w '%{http_code}' "$URL/generic/$path")" || code=000
+        case "$code" in
+            200) mv "$out.part" "$out" ;;
+            404) rm -f "$out.part"; exit 3 ;;
+            *) rm -f "$out.part"; echo "kontor-blob: GET $path → HTTP $code" >&2; exit 1 ;;
+        esac ;;
+    has)
+        path="${1:?Pfad}"; check_path "$path"
+        code="$("${CURL[@]}" -o /dev/null -w '%{http_code}' "$URL/generic/$path")" || code=000
+        case "$code" in
+            200) exit 0 ;;
+            404) exit 3 ;;
+            *) echo "kontor-blob: GET $path → HTTP $code" >&2; exit 1 ;;
+        esac ;;
+    *)
+        echo "usage: kontor-blob put <datei> <pfad> | get <pfad> <datei> | has <pfad>" >&2; exit 2 ;;
+esac
