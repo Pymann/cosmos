@@ -64,6 +64,8 @@
                 # §18.4): er entscheidet, welches Dateisystem ALLE seine
                 # Stufen sehen.
                 - call: [<.cluster.set_base, run_id, { call: [<.submitter.base_in, req.source, ""] }]
+                # doc/spec/96 §96.6: which stages may come out of the step cache.
+                - call: [<.submitter.declare_in, req.source, "", run_id, <.cluster.keys]
                 - set: [res.accepted, 1]
                 - set: [res.run_id, run_id]
                 - set: [res.message, "${chk.lane_count} Lanes, ${run.stages.len} Eintraege — angelegt als ${run_id}"]

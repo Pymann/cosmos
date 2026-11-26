@@ -201,6 +201,10 @@
                 # das soll man sehen (doc/spec/103 F103-3a).
                 - set: [run.status, "queued"]
                 - call: [<.add_pipeline, run]
+                # Base and reuse claims, as in run_job (aiml spec/62 §18.4,
+                # doc/spec/96 §96.6): a scheduled run is the same run.
+                - call: [<.set_base, run_id, { call: [<.submitter.base_in, job.source, tick_run_prm] }]
+                - call: [<.submitter.declare_in, job.source, tick_run_prm, run_id, <.keys]
                 - call: [log.info, "[zeitplan] ${job.name} #${build} gestartet (alle ${job.interval_s} s)"]
                 - return: 1
 
@@ -291,6 +295,7 @@
                 # obwohl dieselbe Pipeline eingereicht durchlief (gemeldet
                 # 22.10.2026, doc/spec/110 F110-117).
                 - call: [<.cluster.set_base, run_id, { call: [<.submitter.base_in, job.source, run_prm] }]
+                - call: [<.submitter.declare_in, job.source, run_prm, run_id, <.cluster.keys]
                 - set: [res.accepted, 1]
                 - set: [res.run_id, run_id]
                 - set: [res.build, build]

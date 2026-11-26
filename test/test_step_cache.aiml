@@ -11,6 +11,7 @@
 - import: "sources/shared/step_keys.aiml"
 - import: "sources/agent/host_step_cache.aiml"
 - import: "sources/server/stage_keys.aiml"
+- import: "sources/server/pipeline_submit.aiml"
 
 - def:
     name: expect
@@ -141,6 +142,36 @@
       - set: [fails, { +: [fails, { call: [expect, "an undeclared stage is opaque", { eq: [silent.cache_class, 0] }] }] }]
       - return: fails
 
+# A pipeline as cosmos gets it: two lanes, a resolved run: stage, a pure one
+# inherited from the pipeline, a stage with an opaque step (aiml spec/62 §9.1).
+- def:
+    name: src_cached
+    return: { type: string, lifetime: producer }
+    body:
+      - return: "- pipeline:\n    name: zwischenlager\n    cache: pure\n    params:\n      - [arch, string, [x86_64, arm64]]\n    steps:\n      - stage:\n          name: quellen\n          cache: resolved\n          resolve: \"git ls-remote https://example.org/app.git refs/heads/main\"\n          run: \"git clone https://example.org/app.git /ws/app\"\n      - stage:\n          name: bauen\n          run: \"make -j8\"\n      - stage:\n          name: pruefen\n          steps:\n            - step: { name: build, return: i32, body: [{ return: 0 }] }\n            - step: { name: zeit, cache: opaque, return: i32, body: [{ return: 0 }] }\n"
+
+- def:
+    name: submit_case
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      - decl: [store, StageKeyStore]
+      - call: [store.init]
+      - decl: [submit, PipelineSubmit]
+      - decl: [said, i32, { call: [submit.declare_in, { call: [src_cached] }, "", "rs", store] }]
+      - set: [fails, { +: [fails, { call: [expect, "two stages in two lanes are declared", { eq: [said, 4] }] }] }]
+      - decl: [src, CacheClaim, { call: [store.claim_of, "rs-1-0", ""] }]
+      - set: [fails, { +: [fails, { call: [expect, "the run: stage is resolved", { eq: [src.cache_class, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "with its probe line", { eq: [src.resolve, "git ls-remote https://example.org/app.git refs/heads/main"] }] }] }]
+      - call: [store.record, "rs-1-0", "abc"]
+      - decl: [mid, CacheClaim, { call: [store.claim_of, "rs-1-1", ""] }]
+      - set: [fails, { +: [fails, { call: [expect, "the next stage inherits pure and chains", { '&&': [{ eq: [mid.cache_class, 2] }, { eq: [mid.prev_key, "abc"] }] }] }] }]
+      - call: [store.record, "rs-1-1", "def"]
+      - decl: [last, CacheClaim, { call: [store.claim_of, "rs-1-2", ""] }]
+      - set: [fails, { +: [fails, { call: [expect, "one opaque step keeps the stage out (F62-161)", { eq: [last.cache_class, 0] }] }] }]
+      - return: fails
+
 - def:
     name: main
     return: i32
@@ -156,6 +187,8 @@
       - set: [fails, { +: [fails, { call: [store_case, cache, work] }] }]
       - call: [log.info, "key chain (server)"]
       - set: [fails, { +: [fails, { call: [chain_case] }] }]
+      - call: [log.info, "submit (stg.cache / stg.resolve)"]
+      - set: [fails, { +: [fails, { call: [submit_case] }] }]
       - if: { condition: { gt: [fails, 0] }, then: [{ call: [log.info, "${fails} check(s) FAILED"] }, { return: 1 }] }
       - call: [log.info, "all step cache checks PASS"]
       - return: 0

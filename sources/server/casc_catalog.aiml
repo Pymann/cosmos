@@ -327,5 +327,6 @@
                 - set: [run.status, "queued"]
                 - call: [<.add_pipeline, run]
                 - call: [<.set_base, run_id, { call: [<.submitter.base_in, source, run_prm] }]
+                - call: [<.submitter.declare_in, source, run_prm, run_id, <.keys]
                 - call: [log.info, "[start] ${job.name} #${build} als ${run_id} (${reason})"]
                 - return: run_id

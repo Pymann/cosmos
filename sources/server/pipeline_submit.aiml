@@ -28,6 +28,7 @@
 - import: "sources/shared/pipeline_run.aiml"
 - import: "sources/shared/job_params.aiml"
 - import: "sources/shared/kontor_access.aiml"
+- import: "sources/server/stage_keys.aiml"
 
 - class:
     name: PipelineSubmit
@@ -181,6 +182,55 @@
             - decl: [got, string, { call: [first.base] }]
             - call: [kontext.close]
             - return: got
+
+      # declare_in: the reuse claim of every (lane, stage) row (doc/spec/96
+      # §96.6, aiml spec/62 §9.1).  `stg.cache` is already RESOLVED by the
+      # compiler — inherited (F62-159) and, for a stage with steps, the
+      # weakest of them (F62-161) — so nothing is recomputed here.  The ids
+      # are the ones take_stages gives the rows.  Like base_in, a second read
+      # of the source: the run model stays as it is (doc/spec/108 F108-2).
+      - def:
+          name: declare_in
+          access: public
+          static_off: ["str_cmp"]
+          args: [[source, string], [prm_src, string], [run_id, string], [keys, ref<StageKeyStore>]]
+          return: i32
+          body:
+            - decl: [kontext, ctx_handle, { call: [ctx.new] }]
+            - if:
+                condition: { gt: [prm_src.len, 0] }
+                then: [{ decl: [rc_prm, i32, { call: [kontext.load, { call: [sys.code_from, prm_src] }] }] }]
+            - decl: [rc_load, i32, { call: [kontext.load, { call: [sys.code_from, source] }] }]
+            - if: { condition: { lt: [rc_load, 0] }, then: [{ call: [kontext.close] }, { return: 0 }] }
+            - decl: [pname, string, { call: [<.name_in, kontext] }]
+            - if:
+                condition: { '||': [{ eq: [pname.len, 0] }, { eq: [pname, "mehrere"] }] }
+                then: [{ call: [kontext.close] }, { return: 0 }]
+            - decl: [pipe, pipeline, { call: [kontext.call, pname, "fn() -> pipeline"] }]
+            - decl: [said, i32, 0]
+            - decl: [six, i32, 0]
+            - while:
+                condition: { lt: [six, { call: [pipe.stage_count] }] }
+                body:
+                  - decl: [stg, stage, { call: [pipe.stage_at, six] }]
+                  - decl: [cls_txt, string, { call: [stg.cache] }]
+                  - decl: [cls, i32, 0]
+                  - if: { condition: { eq: [cls_txt, "resolved"] }, then: [{ set: [cls, 1] }] }
+                  - if: { condition: { eq: [cls_txt, "pure"] }, then: [{ set: [cls, 2] }] }
+                  - if:
+                      condition: { gt: [cls, 0] }
+                      then:
+                        - decl: [probe, string, { call: [stg.resolve] }]
+                        - decl: [lix, i32, 0]
+                        - while:
+                            condition: { lt: [lix, { call: [pipe.lane_count] }] }
+                            body:
+                              - call: [keys.declare, "${run_id}-${lix}-${six}", cls, probe]
+                              - set: [said, { +: [said, 1] }]
+                              - set: [lix, { +: [lix, 1] }]
+                  - set: [six, { +: [six, 1] }]
+            - call: [kontext.close]
+            - return: said
 
       # ── doc/spec/106 §106.6c: die Parameter als eigenes Bundle ───────────
       #
