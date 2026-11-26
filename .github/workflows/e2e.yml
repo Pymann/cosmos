@@ -69,6 +69,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           AIML_RELEASE: ${{ github.event.inputs.aiml_release || vars.AIML_RELEASE }}
+          AIML_KONTOR_URL: ${{ secrets.KONTOR_URL }}
+          AIML_KONTOR_CA: ${{ secrets.KONTOR_CA }}
+          AIML_KONTOR_TOKEN: ${{ secrets.KONTOR_TOKEN }}
         run: bash .github/ci/setup-aiml.sh "$RUNNER_TEMP/aimlvenv"
 
       # Every script builds what it needs with the active venv (aiml build).
@@ -112,7 +115,9 @@ jobs:
 
   # kontor and cosmos together (doc/spec/111 §111.6/§111.9): webhooks,
   # rebuild campaigns, OCI push and pull.  Pymann/kontor is public and is
-  # cloned without a token; secret KONTOR_READ_TOKEN is used when set.
+  # cloned without a token.  The kontor server itself is reached through the
+  # secrets KONTOR_URL, KONTOR_TOKEN and KONTOR_CA (as in ci.yml); today only
+  # setup-aiml.sh uses them, later also pushes of stage results.
   e2e-kontor:
     name: run_e2e_kontor.sh
     runs-on: ubuntu-24.04
@@ -125,14 +130,9 @@ jobs:
 
       - name: Checkout kontor
         id: kontor
-        env:
-          TOKEN: ${{ secrets.KONTOR_READ_TOKEN }}
         run: |
-          # Pymann/kontor is public: a clone needs no token.  KONTOR_READ_TOKEN is
-          # used when set (a private kontor again).  A failed clone fails the job.
-          url="https://github.com/Pymann/kontor.git"
-          [ -n "$TOKEN" ] && url="https://x-access-token:${TOKEN}@github.com/Pymann/kontor.git"
-          git clone -q --depth 1 "$url" "$RUNNER_TEMP/kontor"
+          # Pymann/kontor is public: a clone needs no token.  A failed clone fails the job.
+          git clone -q --depth 1 https://github.com/Pymann/kontor.git "$RUNNER_TEMP/kontor"
           echo "dir=$RUNNER_TEMP/kontor" >> "$GITHUB_OUTPUT"
 
       - name: System packages
@@ -146,6 +146,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           AIML_RELEASE: ${{ github.event.inputs.aiml_release || vars.AIML_RELEASE }}
+          AIML_KONTOR_URL: ${{ secrets.KONTOR_URL }}
+          AIML_KONTOR_CA: ${{ secrets.KONTOR_CA }}
+          AIML_KONTOR_TOKEN: ${{ secrets.KONTOR_TOKEN }}
         run: bash .github/ci/setup-aiml.sh "$RUNNER_TEMP/aimlvenv"
 
       - name: run_e2e_kontor.sh
@@ -185,6 +188,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           AIML_RELEASE: ${{ github.event.inputs.aiml_release || vars.AIML_RELEASE }}
+          AIML_KONTOR_URL: ${{ secrets.KONTOR_URL }}
+          AIML_KONTOR_CA: ${{ secrets.KONTOR_CA }}
+          AIML_KONTOR_TOKEN: ${{ secrets.KONTOR_TOKEN }}
         run: bash .github/ci/setup-aiml.sh "$RUNNER_TEMP/aimlvenv"
 
       - name: Does this aiml build wasm?

@@ -36,7 +36,7 @@ jobs:
       # Repository variable AIML_RELEASE pins a release for every run.
       # aiml with its libraries comes from kontor first: the bundle aiml's own
       # CI puts there (generic/aiml/<tag|latest>/aiml-x86_64-linux.tar.gz).
-      # Secrets KONTOR_URL and KONTOR_CA, the same names as in Pymann/aiml;
+      # Secrets KONTOR_URL, KONTOR_TOKEN and KONTOR_CA, the same names as in Pymann/aiml;
       # without them, or if kontor does not answer, GitHub as before.
       - name: Download aiml
         env:
@@ -44,7 +44,7 @@ jobs:
           AIML_RELEASE: ${{ github.event.inputs.aiml_release || vars.AIML_RELEASE }}
           AIML_KONTOR_URL: ${{ secrets.KONTOR_URL }}
           AIML_KONTOR_CA: ${{ secrets.KONTOR_CA }}
-          AIML_KONTOR_TOKEN: ${{ secrets.AIML_KONTOR_TOKEN || secrets.KONTOR_TOKEN }}
+          AIML_KONTOR_TOKEN: ${{ secrets.KONTOR_TOKEN }}
         run: bash .github/ci/setup-aiml.sh "$RUNNER_TEMP/aimlvenv"
 
       # The programs a venv install places (aiml.tool.json "configs"), plus
@@ -104,7 +104,7 @@ jobs:
           AIML_RELEASE: ${{ github.event.inputs.aiml_release || vars.AIML_RELEASE }}
           AIML_KONTOR_URL: ${{ secrets.KONTOR_URL }}
           AIML_KONTOR_CA: ${{ secrets.KONTOR_CA }}
-          AIML_KONTOR_TOKEN: ${{ secrets.AIML_KONTOR_TOKEN || secrets.KONTOR_TOKEN }}
+          AIML_KONTOR_TOKEN: ${{ secrets.KONTOR_TOKEN }}
         run: bash .github/ci/setup-aiml.sh "$RUNNER_TEMP/aimlvenv"
 
       - name: Build cosmosd, cosmos-api, agent
