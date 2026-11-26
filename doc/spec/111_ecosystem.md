@@ -282,7 +282,11 @@ cosmos-kontor --mode pull --layout <dir> --url <kontor> --ref <repo>:<tag>|<repo
   gilt ohne Neustart.  Das Token reist nur als **Verweis** (`--token-file`/`--token-env`).
 - **Fremde Schichten sind nicht vertrauenswürdig** (F110-121): ein Lauf nimmt Schichten aus
   kontor nur als Abbild, nicht als Wiederverwendung einer Stufe, solange keine Signaturen
-  geprüft werden (`config.kontor.layer_trust` bleibt vorerst `none`).
+  geprüft werden.  `config.kontor.layer_trust` ist deshalb `same_host` (die Vorgabe, wenn der
+  Schlüssel fehlt): eine Stufe verwendet nur Schichten wieder, die auf demselben Wirt entstanden
+  sind.  Eine Liste von Agenten erweitert das ausdrücklich (`sources/models/casc_idp.aiml`).  Bis
+  2026-11-26 stand hier `none` — der Code galt seit je `same_host`, und das ist die Regel von
+  F110-121.
 
 Braucht die aiml-Erweiterung `client.body_file` / `resp.save_to` / `resp.body_len` (Zweig
 `feature/http-client-files-memv3`): der HTTP-Client war nur textsicher und brach an der ersten

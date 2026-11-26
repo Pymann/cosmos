@@ -13,7 +13,12 @@ cd "$(dirname "$0")"
 
 PORT="${PORT:-8801}"
 SMALL="${SMALL:-seq 1 20000}"          # ~0,1 MB
-BIG="${BIG:-seq 1 1000000}"            # ~6,9 MB
+# ~39 MB.  Bis 2026-11-26 ~6,9 MB: die Grenze (1/8 davon, ~830 kB) lag UNTER dem
+# Rauschen der Allokator-Arenen, das unabhaengig von der Ausgabe 0 oder ~1,2 MB
+# betraegt — derselbe Stand fiel in 2 von 4 Laeufen durch.  Bei 39 MB liegt die
+# Grenze bei ~4,7 MB: das Rauschen bleibt darunter, eine echte Akkumulation (39 MB)
+# weit darueber.
+BIG="${BIG:-seq 1 5000000}"
 URL="ws://127.0.0.1:${PORT}"
 WORK="$PWD/.mem_run"
 LOGS="$PWD/logs"

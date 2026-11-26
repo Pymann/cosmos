@@ -36,6 +36,10 @@ jobs:
           - run_e2e_pipeline.sh
           - run_e2e_identity.sh
           - run_e2e_chaos.sh
+          # The two memory checks (doc/spec/90 §AP1.5a, doc/spec/92 §92.7): the
+          # server and CAS must not hold output or content in memory.
+          - run_mem_check.sh
+          - run_cas_mem_check.sh
     env:
       AIML_CACHE: ${{ github.workspace }}/__aiml_cache
       AIML_MEM_V3: "1"
@@ -48,7 +52,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends g++ libssl-dev curl jq \
-            libldap-dev xmlsec1 slapd ldap-utils bubblewrap
+            libldap-dev xmlsec1 slapd ldap-utils bubblewrap time
           # Ubuntu 24.04 keeps unprivileged user namespaces behind AppArmor;
           # bwrap needs one for every step.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
@@ -69,6 +73,14 @@ jobs:
       - name: Build the console offer library
         if: matrix.suite == 'run_e2e_console.sh'
         run: aiml build -c exodus-console-offer.json
+
+      # run_mem_check.sh drives the binaries run_e2e.sh builds and builds none itself.
+      - name: Build for the memory check
+        if: matrix.suite == 'run_mem_check.sh'
+        run: |
+          for cfg in exodus-cosmosd.json exodus-agent.json exodus-test-e2e.json exodus-test-enroll.json; do
+            aiml build -c "$cfg"
+          done
 
       - name: ${{ matrix.suite }}
         run: timeout 2400 bash "${{ matrix.suite }}"
@@ -101,7 +113,14 @@ jobs:
         env:
           TOKEN: ${{ secrets.KONTOR_READ_TOKEN }}
         run: |
-          if [ -z "$TOKEN" ]; then echo "::notice::KONTOR_READ_TOKEN not set, run_e2e_kontor.sh skipped"; exit 0; fi
+          # On main a missing secret is a failure: a green main must have run the
+          # suite.  A pull request (a fork gets no secrets) only says so.
+          if [ -z "$TOKEN" ]; then
+            if [ "${{ github.event_name }}" = "pull_request" ]; then
+              echo "::notice::KONTOR_READ_TOKEN not set, run_e2e_kontor.sh skipped"; exit 0
+            fi
+            echo "::error::KONTOR_READ_TOKEN not set — run_e2e_kontor.sh cannot run on ${{ github.ref_name }}"; exit 1
+          fi
           git clone -q --depth 1 "https://x-access-token:${TOKEN}@github.com/Pymann/kontor.git" "$RUNNER_TEMP/kontor"
           echo "dir=$RUNNER_TEMP/kontor" >> "$GITHUB_OUTPUT"
 
