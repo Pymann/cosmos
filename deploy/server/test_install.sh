@@ -111,11 +111,14 @@ echo "== 5. setup-aiml.sh aus kontor (F112-14, STRICT)"
 # Die Ablage, die aiml's eigene CI in kontor fuellt ("Put the bundle into
 # kontor"): generic/aiml/latest/aiml-x86_64-linux.tar.gz, eine venv (bin lib
 # env) ohne Huelle.  Gebaut wie dort, aus der venv dieses Laufs.
-mkdir -p "$WORK/kontor/generic/aiml/latest"
-tar -czf "$WORK/kontor/generic/aiml/latest/aiml-x86_64-linux.tar.gz" -C "$AIML_VENV" bin lib env
-if env -u GITHUB_ENV -u GITHUB_PATH AIML_KONTOR_URL="$KURL" AIML_KONTOR_STRICT=1 \
+# Ohne AIML_RELEASE gilt der Pin aus .github/ci/aiml-release als Schluessel.
+AKEY="$(tr -d '[:space:]' < "$ROOT/.github/ci/aiml-release" 2>/dev/null || true)"
+AKEY="${AKEY:-latest}"
+mkdir -p "$WORK/kontor/generic/aiml/$AKEY"
+tar -czf "$WORK/kontor/generic/aiml/$AKEY/aiml-x86_64-linux.tar.gz" -C "$AIML_VENV" bin lib env
+if env -u GITHUB_ENV -u GITHUB_PATH -u AIML_RELEASE AIML_KONTOR_URL="$KURL" AIML_KONTOR_STRICT=1 \
         bash "$ROOT/.github/ci/setup-aiml.sh" "$WORK/venv2" > "$WORK/setup.log" 2>&1; then
-    check "Quelle war kontor (latest)" grep -q "^aiml: kontor $KURL (latest, sha256 " "$WORK/setup.log"
+    check "Quelle war kontor ($AKEY)" grep -q "^aiml: kontor $KURL ($AKEY, sha256 " "$WORK/setup.log"
     check "venv aus kontor fertig" [ -x "$WORK/venv2/bin/aiml" ]
 else
     fail "setup-aiml.sh aus kontor"; tail -n 20 "$WORK/setup.log"

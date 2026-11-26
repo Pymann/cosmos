@@ -214,7 +214,9 @@ jobs:
           ./emsdk activate "${{ steps.can.outputs.emsdk }}" > /dev/null
           . ./emsdk_env.sh > /dev/null
           echo "$(dirname "$(command -v emcc)")" >> "$GITHUB_PATH"
-          echo "EM_CONFIG=$EM_CONFIG" >> "$GITHUB_ENV"
+          # Newer emsdk_env.sh no longer exports EM_CONFIG; the config is .emscripten
+          # in the emsdk dir (it names BINARYEN_ROOT, so emcc finds wasm-opt).
+          echo "EM_CONFIG=${EM_CONFIG:-$PWD/.emscripten}" >> "$GITHUB_ENV"
           emcc --version | head -1
 
       - name: run_wasm_probes.sh
