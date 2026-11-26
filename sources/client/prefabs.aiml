@@ -1018,6 +1018,10 @@
       - { name: click_area, type: button, x: 0, y: 0, width: 242, height: 40,
           bg_color: 0x00000000, hover_color: 0x1C2A48FF, active_color: 0x24345AFF,
           corner_radius: 4.0, color: 0x00000000, font_size: 1, label: "" }
+      # The ring BEHIND the outcome dot: magenta when a step of the run had a
+      # version mismatch (doc/spec/113 F113-8), transparent otherwise.
+      - { name: mark_ring, type: rect, x: 7, y: 11, width: 18, height: 18,
+          color: 0x00000000, bg_color: 0x00000000, corner_radius: 9.0 }
       - { name: stat_dotx, type: rect, x: 10, y: 14, width: 12, height: 12,
           color: 0x00000000, bg_color: 0x667788FF, corner_radius: 6.0 }
       - { name: num_lblx, type: label, x: 30, y: 0, width: 60, height: 40, anchor: left,

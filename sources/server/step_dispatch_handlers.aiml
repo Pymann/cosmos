@@ -7,6 +7,7 @@
 - import: "sources/shared/claim_who.aiml"
 - import: "sources/models/step_dispatch.aiml"
 - import: "sources/models/step_report.aiml"
+- import: "sources/shared/stage_mark.aiml"
 
 - groupmethods:
     group: CosmosRuntime
@@ -83,6 +84,14 @@
                 # Protokoll schliessen (F103-19) — auch bei einem verspaeteten
                 # Bericht: die Datei gehoert der Stufe, nicht der Annahme.
                 - call: [<.runs.finish, req.stage_id, req.exit_code]
+                # doc/spec/113 F113-1..3, F113-5: an accepted report marks the step
+                # magenta when its output carries aiml's version-mismatch line,
+                # and clears magenta when this attempt no longer does.
+                - if:
+                    condition: { gt: [took, 0] }
+                    then:
+                      - decl: [mismatch, i32, { call: [<.runs.contains, req.stage_id, { call: [version_mismatch_marker] }] }]
+                      - call: [<.cluster.marks.set_colour, req.run_id, req.stage_id, "magenta", mismatch]
                 - set: [ack.accepted, took]
                 # F103-4: abgelehnt heisst "Lehen war abgelaufen" — der Agent
                 # verwirft dann sein Ergebnis, statt es zu wiederholen.

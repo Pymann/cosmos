@@ -1,0 +1,165 @@
+# Marks of a step (doc/spec/113): magenta for a version mismatch.
+#
+# Covers what the chapter promises:
+#   F113-1/2  the scan finds the line in either stream, also when it is split
+#             between two read windows, and ignores a near miss
+#   F113-5    marking twice keeps one colour; a re-run without the line clears it
+#   F113-8    the colours of a run are the union of its steps
+#   F113-7    the scene keeps the step's outcome colour and adds a magenta badge
+#
+# No network, no server.
+# Expected exit code: 0
+
+- import: "sources/server/run_store.aiml"
+- import: "sources/server/stage_marks.aiml"
+- import: "sources/shared/pipe_scene.aiml"
+
+- def:
+    name: expect
+    args: [[label, string], [cond, i32]]
+    return: i32
+    body:
+      - if: { condition: { eq: [cond, 1] }, then: [{ print: ["  ok   ${label}"] }, { return: 0 }] }
+      - print: ["  FAIL ${label}"]
+      - return: 1
+
+- def:
+    name: main
+    static_off: ["str_cmp"]
+    return: i32
+    body:
+      - decl: [fails, i32, 0]
+      - call: [io.remove_all, "run_logs_marks"]
+      - decl: [runs, ptr<RunStore>, { new: RunStore }]
+      - call: [runs.init, "run_logs_marks"]
+      - decl: [needle, string, { call: [version_mismatch_marker] }]
+      - decl: [line, string, "aiml: version-mismatch compiler aiml 0.9.0 not in {ge 1.0} (exodus.json)\n"]
+
+      # ── F113-1: in stdout ────────────────────────────────────────────────
+      - call: [runs.begin, "st-out", "agent-1", "aiml build", "/tmp"]
+      - call: [runs.append, "st-out", OutStream.out, "compiling\n${line}linking\n"]
+      - call: [runs.finish, "st-out", 0]
+      - set: [fails, { +: [fails, { call: [expect, "line in stdout is found", { eq: [{ call: [runs.contains, "st-out", needle] }, 1] }] }] }]
+
+      # ── F113-1: in stderr only ───────────────────────────────────────────
+      - call: [runs.begin, "st-err", "agent-1", "aiml build", "/tmp"]
+      - call: [runs.append, "st-err", OutStream.out, "compiling\n"]
+      - call: [runs.append, "st-err", OutStream.err, line]
+      - call: [runs.finish, "st-err", 0]
+      - set: [fails, { +: [fails, { call: [expect, "line in stderr is found", { eq: [{ call: [runs.contains, "st-err", needle] }, 1] }] }] }]
+
+      # ── F113-2: split between two 64 KiB windows ─────────────────────────
+      # 65526 bytes before the line: it starts 10 bytes before the window end.
+      - decl: [filler, string, ""]
+      - decl: [fdx, i32, 0]
+      - while:
+          condition: { lt: [fdx, 10] }
+          body:
+            - set: [filler, "${filler}xxxxxxxxx\n"]
+            - set: [fdx, { +: [fdx, 1] }]
+      - call: [runs.begin, "st-split", "agent-1", "aiml build", "/tmp"]
+      - decl: [bdx, i32, 0]
+      - while:
+          condition: { lt: [bdx, 655] }
+          body:
+            - call: [runs.append, "st-split", OutStream.out, filler]
+            - set: [bdx, { +: [bdx, 1] }]
+      - decl: [tot, i64, { call: [runs.append, "st-split", OutStream.out, "xxxxxxxxxxxxxxxxxxxxxxxxx\n"] }]
+      - set: [fails, { +: [fails, { call: [expect, "65526 bytes before the line (${tot})", { eq: [tot, 65526] }] }] }]
+      - call: [runs.append, "st-split", OutStream.out, line]
+      - call: [runs.finish, "st-split", 0]
+      - set: [fails, { +: [fails, { call: [expect, "line across a window boundary is found", { eq: [{ call: [runs.contains, "st-split", needle] }, 1] }] }] }]
+
+      # ── F113-1: a near miss is no mark ───────────────────────────────────
+      - call: [runs.begin, "st-near", "agent-1", "aiml build", "/tmp"]
+      - call: [runs.append, "st-near", OutStream.out, "aiml: version-mismatched\naiml: version mismatch compiler\n"]
+      - call: [runs.append, "st-near", OutStream.err, "warning: version-mismatch \n"]
+      - call: [runs.finish, "st-near", 0]
+      - set: [fails, { +: [fails, { call: [expect, "near misses are not the line", { eq: [{ call: [runs.contains, "st-near", needle] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "a step without output has no line", { eq: [{ call: [runs.contains, "st-none", needle] }, 0] }] }] }]
+
+      # ── F113-5: set semantics ────────────────────────────────────────────
+      - decl: [store, ptr<StageMarkStore>, { new: StageMarkStore }]
+      - call: [store.init]
+      - call: [store.set_colour, "run-m", "st-a", "magenta", 0]
+      - decl: [rows0, list<StageMark>, { call: [store.rows_of, "run-m"] }]
+      - set: [fails, { +: [fails, { call: [expect, "clearing an unmarked step keeps no row", { eq: [rows0.len, 0] }] }] }]
+      - call: [store.set_colour, "run-m", "st-a", "magenta", 1]
+      - call: [store.set_colour, "run-m", "st-a", "magenta", 1]
+      - decl: [rows1, list<StageMark>, { call: [store.rows_of, "run-m"] }]
+      - set: [fails, { +: [fails, { call: [expect, "one row for the step", { eq: [rows1.len, 1] }] }] }]
+      - decl: [row1, StageMark, { at: [rows1, 0] }]
+      - set: [fails, { +: [fails, { call: [expect, "marking twice keeps one colour", { eq: [row1.colours.len, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "the step carries magenta", { eq: [{ call: [stage_has_colour, rows1, "st-a", "magenta"] }, 1] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "another step does not", { eq: [{ call: [stage_has_colour, rows1, "st-b", "magenta"] }, 0] }] }] }]
+
+      # ── F113-8: the run's colours are the union of its steps ─────────────
+      - call: [store.set_colour, "run-m", "st-b", "magenta", 1]
+      - decl: [rows2, list<StageMark>, { call: [store.rows_of, "run-m"] }]
+      - decl: [cols2, list<string>, { call: [run_colours, rows2, "run-m"] }]
+      - set: [fails, { +: [fails, { call: [expect, "two marked steps, one colour for the run", { '&&': [{ eq: [rows2.len, 2] }, { eq: [cols2.len, 1] }] }] }] }]
+      - decl: [cols_other, list<string>, { call: [run_colours, rows2, "run-x"] }]
+      - set: [fails, { +: [fails, { call: [expect, "another run has no colours", { eq: [cols_other.len, 0] }] }] }]
+
+      # ── F113-5: a re-run without the line clears magenta ─────────────────
+      - call: [store.set_colour, "run-m", "st-a", "magenta", 0]
+      - decl: [rows3, list<StageMark>, { call: [store.rows_of, "run-m"] }]
+      - set: [fails, { +: [fails, { call: [expect, "the re-run step is clear", { eq: [{ call: [stage_has_colour, rows3, "st-a", "magenta"] }, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "the other step keeps its mark", { '&&': [{ eq: [rows3.len, 1] }, { eq: [{ call: [stage_has_colour, rows3, "st-b", "magenta"] }, 1] }] }] }] }]
+      - call: [store.set_colour, "run-m", "st-b", "magenta", 0]
+      - decl: [rows4, list<StageMark>, { call: [store.rows_of, "run-m"] }]
+      - decl: [cols4, list<string>, { call: [run_colours, rows4, "run-m"] }]
+      - set: [fails, { +: [fails, { call: [expect, "a run without marks has no colours", { eq: [cols4.len, 0] }] }] }]
+
+      # ── F113-7: the scene keeps the outcome, adds a badge ────────────────
+      - decl: [scene, ptr<PipeScene>, { new: PipeScene }]
+      - decl: [run, PipelineRun]
+      - decl: [stg_a, PipelineStage]
+      - set: [stg_a.stage_id, "st-a"]
+      - set: [stg_a.name, "build [arch=x86_64]"]
+      - set: [stg_a.bindings, "arch=x86_64"]
+      - set: [stg_a.status, "failed"]
+      - call: [run.stages.push, stg_a]
+      - decl: [items, list<SceneItem>, { call: [scene.of_run, run, ""] }]
+      - decl: [before, i32, items.len]
+      - decl: [ball_c, i32, 0]
+      - decl: [iix, i32, 0]
+      - while:
+          condition: { lt: [iix, items.len] }
+          body:
+            - decl: [one, SceneItem, { at: [items, iix] }]
+            - if: { condition: { '&&': [{ eq: [one.kind, 0] }, { eq: [one.tag, "st-a"] }] }, then: [{ set: [ball_c, one.color] }] }
+            - set: [iix, { +: [iix, 1] }]
+      - decl: [marks, list<StageMark>]
+      - decl: [mark_one, StageMark]
+      - set: [mark_one.run_id, "run-m"]
+      - set: [mark_one.stage_id, "st-a"]
+      - call: [mark_one.colours.push, "magenta"]
+      - call: [marks.push, mark_one]
+      - call: [scene.stamp_marks, items, marks]
+      - set: [fails, { +: [fails, { call: [expect, "one badge more (${before} → ${items.len})", { eq: [items.len, { +: [before, 1] }] }] }] }]
+      - decl: [ball_after, i32, 0]
+      - decl: [badge_c, i32, 0]
+      - decl: [labelled, i32, 0]
+      - set: [iix, 0]
+      - while:
+          condition: { lt: [iix, items.len] }
+          body:
+            - decl: [two, SceneItem, { at: [items, iix] }]
+            - if:
+                condition: { eq: [two.tag, "st-a"] }
+                then:
+                  - set: [ball_after, two.color]
+                  - if: { condition: { ge: [{ call: [two.label.index_of, "[version]"] }, 0] }, then: [{ set: [labelled, 1] }] }
+            - if: { condition: { eq: [two.tag, "mark:st-a"] }, then: [{ set: [badge_c, two.color] }] }
+            - set: [iix, { +: [iix, 1] }]
+      - set: [fails, { +: [fails, { call: [expect, "the step keeps its outcome colour", { '&&': [{ neq: [ball_c, 0] }, { eq: [ball_after, ball_c] }] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "the badge is magenta", { eq: [badge_c, { call: [scene.mark_color, "magenta"] }] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "the label names the mismatch", { eq: [labelled, 1] }] }] }]
+
+      - call: [io.remove_all, "run_logs_marks"]
+      - if:
+          condition: { neq: [fails, 0] }
+          then: [{ print: ["test_stage_marks FAIL (${fails})"] }, { return: 1 }]
+      - print: ["test_stage_marks PASS"]
+      - return: 0

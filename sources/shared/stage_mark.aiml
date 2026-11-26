@@ -1,0 +1,74 @@
+# Marks of the steps of a run (doc/spec/113): colours a step carries IN ADDITION to
+# its outcome — today only magenta, a version incompatibility (aiml spec/62 F62-47).
+#
+# Beside the run, not in it: a new field on PipelineRun/PipelineStage would change
+# the schema fingerprint and make every stored run unreadable (doc/spec/108 F108-2).
+#
+# Static-Check (aiml spec/49 §14): 2 models, 3 functions.
+
+- model:
+    name: StageMark
+    fields:
+      - [run_id,   string]
+      - [stage_id, string]
+      # A set: each colour at most once (F113-5).
+      - [colours,  list<string>]
+
+- model:
+    name: RunMarks
+    fields:
+      - [run_id, string]
+      - [rows,   list<StageMark>]
+
+# The line aiml build and exodus write for a pin that does not hold (aiml spec/68
+# F68-99).  cosmos only recognises it (F113-1).
+- def:
+    name: version_mismatch_marker
+    return: { type: string, lifetime: producer }
+    body:
+      - return: "aiml: version-mismatch "
+
+# 1 when the step `stage_id` carries `colour` (F113-7).
+- def:
+    name: stage_has_colour
+    static_off: ["str_cmp"]
+    args: [[marks, list<StageMark>], [stage_id, string], [colour, string]]
+    return: i32
+    body:
+      - decl: [row_ix, i32, 0]
+      - while:
+          condition: { lt: [row_ix, marks.len] }
+          body:
+            - decl: [row, StageMark, { at: [marks, row_ix] }]
+            - set: [row_ix, { +: [row_ix, 1] }]
+            - if:
+                condition: { eq: [row.stage_id, stage_id] }
+                then:
+                  - if: { condition: { gt: [{ call: [row.colours.contains, colour] }, 0] }, then: [{ return: 1 }] }
+      - return: 0
+
+# The colours of a run: the union over its steps, each once (F113-8).
+- def:
+    name: run_colours
+    static_off: ["str_cmp"]
+    args: [[marks, list<StageMark>], [run_id, string]]
+    return: { type: list<string>, lifetime: producer }
+    body:
+      - decl: [out, list<string>]
+      - decl: [row_ix, i32, 0]
+      - while:
+          condition: { lt: [row_ix, marks.len] }
+          body:
+            - decl: [row, StageMark, { at: [marks, row_ix] }]
+            - set: [row_ix, { +: [row_ix, 1] }]
+            - if:
+                condition: { eq: [row.run_id, run_id] }
+                then:
+                  - decl: [col_ix, i32, 0]
+                  - while:
+                      condition: { lt: [col_ix, row.colours.len] }
+                      body:
+                        - decl: [col, string, { at: [row.colours, col_ix] }]
+                        - set: [col_ix, { +: [col_ix, 1] }]
+                        - if: { condition: { eq: [{ call: [out.contains, col] }, 0] }, then: [{ call: [out.push, col] }] }
+      - return: out

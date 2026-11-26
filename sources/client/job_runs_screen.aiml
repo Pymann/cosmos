@@ -43,6 +43,8 @@
       - [log_seen_ms, i64]
       # Die Laufzeiten des GEWAEHLTEN Laufs (doc/spec/107 §107.1h).
       - [run_times,   list<StageTime>]
+      # Die Marken desselben Laufs (doc/spec/113): magenta = Versions-Inkompatibilitaet.
+      - [run_marks,   list<StageMark>]
       # Fuer WELCHE Stufe die Ausgabe-Box schon ans Ende gesprungen ist.  Ohne
       # diese Notiz muesste jede der vier Auswahl-Stellen daran denken — und
       # eine haette es vergessen.
@@ -290,6 +292,12 @@
                         - call: [row.set_text, "num_lblx", "#${prun.build_number}"]
                         - call: [row.set_text, "when_lblx", { call: [<.order.when_of, prun.started_ms] }]
                         - call: [row.set_bg_color, "stat_dotx", { call: [<.status_color, prun.status] }]
+                        # The run's colours NEXT TO its outcome (F113-8): the outcome
+                        # stays what it is, magenta is a ring around it.
+                        - decl: [ringc, i32, 0x00000000]
+                        - decl: [rcols, list<string>, { call: [run_colours, view.marks, rid] }]
+                        - if: { condition: { gt: [{ call: [rcols.contains, "magenta"] }, 0] }, then: [{ set: [ringc, { call: [<.space.mark_color, "magenta"] }] }] }
+                        - call: [row.set_bg_color, "mark_ring", ringc]
                         # Die Auswahl muss SICHTBAR sein, sonst weiss niemand,
                         # welcher Lauf in der Mitte steht.
                         - decl: [rowc, i32, 0x111826FF]
@@ -409,6 +417,15 @@
                   - decl: [trow, StageTime, { at: [view.times, tyx] }]
                   - set: [tyx, { +: [tyx, 1] }]
                   - if: { condition: { eq: [trow.run_id, <.sel_run] }, then: [{ call: [<.run_times.push, trow] }] }
+            # Und die Marken (doc/spec/113 F113-6).
+            - call: [<.run_marks.clear]
+            - decl: [myx, i32, 0]
+            - while:
+                condition: { lt: [myx, view.marks.len] }
+                body:
+                  - decl: [mrow, StageMark, { at: [view.marks, myx] }]
+                  - set: [myx, { +: [myx, 1] }]
+                  - if: { condition: { eq: [mrow.run_id, <.sel_run] }, then: [{ call: [<.run_marks.push, mrow] }] }
             - call: [<.rebuild_bodies, prun, lays]
             # Steht der Raum, verschwinden die flachen Kaesten — zwei
             # Darstellungen derselben Sache uebereinander waeren eine zu viel.
@@ -546,6 +563,8 @@
             # gegen jetzt hoch, darum die Uhr als Argument: die Szene soll
             # keine eigene Zeitquelle haben.
             - call: [<.space.stamp_times, <.bodies, prun, <.run_times, { call: [time.now] }]
+            # Magenta NEBEN dem Ausgang, nie statt seiner (doc/spec/113 F113-7).
+            - call: [<.space.stamp_marks, <.bodies, <.run_marks]
             - if: { condition: { pneq: [<.crew_ref, null] }, then: [{ call: [<.space.add_agents, <.bodies, <.crew_ref, prun] }] }
             # KEINE Speicher in der LAUF-Ansicht (doc/spec/107 F107-41).  Sie
             # gehoeren dem Controller, nicht dem Lauf: welche KVs er fuehrt,

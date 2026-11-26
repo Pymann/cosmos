@@ -34,7 +34,7 @@
           args: [[view, ref<ClusterView>]]
           return: { type: string, lifetime: producer }
           body:
-            - decl: [sig, string, "n${view.nodes.len}w${view.workloads.len}p${view.pipelines.len}j${view.jobs.len}d${view.job_defs.len}L${view.layers.len}T${view.times.len};"]
+            - decl: [sig, string, "n${view.nodes.len}w${view.workloads.len}p${view.pipelines.len}j${view.jobs.len}d${view.job_defs.len}L${view.layers.len}T${view.times.len}M${view.marks.len};"]
             - decl: [six, i32, 0]
             - while:
                 condition: { lt: [six, view.jobs.len] }

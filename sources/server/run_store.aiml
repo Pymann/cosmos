@@ -172,6 +172,54 @@
             - decl: [spath, string, { call: [<.stream_path, run_ref, stream] }]
             - return: { call: [io.file_size, spath] }
 
+      # contains: 1 when `needle` occurs in either stream of the run (doc/spec/113
+      # F113-2).  Read in windows, never the whole file in memory; consecutive
+      # windows overlap by needle.len - 1 so a line split between two windows is
+      # still found.
+      - def:
+          name: contains
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run_ref, string], [needle, string]]
+          return: i32
+          body:
+            - if: { condition: { neq: [{ call: [<.valid_ref, run_ref] }, 1] }, then: [{ return: 0 }] }
+            - if: { condition: { eq: [needle.len, 0] }, then: [{ return: 0 }] }
+            - if: { condition: { eq: [run_ref, <.cur_ref] }, then: [{ call: [<.close_cur] }] }
+            - decl: [streams, list<i32>]
+            - call: [streams.push, OutStream.out]
+            - call: [streams.push, OutStream.err]
+            - decl: [str_ix, i32, 0]
+            - while:
+                condition: { lt: [str_ix, streams.len] }
+                body:
+                  - decl: [spath, string, { call: [<.stream_path, run_ref, { at: [streams, str_ix] }] }]
+                  - set: [str_ix, { +: [str_ix, 1] }]
+                  - decl: [total, i64, { call: [io.file_size, spath] }]
+                  - decl: [src, file_handle, null]
+                  - if: { condition: { gt: [total, 0] }, then: [{ set: [src, { call: [io.open, spath, "r"] }] }] }
+                  - if:
+                      condition: { neq: [src, null] }
+                      then:
+                        - decl: [carry, string, ""]
+                        - decl: [pos, i64, 0]
+                        - decl: [hit, i32, 0]
+                        - while:
+                            condition: { '&&': [{ lt: [pos, total] }, { eq: [hit, 0] }] }
+                            body:
+                              - decl: [piece, string, { call: [io.read, src, 65536] }]
+                              - if: { condition: { eq: [piece.len, 0] }, then: [{ set: [pos, total] }] }
+                              - set: [pos, { +: [pos, piece.len] }]
+                              - decl: [hay, string, "${carry}${piece}"]
+                              - if: { condition: { ge: [{ call: [hay.index_of, needle] }, 0] }, then: [{ set: [hit, 1] }] }
+                              - set: [carry, hay]
+                              - if:
+                                  condition: { ge: [hay.len, needle.len] }
+                                  then: [{ set: [carry, { call: [hay.substr, { +: [{ -: [hay.len, needle.len] }, 1] }, { -: [needle.len, 1] }] }] }]
+                        - call: [io.close, src]
+                        - if: { condition: { eq: [hit, 1] }, then: [{ return: 1 }] }
+            - return: 0
+
       # finish: Lauf abschliessen (Exit-Code festhalten, Handles freigeben).
       - def:
           name: finish

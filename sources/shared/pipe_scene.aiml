@@ -11,6 +11,7 @@
 - import: "sources/models/agent_list.aiml"
 - import: "sources/shared/live_view.aiml"
 - import: "sources/shared/stage_layer.aiml"
+- import: "sources/shared/stage_mark.aiml"
 
 - model:
     name: SceneItem
@@ -243,6 +244,60 @@
                                         then:
                                           - set: [item.label, "${item.label}  ${txt}"]
                                           - idx: [out, here, item]
+
+      # stamp_marks: a magenta step carries a magenta badge ABOVE its ball, and
+      # its label says why (doc/spec/113 F113-7).  The ball keeps the colour of
+      # its outcome: a failed step with a version mismatch is red AND magenta.
+      # A separate pass over the finished list, like stamp_times.
+      - def:
+          name: stamp_marks
+          access: public
+          static_off: ["str_cmp"]
+          args: [[out, list<SceneItem>], [marks, list<StageMark>]]
+          body:
+            - if: { condition: { eq: [marks.len, 0] }, then: [{ return: null }] }
+            - decl: [badges, list<SceneItem>]
+            - decl: [oix, i32, 0]
+            - while:
+                condition: { lt: [oix, out.len] }
+                body:
+                  - decl: [item, SceneItem, { at: [out, oix] }]
+                  - decl: [here, i32, oix]
+                  - set: [oix, { +: [oix, 1] }]
+                  - if:
+                      condition: { '&&': [{ eq: [item.kind, 0] }, { gt: [{ call: [stage_has_colour, marks, item.tag, "magenta"] }, 0] }] }
+                      then:
+                        - set: [item.label, "${item.label}  [version]"]
+                        - idx: [out, here, item]
+                        - decl: [badge, SceneItem]
+                        - set: [badge.kind, 0]
+                        - set: [badge.pos_x, item.pos_x]
+                        - set: [badge.pos_y, { +: [item.pos_y, { +: [item.radius, 0.34] }] }]
+                        - set: [badge.pos_z, item.pos_z]
+                        - set: [badge.axis_y, 1.0]
+                        - set: [badge.radius, 0.22]
+                        - set: [badge.color, { call: [<.mark_color, "magenta"] }]
+                        - set: [badge.tag, "mark:${item.tag}"]
+                        - call: [badges.push, badge]
+            - decl: [bdg_ix, i32, 0]
+            - while:
+                condition: { lt: [bdg_ix, badges.len] }
+                body:
+                  - call: [out.push, { at: [badges, bdg_ix] }]
+                  - set: [bdg_ix, { +: [bdg_ix, 1] }]
+
+      # mark_color: the colour of a mark (doc/spec/113).  Magenta is NOT the
+      # lilac of `paused` (0xB58CE8): a paused run and a version mismatch must
+      # not look alike.
+      - def:
+          name: mark_color
+          access: public
+          static_off: ["str_cmp"]
+          args: [[mark, string]]
+          return: i32
+          body:
+            - if: { condition: { eq: [mark, "magenta"] }, then: [{ return: 0xE040C8FF }] }
+            - return: 0x667788FF
 
       # add_ground: die Flaeche unter allem.  Sie ist kein Koerper, sondern
       # Bezug: ohne sie schweben die Kugeln, und zwei Hoehen sind nicht

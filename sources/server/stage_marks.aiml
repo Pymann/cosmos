@@ -1,0 +1,81 @@
+# StageMarkStore — the marks of the steps, beside the runs (doc/spec/113 F113-4).
+#
+# Its own KV `stage_marks` (run id → RunMarks) for the reason run_layers has one:
+# the run stays untouched and therefore readable (doc/spec/108 F108-2).  In its
+# own file because cluster_bootstrap.aiml is at its line limit (aiml spec/49 §14).
+#
+# Static-Check (aiml spec/49 §14): 1 class.
+- import: "sources/shared/stage_mark.aiml"
+
+- class:
+    name: StageMarkStore
+    members:
+      - [marks, Kv<string:RunMarks>]
+    methods:
+      - def:
+          name: init
+          access: public
+          body:
+            - set: [<.marks, { call: [db.open_kv, "stage_marks", {persist: true}] }]
+
+      # set_colour: `put_on` 1 puts `colour` on the step, 0 takes it off (F113-5).
+      # Twice the same changes nothing; a step without colours keeps no row.
+      - def:
+          name: set_colour
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run_id, string], [stage_id, string], [colour, string], [put_on, i32]]
+          body:
+            - if: { condition: { '||': [{ eq: [run_id.len, 0] }, { eq: [stage_id.len, 0] }] }, then: [{ return: null }] }
+            - decl: [bag, RunMarks]
+            - if:
+                condition: { gt: [{ call: [<.marks.has, run_id] }, 0] }
+                then: [{ set: [bag, { call: [<.marks.get_copy, run_id] }] }]
+            - if: { condition: { '&&': [{ eq: [put_on, 0] }, { eq: [bag.rows.len, 0] }] }, then: [{ return: null }] }
+            - set: [bag.run_id, run_id]
+            - decl: [fresh, list<StageMark>]
+            - decl: [found, i32, 0]
+            - decl: [row_ix, i32, 0]
+            - while:
+                condition: { lt: [row_ix, bag.rows.len] }
+                body:
+                  - decl: [row, StageMark, { at: [bag.rows, row_ix] }]
+                  - set: [row_ix, { +: [row_ix, 1] }]
+                  - if:
+                      condition: { eq: [row.stage_id, stage_id] }
+                      then:
+                        - set: [found, 1]
+                        - decl: [cols, list<string>]
+                        - decl: [col_ix, i32, 0]
+                        - while:
+                            condition: { lt: [col_ix, row.colours.len] }
+                            body:
+                              - decl: [col, string, { at: [row.colours, col_ix] }]
+                              - set: [col_ix, { +: [col_ix, 1] }]
+                              - if: { condition: { neq: [col, colour] }, then: [{ call: [cols.push, col] }] }
+                        - if: { condition: { eq: [put_on, 1] }, then: [{ call: [cols.push, colour] }] }
+                        - set: [row.colours, cols]
+                  - if: { condition: { gt: [row.colours.len, 0] }, then: [{ call: [fresh.push, row] }] }
+            - if:
+                condition: { '&&': [{ eq: [found, 0] }, { eq: [put_on, 1] }] }
+                then:
+                  - decl: [row_new, StageMark]
+                  - set: [row_new.run_id, run_id]
+                  - set: [row_new.stage_id, stage_id]
+                  - call: [row_new.colours.push, colour]
+                  - call: [fresh.push, row_new]
+            - set: [bag.rows, fresh]
+            - call: [<.marks.set, run_id, bag]
+
+      # rows_of: the marks of one run, for the snapshot (F113-6).
+      - def:
+          name: rows_of
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run_id, string]]
+          return: { type: list<StageMark>, lifetime: producer }
+          body:
+            - decl: [out, list<StageMark>]
+            - if: { condition: { eq: [{ call: [<.marks.has, run_id] }, 0] }, then: [{ return: out }] }
+            - decl: [bag, RunMarks, { call: [<.marks.get_copy, run_id] }]
+            - return: bag.rows

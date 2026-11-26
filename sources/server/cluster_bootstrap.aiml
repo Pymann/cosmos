@@ -14,6 +14,7 @@
 - import: "sources/shared/job_params.aiml"
 - import: "sources/shared/job_policy.aiml"
 - import: "sources/server/job_config.aiml"
+- import: "sources/server/stage_marks.aiml"
 - import: "sources/models/rt_spawn.aiml"
 - import: "sources/shared/cluster_view.aiml"
 - import: "sources/shared/res_usage.aiml"
@@ -48,6 +49,8 @@
       # liegen in Beiwagen, und die gehoeren einer eigenen Klasse — diese
       # Datei ist an ihrer Zeilengrenze (aiml spec/49 §14).
       - [jobcfg, JobConfig]
+      # doc/spec/113: colours a step carries beside its outcome (magenta).
+      - [marks, StageMarkStore]
       # Wem wurde WANN ein Container-Auftrag gegeben (doc/spec/110 §110.36).
       # Im Speicher, nicht auf Platte: ein Auftrag ueberlebt den Controller
       # nicht — der neue fragt ohnehin neu.
@@ -65,6 +68,7 @@
             - set: [<.run_ctrl,  { call: [db.open_kv, "run_ctrl",  {persist: true}] }]
             - set: [<.run_layers, { call: [db.open_kv, "run_layers", {persist: true}] }]
             - call: [<.jobcfg.init]
+            - call: [<.marks.init]
 
       - def:
           name: make_stage
@@ -1841,6 +1845,14 @@
                             body:
                               - call: [view.times.push, { at: [lbag.times, ltx] }]
                               - set: [ltx, { +: [ltx, 1] }]
+                  # doc/spec/113 F113-6: the marks in the same snapshot.
+                  - decl: [mrows, list<StageMark>, { call: [<.marks.rows_of, pkey] }]
+                  - decl: [mrx, i32, 0]
+                  - while:
+                      condition: { lt: [mrx, mrows.len] }
+                      body:
+                        - call: [view.marks.push, { at: [mrows, mrx] }]
+                        - set: [mrx, { +: [mrx, 1] }]
             - call: [db.reload_kv, <.jobs]
             - decl: [jit, iterator<string>, { call: [<.jobs.iter] }]
             - while:

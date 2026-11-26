@@ -9,6 +9,7 @@
 - import: "sources/shared/run_layers.aiml"
 - import: "sources/shared/job_params.aiml"
 - import: "sources/shared/job_policy.aiml"
+- import: "sources/shared/stage_mark.aiml"
 
 - model:
     name: ClusterView
@@ -40,6 +41,9 @@
       # doc/spec/107 §107.1h: wie lange jede Stufe lief — im gleichen
       # Schnappschuss wie die Schichten, es ist dieselbe Frage an dieselbe Stufe.
       - [times,     list<StageTime>]
+      # doc/spec/113 F113-6: the colours a step carries beside its outcome
+      # (magenta = version incompatibility) — in the same snapshot as the runs.
+      - [marks,     list<StageMark>]
       # doc/spec/107 §107.1b: die Speicher gehoeren ins Bild — sie stehen in
       # `live.stores` (doc/spec/99) und NICHT zusaetzlich hier.  Bis 2026-10-18 gab
       # es beides: ein `StoreInfo` neben dem `KvStoreInfo`, in snapshot() aus
