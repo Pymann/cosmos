@@ -20,7 +20,11 @@ for cfg in exodus-test-*-wasm.json; do
         echo "[wasm] FAIL $name: build (logs/wasm_$name.build.log)"; tail -5 "logs/wasm_$name.build.log"
         fails=$((fails + 1)); continue
     fi
-    timeout 120 node "out/$name/$name.js" > "logs/wasm_$name.run.log" 2>&1
+    # --no-concurrent-recompilation: at exit node drains its platform tasks
+    # while a background TurboFan job waits for a GC only the main thread can
+    # run -- a V8 deadlock after main has returned (liveshape_wasm hung in 9 of
+    # 10 runs after printing PASS).  Optimizing on the main thread avoids it.
+    timeout 120 node --no-concurrent-recompilation "out/$name/$name.js" > "logs/wasm_$name.run.log" 2>&1
     rc=$?
     if [ "$rc" -eq "$want" ]; then
         echo "[wasm] ok   $name (exit $rc)"
