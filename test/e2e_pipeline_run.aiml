@@ -47,6 +47,37 @@
       - set: [src, "${src}          run: \"echo faengt-an; sleep 30; echo kommt-nie\"\n"]
       - return: src
 
+# The step cache (doc/spec/96 A96-1..3): two pure stages leave files and
+# one deletes a file of the image.  The opaque check runs every time and
+# fails unless the layers, restored or not, give exactly that file system.
+- def:
+    name: cache_source
+    return: { type: string, lifetime: producer }
+    body:
+      - decl: [src, string, ""]
+      - set: [src, "${src}- pipeline:\n"]
+      - set: [src, "${src}    name: e2e_cache\n"]
+      - set: [src, "${src}    cache: pure\n"]
+      - set: [src, "${src}    steps:\n"]
+      - set: [src, "${src}      - stage:\n"]
+      - set: [src, "${src}          name: eins\n"]
+      - set: [src, "${src}          run: \"echo stufe-eins-lief; echo eins > /etc/cache-eins; rm -f /etc/cache-weg\"\n"]
+      - set: [src, "${src}      - stage:\n"]
+      - set: [src, "${src}          name: zwei\n"]
+      - set: [src, "${src}          run: \"echo stufe-zwei-lief; cat /etc/cache-eins > /etc/cache-zwei\"\n"]
+      # A96-2: resolved — the probe reads a "branch head" the probe script
+      # moves between runs; the stage reruns exactly when it moved.
+      - set: [src, "${src}      - stage:\n"]
+      - set: [src, "${src}          name: holen\n"]
+      - set: [src, "${src}          cache: resolved\n"]
+      - set: [src, "${src}          resolve: \"cat /tmp/cosmos-cache-rev\"\n"]
+      - set: [src, "${src}          run: \"echo stufe-holen-lief\"\n"]
+      - set: [src, "${src}      - stage:\n"]
+      - set: [src, "${src}          name: pruefen\n"]
+      - set: [src, "${src}          cache: opaque\n"]
+      - set: [src, "${src}          run: \"test -f /etc/cache-eins && test -f /etc/cache-zwei && test ! -e /etc/cache-weg && echo stufen-stand-ok\"\n"]
+      - return: src
+
 - def:
     name: probe_source
     # `hold_s`: wie lange die erste Stufe arbeitet.  Der Chaos-Lauf braucht sie
@@ -109,10 +140,17 @@
       # mit Rueckgabewert 124, kein Durchlauf.
       - decl: [tmo_probe, i32, 0]
       - if: { condition: { gt: [{ call: [envm.contains, "COSMOS_TIMEOUT_PROBE"] }, 0] }, then: [{ set: [tmo_probe, 1] }] }
+      # COSMOS_CACHE_PROBE=1: the step-cache pipeline; done means 3 stages.
+      - decl: [cache_probe, i32, 0]
+      - if: { condition: { gt: [{ call: [envm.contains, "COSMOS_CACHE_PROBE"] }, 0] }, then: [{ set: [cache_probe, 1] }] }
+      - decl: [want_stages, i32, 4]
       - if:
           condition: { eq: [tmo_probe, 1] }
           then: [{ set: [sreq.source, { call: [timeout_source] }] }]
           else: [{ set: [sreq.source, { call: [probe_source, hold_s] }] }]
+      - if:
+          condition: { eq: [cache_probe, 1] }
+          then: [{ set: [sreq.source, { call: [cache_source] }] }, { set: [want_stages, 4] }]
       - set: [sreq.enabled, 1]
       - set: [sreq.interval_s, 0]
       - decl: [sack, ptr<JobAck>, { new: JobAck }]
@@ -173,7 +211,8 @@
                                     - if: { condition: { gt: [stg.required_label.len, 0] }, then: [{ set: [label_agent, stg.agent] }] }
                                     - set: [six, { +: [six, 1] }]
                         - set: [pix, { +: [pix, 1] }]
-            - if: { condition: { '&&': [{ eq: [tmo_probe, 0] }, { ge: [done_stages, 4] }] }, then: [{ set: [deadline, 0] }] }
+            - if: { condition: { '&&': [{ eq: [tmo_probe, 0] }, { ge: [done_stages, want_stages] }] }, then: [{ set: [deadline, 0] }] }
+            - if: { condition: { '&&': [{ eq: [cache_probe, 1] }, { eq: [run_status, "failed"] }] }, then: [{ set: [deadline, 0] }] }
             # Die Zeitgrenzen-Probe wartet auf das ENDE des Laufs, nicht auf
             # fertige Stufen — sie soll ja scheitern.
             - if: { condition: { '&&': [{ eq: [tmo_probe, 1] }, { '||': [{ eq: [run_status, "failed"] }, { eq: [run_status, "done"] }] }] }, then: [{ set: [deadline, 0] }] }
@@ -186,6 +225,13 @@
             - set: [fails, { +: [fails, { call: [expect, "und keine Stufe gilt als durchgelaufen (${done_stages})", { eq: [done_stages, 0] }] }] }]
             - if: { condition: { eq: [fails, 0] }, then: [{ print: ["PASS e2e_timeout_probe"] }, { return: 0 }] }
             - print: ["FAIL e2e_timeout_probe (${fails})"]
+            - return: 1
+      - if:
+          condition: { eq: [cache_probe, 1] }
+          then:
+            - set: [fails, { +: [fails, { call: [expect, "all four stages done (${done_stages}/4, run ${run_status})", { ge: [done_stages, 4] }] }] }]
+            - if: { condition: { eq: [fails, 0] }, then: [{ print: ["PASS e2e_cache_probe ${run_id}"] }, { return: 0 }] }
+            - print: ["FAIL e2e_cache_probe (${fails})"]
             - return: 1
       - set: [fails, { +: [fails, { call: [expect, "alle vier Stufen sind durch (${done_stages}/4, Lauf ${run_status})", { ge: [done_stages, 4] }] }] }]
       - set: [fails, { +: [fails, { call: [expect, "die Stufe mit label lief auf einem Agenten (${label_agent})", { gt: [label_agent.len, 0] }] }] }]

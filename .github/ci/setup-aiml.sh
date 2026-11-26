@@ -15,12 +15,18 @@
 #        AIML_KONTOR_STRICT  1 = fail instead of falling back to GitHub
 #   1. the release named by AIML_RELEASE (e.g. v1.0.2.4), else the newest
 #      published release, prereleases included (drafts are not visible here);
+#      AIML_RELEASE as a 40-hex COMMIT instead: the aiml-linux-x86_64 artifact
+#      of the green CI run of exactly that commit (a fix that is merged but
+#      not tagged yet -- the pin then names the commit, not a guess);
 #   2. the aiml-linux-x86_64 artifact of the newest green CI run on master.
 # 1. and 2. come with a .sha256 and are checked against it.
 #
-# AIML_RELEASE unset or empty: the tag in .github/ci/aiml-release beside this
-# script (the versioned pin; it must lie in the compiler.version range of
-# exodus-cosmosd.json).  AIML_RELEASE=latest restores "newest release".
+# AIML_RELEASE unset or empty: the pin in .github/ci/aiml-release beside this
+# script -- a v* tag (it must lie in the compiler.version range of
+# exodus-cosmosd.json) or, until a fix is tagged, a full aiml commit sha.  A
+# commit build calls itself git-<sha7>, so `aiml build` reports it as
+# version-mismatch (spec/68 F68-117): a warning, on purpose -- it is not a
+# release.  AIML_RELEASE=latest restores "newest release".
 #
 # Usage: setup-aiml.sh <venv-dir>      (1. and 2. need GH_TOKEN for the gh CLI)
 set -euo pipefail
@@ -71,6 +77,19 @@ if [ -n "${AIML_KONTOR_URL:-}" ]; then
         echo "::warning::aiml not available from kontor $AIML_KONTOR_URL -- falling back to GitHub"
         rm -rf "${DL:?}"/*
     fi
+fi
+
+# A commit pin from GitHub: the CI artifact of that very commit, or nothing.
+if [ -z "$PKG" ] && [[ "${AIML_RELEASE:-}" =~ ^[0-9a-f]{40}$ ]]; then
+    run="$(gh api "repos/$REPO/actions/runs?head_sha=$AIML_RELEASE&status=success" \
+        -q '[.workflow_runs[] | select(.name == "CI")][0].id' 2>/dev/null || true)"
+    [ -n "$run" ] && [ "$run" != "null" ] \
+        || { echo "::error::aiml commit $AIML_RELEASE has no green CI run in $REPO"; exit 1; }
+    gh run download "$run" -R "$REPO" -n aiml-linux-x86_64 -D "$DL"
+    echo "aiml: commit $AIML_RELEASE, CI run https://github.com/$REPO/actions/runs/$run"
+    (cd "$DL" && sha256sum -c ./*.tar.gz.sha256)
+    tar -xzf "$DL"/aiml-*-linux-x86_64.tar.gz -C "$DL"
+    PKG="$(echo "$DL"/aiml-*-linux-x86_64/)"
 fi
 
 if [ -z "$PKG" ]; then
