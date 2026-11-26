@@ -83,7 +83,7 @@ cosmos ist **kein Open Source**, sondern *source-available* unter der
 [Pymann Commercial Source License 1.0](LICENSE)
 (`LicenseRef-Pymann-Commercial-1.0`). Lesen, Evaluieren (bis 30 Tage) und
 private, nicht kommerzielle Nutzung sind frei. Jeder produktive Einsatz braucht
-eine kommerzielle Lizenz: **5.000 € pro Jahr** je Organisation (zzgl. USt.).
-Kontakt über [github.com/Pymann](https://github.com/Pymann).
+eine kommerzielle Lizenz: **5.000 € pro Jahr** je Organisation (zzgl. USt.), nur im Paket für cosmos, ufo und kontor zusammen.
+Kontakt: [n.ehrhardt88@gmail.com](mailto:n.ehrhardt88@gmail.com).
 
 Abhängigkeiten wie aiml und exodus behalten ihre eigenen Lizenzen (MIT).
