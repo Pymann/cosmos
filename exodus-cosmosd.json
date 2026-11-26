@@ -6,6 +6,7 @@
     "sources": ["sources/server/daemon_main.aiml"],
     "compiler": {
         "name": "$AIML",
+        "version": { "ge": "1.0.2.8", "lt": "1.1" },
         "lang_standard": "17",
         "flags": []
     },

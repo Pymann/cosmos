@@ -18,10 +18,18 @@
 #   2. the aiml-linux-x86_64 artifact of the newest green CI run on master.
 # 1. and 2. come with a .sha256 and are checked against it.
 #
+# AIML_RELEASE unset or empty: the tag in .github/ci/aiml-release beside this
+# script (the versioned pin; it must lie in the compiler.version range of
+# exodus-cosmosd.json).  AIML_RELEASE=latest restores "newest release".
+#
 # Usage: setup-aiml.sh <venv-dir>      (1. and 2. need GH_TOKEN for the gh CLI)
 set -euo pipefail
 
 VENV="${1:?venv dir}"
+if [ -z "${AIML_RELEASE:-}" ] && [ -f "$(dirname "$0")/aiml-release" ]; then
+    AIML_RELEASE="$(tr -d '[:space:]' < "$(dirname "$0")/aiml-release")"
+fi
+[ "${AIML_RELEASE:-}" = "latest" ] && AIML_RELEASE=""
 REPO="${AIML_REPO:-Pymann/aiml}"
 DL="$(mktemp -d)"
 PKG=""
