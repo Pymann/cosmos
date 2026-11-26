@@ -123,8 +123,10 @@ Nach einigen Wochen ist damit belegt, welche Deklarationen tragen — statt es z
   upper is kept under the key. Only successes are kept, and a failed stage ends the chain. A probe that exits
   non-zero fails the stage with 125 (aiml F62-160): an unknown key never means "unchanged".
 - **Where the class comes from:** `stg.cache` and `stg.resolve` (aiml spec/62 §9.1, F62-159 to
-  F62-164: the weakest step decides the stage). Until cosmos builds against an aiml release with
-  those readers, no stage is declared and everything stays opaque.
+  F62-164: the weakest step decides the stage), read at submit by `PipelineSubmit.declare_in`
+  on every submit path (aiml v1.0.2.9 onwards). An undeclared stage stays opaque.
+- **Acceptance:** `probe/step_cache.sh` runs one pipeline three times on a container-mode agent
+  and checks A96-1, A96-2 and A96-3 (needs root).
 
 ## 96.7 Abnahme
 
