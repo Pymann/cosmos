@@ -111,10 +111,8 @@ jobs:
           if-no-files-found: ignore
 
   # kontor and cosmos together (doc/spec/111 §111.6/§111.9): webhooks,
-  # rebuild campaigns, OCI push and pull.  kontor is a private repository:
-  # secret KONTOR_READ_TOKEN (contents: read on Pymann/kontor) lets the job
-  # check it out -- the same secret ufo's CI asks for.  Without it the job
-  # says so and passes.
+  # rebuild campaigns, OCI push and pull.  Pymann/kontor is public and is
+  # cloned without a token; secret KONTOR_READ_TOKEN is used when set.
   e2e-kontor:
     name: run_e2e_kontor.sh
     runs-on: ubuntu-24.04
@@ -130,15 +128,11 @@ jobs:
         env:
           TOKEN: ${{ secrets.KONTOR_READ_TOKEN }}
         run: |
-          # On main a missing secret is a failure: a green main must have run the
-          # suite.  A pull request (a fork gets no secrets) only says so.
-          if [ -z "$TOKEN" ]; then
-            if [ "${{ github.event_name }}" = "pull_request" ]; then
-              echo "::notice::KONTOR_READ_TOKEN not set, run_e2e_kontor.sh skipped"; exit 0
-            fi
-            echo "::error::KONTOR_READ_TOKEN not set — run_e2e_kontor.sh cannot run on ${{ github.ref_name }}"; exit 1
-          fi
-          git clone -q --depth 1 "https://x-access-token:${TOKEN}@github.com/Pymann/kontor.git" "$RUNNER_TEMP/kontor"
+          # Pymann/kontor is public: a clone needs no token.  KONTOR_READ_TOKEN is
+          # used when set (a private kontor again).  A failed clone fails the job.
+          url="https://github.com/Pymann/kontor.git"
+          [ -n "$TOKEN" ] && url="https://x-access-token:${TOKEN}@github.com/Pymann/kontor.git"
+          git clone -q --depth 1 "$url" "$RUNNER_TEMP/kontor"
           echo "dir=$RUNNER_TEMP/kontor" >> "$GITHUB_OUTPUT"
 
       - name: System packages
