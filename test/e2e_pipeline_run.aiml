@@ -109,6 +109,33 @@
       - set: [src, "${src}          run: \"echo stufe-drei\"\n"]
       - return: src
 
+# COSMOS_SECRET_PROBE=1 (doc/spec/115 §115.8): one stage that binds three
+# secrets and prints them every way a log can show them, then one that names
+# a secret the server does not have.  The masking itself is checked by
+# run_e2e_pipeline.sh on the server's log.
+- def:
+    name: secret_source
+    return: { type: string, lifetime: producer }
+    body:
+      - decl: [src, string, "- pipeline:\n"]
+      - set: [src, "${src}    name: e2e_secrets\n"]
+      - set: [src, "${src}    cache: pure\n"]
+      - set: [src, "${src}    secrets:\n"]
+      - set: [src, "${src}      - { name: tok, env: TOKEN }\n"]
+      - set: [src, "${src}    steps:\n"]
+      - set: [src, "${src}      - stage:\n"]
+      - set: [src, "${src}          name: zeigen\n"]
+      - set: [src, "${src}          secrets:\n"]
+      - set: [src, "${src}            - { name: deploy, env: DEPLOY }\n"]
+      - set: [src, "${src}            - { name: sign, env: SIGN }\n"]
+      - set: [src, "${src}          run: 'echo \"tok=$TOKEN\"; echo \"user=$DEPLOY_USER pw=$DEPLOY_PASSWORD\"; printf %s \"$TOKEN\" | base64; printf %s \"$DEPLOY_USER:$DEPLOY_PASSWORD\" | base64; head -c 65530 /dev/zero | tr \"\\\\000\" a; echo \"$TOKEN\"; echo \"sign=$(cat $SIGN) mode=$(stat -c %a $SIGN)\"; echo \"secret-dir=$(dirname $SIGN)\"; sleep 4; echo secret-stage-done'\n"]
+      - set: [src, "${src}      - stage:\n"]
+      - set: [src, "${src}          name: fehlt\n"]
+      - set: [src, "${src}          secrets:\n"]
+      - set: [src, "${src}            - { name: nope, env: NOPE }\n"]
+      - set: [src, "${src}          run: 'echo should-not-run'\n"]
+      - return: src
+
 - def:
     name: main
     static_off: ["str_cmp"]
@@ -143,6 +170,10 @@
       # COSMOS_CACHE_PROBE=1: the step-cache pipeline; done means 3 stages.
       - decl: [cache_probe, i32, 0]
       - if: { condition: { gt: [{ call: [envm.contains, "COSMOS_CACHE_PROBE"] }, 0] }, then: [{ set: [cache_probe, 1] }] }
+      # COSMOS_SECRET_PROBE=1: done means stage 1 done and the run failed at
+      # stage 2 (A115-5).
+      - decl: [secret_probe, i32, 0]
+      - if: { condition: { gt: [{ call: [envm.contains, "COSMOS_SECRET_PROBE"] }, 0] }, then: [{ set: [secret_probe, 1] }] }
       - decl: [want_stages, i32, 4]
       - if:
           condition: { eq: [tmo_probe, 1] }
@@ -151,6 +182,9 @@
       - if:
           condition: { eq: [cache_probe, 1] }
           then: [{ set: [sreq.source, { call: [cache_source] }] }, { set: [want_stages, 4] }]
+      - if:
+          condition: { eq: [secret_probe, 1] }
+          then: [{ set: [sreq.source, { call: [secret_source] }] }]
       - set: [sreq.enabled, 1]
       - set: [sreq.interval_s, 0]
       - decl: [sack, ptr<JobAck>, { new: JobAck }]
@@ -213,6 +247,7 @@
                         - set: [pix, { +: [pix, 1] }]
             - if: { condition: { '&&': [{ eq: [tmo_probe, 0] }, { ge: [done_stages, want_stages] }] }, then: [{ set: [deadline, 0] }] }
             - if: { condition: { '&&': [{ eq: [cache_probe, 1] }, { eq: [run_status, "failed"] }] }, then: [{ set: [deadline, 0] }] }
+            - if: { condition: { '&&': [{ eq: [secret_probe, 1] }, { '||': [{ eq: [run_status, "failed"] }, { eq: [run_status, "done"] }] }] }, then: [{ set: [deadline, 0] }] }
             # Die Zeitgrenzen-Probe wartet auf das ENDE des Laufs, nicht auf
             # fertige Stufen — sie soll ja scheitern.
             - if: { condition: { '&&': [{ eq: [tmo_probe, 1] }, { '||': [{ eq: [run_status, "failed"] }, { eq: [run_status, "done"] }] }] }, then: [{ set: [deadline, 0] }] }
@@ -225,6 +260,14 @@
             - set: [fails, { +: [fails, { call: [expect, "und keine Stufe gilt als durchgelaufen (${done_stages})", { eq: [done_stages, 0] }] }] }]
             - if: { condition: { eq: [fails, 0] }, then: [{ print: ["PASS e2e_timeout_probe"] }, { return: 0 }] }
             - print: ["FAIL e2e_timeout_probe (${fails})"]
+            - return: 1
+      - if:
+          condition: { eq: [secret_probe, 1] }
+          then:
+            - set: [fails, { +: [fails, { call: [expect, "the stage with secrets ran (${done_stages} done)", { eq: [done_stages, 1] }] }] }]
+            - set: [fails, { +: [fails, { call: [expect, "an undeclared secret fails the run (A115-5, ${run_status})", { eq: [run_status, "failed"] }] }] }]
+            - if: { condition: { eq: [fails, 0] }, then: [{ print: ["PASS e2e_secret_probe ${run_id}"] }, { return: 0 }] }
+            - print: ["FAIL e2e_secret_probe (${fails})"]
             - return: 1
       - if:
           condition: { eq: [cache_probe, 1] }

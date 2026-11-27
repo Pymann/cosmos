@@ -16,10 +16,62 @@
 
 - import: "sources/models/agent_proto.aiml"   # OutStream
 - import: "sources/models/run_output.aiml"
+- import: "sources/shared/secret_mask.aiml"
 
 - class:
     name: OutPump
+    # doc/spec/115 §115.5: a pump with masks masks every chunk before it leaves
+    # the host and never cuts through a value (F115-16).  Without masks it is
+    # the pump it always was.
+    members:
+      - [mask,      cosmos.secrets.SecretMask]
+      - [final,     i32, 0]
+      - [muted,     i32, 0]
+      - [said_mute, i32, 0]
     methods:
+      - def:
+          name: arm
+          access: public
+          args: [[masks_text, string]]
+          body:
+            - call: [<.mask.from_text, masks_text]
+            - set: [<.final, 0]
+            - set: [<.muted, 0]
+            - set: [<.said_mute, 0]
+
+      - def:
+          name: disarm
+          access: public
+          body:
+            - call: [<.mask.clear]
+            - set: [<.final, 0]
+            - set: [<.muted, 0]
+            - set: [<.said_mute, 0]
+
+      # mute: the masks are lost (F115-20) — the rest of the output stays on
+      # the agent.
+      - def:
+          name: mute
+          access: public
+          body:
+            - set: [<.muted, 1]
+
+      - def:
+          name: set_final
+          access: public
+          args: [[ended, i32]]
+          body:
+            - set: [<.final, ended]
+
+      - def:
+          name: masked
+          access: public
+          args: [[text, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - if: { condition: { eq: [{ call: [<.mask.count] }, 0] }, then: [{ return: text }] }
+            - return: { call: [<.mask.apply, text] }
+
       # tail: nur die neuen Bytes ab `off` lesen und als Chunk senden.
       # Rueckgabe: der neue Offset (unveraendert, wenn es nichts Neues gab).
       - def:
@@ -38,6 +90,23 @@
             - decl: [text, string, { call: [io.read, src, want] }]
             - call: [io.close, src]
             - if: { condition: { eq: [text.len, 0] }, then: [{ return: off }] }
+            - if:
+                condition: { eq: [<.muted, 1] }
+                then:
+                  - if:
+                      condition: { eq: [<.said_mute, 0] }
+                      then:
+                        - set: [<.said_mute, 1]
+                        - call: [<.send_text, sess, run_ref, stream, "\n… output withheld: the agent restarted and lost the masks of this stage's secrets (doc/spec/115 F115-20) — full output on the agent …\n", off]
+                  - return: { +: [off, text.len] }
+            - if:
+                condition: { gt: [{ call: [<.mask.count] }, 0] }
+                then:
+                  - decl: [cut, i32, { call: [<.mask.safe_cut, text, <.final] }]
+                  - if: { condition: { le: [cut, 0] }, then: [{ return: off }] }
+                  - decl: [part, string, { call: [text.substr, 0, cut] }]
+                  - call: [<.send_text, sess, run_ref, stream, { call: [<.mask.apply, part] }, off]
+                  - return: { +: [off, cut] }
             - call: [<.send_text, sess, run_ref, stream, text, off]
             - return: { +: [off, text.len] }
 

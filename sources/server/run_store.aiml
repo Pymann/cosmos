@@ -11,6 +11,7 @@
 #          eigene Byte-Offsets);  KV "runs": run_ref → RunInfo.
 
 - import: "sources/models/agent_exec.aiml"
+- import: "sources/shared/secret_mask.aiml"
 
 - class:
     name: RunStore
@@ -20,6 +21,13 @@
       - [cur_ref, string, ""]
       - [cur_out, file_handle]
       - [cur_err, file_handle]
+      # doc/spec/115 F115-17: the second net.  Per stage that binds secrets
+      # its masks (SecretMask.to_text), from claim_step to the report — in
+      # memory only, and lost with a restart, which is why the agent masks
+      # first.  One loaded masker for the stage whose chunk came last.
+      - [masks,    map<string:string>]
+      - [mask_ref, string, ""]
+      - [mask,     cosmos.secrets.SecretMask]
     methods:
       - def:
           name: init
@@ -228,12 +236,44 @@
           args: [[run_ref, string], [exit_code, i32]]
           body:
             - if: { condition: { eq: [run_ref, <.cur_ref] }, then: [{ call: [<.close_cur] }] }
+            - if:
+                condition: { gt: [{ call: [<.masks.contains, run_ref] }, 0] }
+                then:
+                  - call: [<.masks.remove, run_ref]
+                  - set: [<.mask_ref, ""]
+                  - call: [<.mask.clear]
             - if: { condition: { eq: [{ call: [<.infos.has, run_ref] }, 0] }, then: [{ return: [] }] }
             - decl: [nfo, RunInfo, { call: [<.infos.get_copy, run_ref] }]
             - set: [nfo.state, RunState.finished]
             - set: [nfo.exit_code, exit_code]
             - set: [nfo.updated_ms, { call: [time.now] }]
             - call: [<.infos.set, run_ref, nfo]
+
+      # set_masks / masked: the server's own masking (F115-17).  `masked`
+      # comes before `append` AND before the live forward to the viewer.
+      - def:
+          name: set_masks
+          access: public
+          args: [[run_ref, string], [text, string]]
+          body:
+            - if: { condition: { eq: [text.len, 0] }, then: [{ return: null }] }
+            - call: [<.masks.put, run_ref, text]
+            - set: [<.mask_ref, ""]
+
+      - def:
+          name: masked
+          access: public
+          static_off: ["str_cmp"]
+          args: [[run_ref, string], [chunk, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - if: { condition: { eq: [{ call: [<.masks.contains, run_ref] }, 0] }, then: [{ return: chunk }] }
+            - if:
+                condition: { neq: [run_ref, <.mask_ref] }
+                then:
+                  - call: [<.mask.from_text, { call: [<.masks.get, run_ref] }]
+                  - set: [<.mask_ref, run_ref]
+            - return: { call: [<.mask.apply, chunk] }
 
       # info: kleine Metadaten; Byte-Zähler kommen aus der Dateigrösse (immer wahr).
       - def:

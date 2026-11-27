@@ -16,6 +16,7 @@
 - import: "sources/server/job_config.aiml"
 - import: "sources/server/stage_marks.aiml"
 - import: "sources/server/stage_keys.aiml"
+- import: "sources/server/stage_secrets.aiml"
 - import: "sources/models/rt_spawn.aiml"
 - import: "sources/shared/cluster_view.aiml"
 - import: "sources/shared/res_usage.aiml"
@@ -54,6 +55,8 @@
       - [marks, StageMarkStore]
       # doc/spec/96 §96.6: reuse claims and the keys stages ended with.
       - [keys, StageKeyStore]
+      # doc/spec/115 §115.4: which secrets each stage binds (names only).
+      - [secrets, StageSecretStore]
       # Wem wurde WANN ein Container-Auftrag gegeben (doc/spec/110 §110.36).
       # Im Speicher, nicht auf Platte: ein Auftrag ueberlebt den Controller
       # nicht — der neue fragt ohnehin neu.
@@ -73,6 +76,7 @@
             - call: [<.jobcfg.init]
             - call: [<.marks.init]
             - call: [<.keys.init]
+            - call: [<.secrets.init]
 
       - def:
           name: make_stage

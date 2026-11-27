@@ -100,6 +100,8 @@
                     then:
                       - call: [log.warn, "[run_exec] agent ${bound} reported for a run it was not assigned — dropped"]
                       - return: []
+                # doc/spec/115 F115-17: masked before it is stored or shown.
+                - set: [chunk.chunk, { call: [<.runs.masked, chunk.run_ref, chunk.chunk] }]
                 # SOFORT persistieren (§AP1.5a) — der Chunk wird nirgends gesammelt.
                 - decl: [total, i64, { call: [<.runs.append, chunk.run_ref, chunk.stream, chunk.chunk] }]
                 - if: { condition: { lt: [total, 0] }, then: [{ call: [log.warn, "[run_exec] append failed for ${chunk.run_ref}"] }] }

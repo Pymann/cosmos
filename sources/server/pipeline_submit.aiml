@@ -29,6 +29,7 @@
 - import: "sources/shared/job_params.aiml"
 - import: "sources/shared/kontor_access.aiml"
 - import: "sources/server/stage_keys.aiml"
+- import: "sources/server/stage_secrets.aiml"
 
 - class:
     name: PipelineSubmit
@@ -193,7 +194,7 @@
           name: declare_in
           access: public
           static_off: ["str_cmp"]
-          args: [[source, string], [prm_src, string], [run_id, string], [keys, ref<StageKeyStore>]]
+          args: [[source, string], [prm_src, string], [run_id, string], [keys, ref<StageKeyStore>], [secrets, ref<StageSecretStore>]]
           return: i32
           body:
             - decl: [kontext, ctx_handle, { call: [ctx.new] }]
@@ -213,6 +214,17 @@
                 condition: { lt: [six, { call: [pipe.stage_count] }] }
                 body:
                   - decl: [stg, stage, { call: [pipe.stage_at, six] }]
+                  # doc/spec/115 §115.4: the names each row binds (aiml F62-166).
+                  - decl: [sec_txt, string, { call: [stg.secrets] }]
+                  - if:
+                      condition: { gt: [sec_txt.len, 0] }
+                      then:
+                        - decl: [sec_lix, i32, 0]
+                        - while:
+                            condition: { lt: [sec_lix, { call: [pipe.lane_count] }] }
+                            body:
+                              - call: [secrets.declare, "${run_id}-${sec_lix}-${six}", sec_txt]
+                              - set: [sec_lix, { +: [sec_lix, 1] }]
                   - decl: [cls_txt, string, { call: [stg.cache] }]
                   - decl: [cls, i32, 0]
                   - if: { condition: { eq: [cls_txt, "resolved"] }, then: [{ set: [cls, 1] }] }

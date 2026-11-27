@@ -5,6 +5,7 @@
 # gespeicherten Job unlesbar (doc/spec/108 F108-2).
 #
 # Static-Check (aiml spec/49 §14): 2 models.
+- import: "sources/models/secret_kind.aiml"
 - import: "sources/models/casc_config.aiml"
 - import: "sources/models/git_config.aiml"
 
@@ -45,3 +46,5 @@
       - [git,         CascGit]
       - [repo_specs,  list<RepoSpec>]
       - [repos,       list<RepoSource>]
+      # doc/spec/115 §115.2: what each secret is besides its value.
+      - [kinds,       SecretKindSet]

@@ -15,6 +15,7 @@
 - import: "sources/shared/dir_stat.aiml"
 - import: "sources/shared/step_cache_api.aiml"
 - import: "sources/shared/step_keys.aiml"
+- import: "sources/agent/agent_secrets.aiml"
 
 - class:
     name: StepWorker
@@ -44,6 +45,10 @@
       # in der Ablage, damit ein Neustart dort weitermacht; hier sind sie der
       # heisse Pfad, der nicht jede Runde ins KV greifen soll.
       - [pump_io,     OutPump]
+      # doc/spec/115: the secrets of the stage in work — their directory and
+      # what the pump must mask.  Empty for a stage without secrets.
+      - [sfiles,      StepSecretFiles]
+      - [smask,       cosmos.secrets.SecretMask]
       - [out_off,     i64]
       - [err_off,     i64]
       - [said_cut,    i32]
@@ -596,6 +601,12 @@
             - call: [argv.push, "--bind"]
             - call: [argv.push, workdir]
             - call: [argv.push, workdir]
+            # doc/spec/115 F115-11: the stage's secrets, beside the step
+            # directory, read-only.  `-try`: most stages have none.
+            - decl: [sec_dir, string, { call: [<.sfiles.dir_of, workdir] }]
+            - call: [argv.push, "--ro-bind-try"]
+            - call: [argv.push, sec_dir]
+            - call: [argv.push, sec_dir]
             # Lokale Spiegel, falls der Container welche hat (COSMOS_RT_SRC).
             - call: [argv.push, "--ro-bind-try"]
             - call: [argv.push, "/src"]
@@ -665,6 +676,15 @@
                   - call: [log.error, "[step] ${got.stage_name}: kein Befehl (run: fehlt) — abgelehnt"]
                   - call: [<.send_report, sess, got.run_id, got.stage_id, 125, "kein Befehl am Schritt"]
                   - return: 0
+            # doc/spec/115 F115-12: a secret the server could not bind ends the
+            # stage now, with the server's reason (it names the secret, never
+            # a value).
+            - if:
+                condition: { gt: [got.secret_error.len, 0] }
+                then:
+                  - call: [log.error, "[step] ${got.stage_name}: ${got.secret_error}"]
+                  - call: [<.send_report, sess, got.run_id, got.stage_id, 125, got.secret_error]
+                  - return: 0
             - set: [<.run_id, got.run_id]
             - set: [<.stage_id, got.stage_id]
             - set: [<.attempt, got.attempt]
@@ -718,6 +738,14 @@
             # ein Schritt, den niemand beobachtet, und der Server teilt die
             # Stufe nach Fristablauf ein zweites Mal zu.
             - call: [<.remember, got.run_id, got.stage_id, <.step_dir, 0]
+            # doc/spec/115 §115.4: the secrets beside the step directory, the
+            # pump armed with their masks BEFORE anything can print them.
+            - call: [<.smask.clear]
+            - decl: [env_file, string, { call: [<.sfiles.lay_out, <.step_dir, got.secrets, <.smask] }]
+            - call: [<.pump_io.arm, { call: [<.smask.to_text] }]
+            # F115-10: the command names the file, the values stay in it.
+            - decl: [step_cmd, string, got.command]
+            - if: { condition: { gt: [env_file.len, 0] }, then: [{ set: [step_cmd, ". '${env_file}' || exit 125\n${got.command}"] }] }
             # Vorbedingungen zuerst (aiml F62-126): fehlt etwas, faellt es JETZT
             # auf — nicht in der fuenften Minute mit einer Meldung ueber eine
             # fehlende Header-Datei, die niemanden auf das fehlende Paket bringt.
@@ -792,14 +820,14 @@
                       else:
                         - call: [argv.push, "/bin/sh"]
                         - call: [argv.push, "-lc"]
-                        - call: [argv.push, got.command]
+                        - call: [argv.push, step_cmd]
                 else:
-                  - set: [argv, { call: [<.sandbox_argv, <.step_dir, got.command, got.bindings] }]
+                  - set: [argv, { call: [<.sandbox_argv, <.step_dir, step_cmd, got.bindings] }]
             - decl: [oenv, map<string:string>, { call: [<.step_env, <.step_dir, got.bindings, { -: [1, direct] }] }]
             # Der Befehl als VARIABLE: so muss das Schichten-Skript ihn nicht
             # in Anfuehrungszeichen fassen — und ein Befehl, der selbst welche
             # enthaelt (fast jeder), bleibt heil.
-            - call: [oenv.put, "COSMOS_STEP_CMD", got.command]
+            - call: [oenv.put, "COSMOS_STEP_CMD", step_cmd]
             # F103-17: die Ausfuehrungsgrenze.  Der ABGEKOPPELTE Beobachter
             # erzwingt sie selbst (spec/23 §5.3) — auch wenn der Agent
             # zwischendurch stirbt.  Der Rueckgabewert ist dann 124, wie bei
@@ -874,6 +902,10 @@
           args: [[stage_id, string]]
           body:
             - if: { condition: { eq: [{ call: [<.notes.has, stage_id] }, 1] }, then: [{ call: [<.notes.delete, stage_id] }] }
+            # doc/spec/115 F115-11: whatever ended the step, its secrets go.
+            - if: { condition: { gt: [<.step_dir.len, 0] }, then: [{ call: [<.sfiles.remove, <.step_dir] }] }
+            - call: [<.pump_io.disarm]
+            - call: [<.smask.clear]
 
       # resume: beim Start ALLE offenen Schritte durchgehen.
       #   laeuft noch      → wieder aufnehmen und weiter beobachten
@@ -912,6 +944,7 @@
                       then:
                         - call: [log.warn, "[step] ${note.stage_id} war fertig (${note.exit_code}), Meldung offen — wird nachgeholt"]
                         - call: [<.pending.push, note]
+                        - call: [<.sfiles.remove, note.step_dir]
                         - set: [found, 5]
                   # F103-15: vorgemerkt, aber nie gestartet — oder gestartet und
                   # der Agent starb, bevor er die PID festhielt.  UNKLAR heisst
@@ -923,6 +956,7 @@
                         - call: [log.warn, "[step] ${note.stage_id} war nur vorgemerkt — unklar, ob er lief; wird zurueckgegeben"]
                         - call: [<.lost.push, note]
                         - call: [<.notes.delete, key]
+                        - call: [<.sfiles.remove, note.step_dir]
                         - set: [found, 6]
                   - if:
                       condition: { eq: [found, 0] }
@@ -953,6 +987,10 @@
                               - set: [<.err_off, note.sent_err]
                               - set: [<.started_ms, note.started_ms]
                               - set: [<.last_renew, { call: [time.now] }]
+                              # F115-20: the masks back, or no more output.
+                              - decl: [got_masks, i32, { call: [<.sfiles.restore, note.step_dir, <.smask] }]
+                              - if: { condition: { eq: [got_masks, 1] }, then: [{ call: [<.pump_io.arm, { call: [<.smask.to_text] }] }] }
+                              - if: { condition: { lt: [got_masks, 0] }, then: [{ call: [<.pump_io.mute] }] }
                               - if:
                                   condition: { eq: [found, 1] }
                                   then: [{ call: [log.info, "[step] laeuft noch (pid ${note.pid}) — wird weiter beobachtet"] }]
@@ -965,6 +1003,7 @@
                               - call: [log.warn, "[step] ${note.stage_id} spurlos verschwunden — wird zurueckgegeben"]
                               - call: [<.lost.push, note]
                               - call: [<.notes.delete, key]
+                              - call: [<.sfiles.remove, note.step_dir]
 
       # ── report_pending: die nachgeholte Ergebnismeldung ─────────────────
       # F103-16.  Getrennt von `report_lost`, weil es das Gegenteil sagt: hier
@@ -1046,6 +1085,11 @@
           body:
             - if: { condition: { eq: [{ call: [<.busy] }, 0] }, then: [{ return: 0 }] }
             - decl: [cap, i64, 2097152]
+            # F115-16: held-back bytes go out once the step has ended.
+            - decl: [done_p, path, "${<.step_dir}/status"]
+            - decl: [ended, i32, 0]
+            - if: { condition: { eq: [{ call: [io.is_file, done_p] }, true] }, then: [{ set: [ended, 1] }] }
+            - call: [<.pump_io.set_final, ended]
             - decl: [out_path, string, "${<.step_dir}/out"]
             - decl: [err_path, string, "${<.step_dir}/err"]
             - decl: [rounds, i32, 0]
@@ -1138,6 +1182,9 @@
             # Erst festhalten, dann melden, erst nach Antwort vergessen
             # (F103-16).  Die Reihenfolge ist der ganze Punkt.
             - call: [<.mark_done, <.stage_id, code]
+            # F115-11: the secrets go BEFORE the report — a report that does
+            # not get through must not keep them on disk.
+            - call: [<.sfiles.remove, <.step_dir]
             # doc/spec/96 §96.6 step 6: a run that had a key keeps its layer.
             - call: [<.keep_layer, cache, code]
             # 124 ist die Zeitgrenze (spec/23 §5.3).  Ohne Begruendung sieht ein
@@ -1288,7 +1335,7 @@
             - set: [rep.stage_id, stage_id]
             - set: [rep.attempt, <.attempt]
             - set: [rep.exit_code, code]
-            - set: [rep.output, note]
+            - set: [rep.output, { call: [<.pump_io.masked, note] }]
             # The key the stage ENDED with (doc/spec/96 §96.6): only a
             # success has one — a failed stage ends the chain.
             - decl: [key_dir, string, "${<.work_root}/${run_id}/${stage_id}"]

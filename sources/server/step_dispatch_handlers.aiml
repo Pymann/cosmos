@@ -8,6 +8,7 @@
 - import: "sources/models/step_dispatch.aiml"
 - import: "sources/models/step_report.aiml"
 - import: "sources/shared/stage_mark.aiml"
+- import: "sources/shared/secret_mask.aiml"
 
 - groupmethods:
     group: CosmosRuntime
@@ -42,6 +43,18 @@
                 - set: [who.labels, req.labels]
                 - set: [who.image, req.image]
                 - set: [out, { call: [<.cluster.claim_for, who, nowm] }]
+                # doc/spec/115 §115.4: the secrets are read NOW, at hand-out —
+                # a rotated secret is the new one, and nothing with a value is
+                # stored in the run.
+                - decl: [binds, string, ""]
+                - if: { condition: { eq: [out.found, 1] }, then: [{ set: [binds, { call: [<.cluster.secrets.binds_of, out.stage_id] }] }] }
+                - if:
+                    condition: { gt: [binds.len, 0] }
+                    then:
+                      - decl: [cfg, CascConfig, { call: [<.casc.current] }]
+                      - decl: [bound_set, StepSecretSet, { call: [<.cluster.secrets.bind, binds, cfg.secrets, <.seckinds] }]
+                      - set: [out.secrets, bound_set.items]
+                      - set: [out.secret_error, bound_set.error]
                 - if:
                     condition: { eq: [out.found, 1] }
                     then:
@@ -52,6 +65,14 @@
                       # zaehlt.  Bezeichner ist die STUFEN-Kennung, damit zwei
                       # Lanes sich nicht in eine Datei schreiben.
                       - call: [<.runs.begin, out.stage_id, req.agent_id, out.command, ""]
+                      # F115-17: the server's own masks for this stage's log.
+                      - if:
+                          condition: { gt: [out.secrets.len, 0] }
+                          then:
+                            - decl: [smask, ptr<cosmos.secrets.SecretMask>, { new: cosmos.secrets.SecretMask }]
+                            - call: [smask.add_all, out.secrets]
+                            - call: [<.runs.set_masks, out.stage_id, { call: [smask.to_text] }]
+                            - call: [free, smask]
                       - call: [log.info, "[dispatch] ${out.stage_name} -> ${req.agent_id}"]
                 - call: [session.reply_rpc, rpc, "set_result", 0, out]
 

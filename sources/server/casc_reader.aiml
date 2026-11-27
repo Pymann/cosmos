@@ -251,7 +251,7 @@
                 body:
                   - decl: [snode, ref<yaml_node>, { call: [<.unwrap, { call: [yaml.item, secrets, six] }, "secret"] }]
                   - set: [six, { +: [six, 1] }]
-                  - decl: [bad_keys_4, list<string>, { call: [<.unknown_keys, snode, "name,file,env", "secret"] }]
+                  - decl: [bad_keys_4, list<string>, { call: [<.unknown_keys, snode, "name,file,env,kind,user,passphrase,cert,ca,known_hosts", "secret"] }]
                   - call: [out.errors.extend, bad_keys_4]
                   - decl: [sec, CascSecret]
                   - set: [sec.name, { call: [<.text_of, snode, "name"] }]
@@ -268,6 +268,8 @@
                       else: [{ set: [sec.source, "env"] }, { set: [sec.ref, s_env] }]
                   - if: { condition: { eq: [sec.ref.len, 0] }, then: [{ call: [out.errors.push, "secret ${sec.name}: 'file:' oder 'env:' fehlt"] }] }
                   - call: [out.config.secrets.push, sec]
+                  # doc/spec/115 §115.2: the kind and its non-secret fields.
+                  - call: [<.kind_in, snode, sec.name, out]
             # kontor
             - decl: [mus, ref<yaml_node>, { call: [yaml.get, node, "kontor"] }]
             - if:
@@ -570,6 +572,64 @@
             - set: [ent.origin, "catalog"]
             - call: [out.jobs.push, ent]
             - call: [out.sources.push, src]
+
+      # beside: a path of the declaration, relative = next to it (F115-5).
+      - def:
+          name: beside
+          access: public
+          args: [[raw, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - if: { condition: { eq: [raw.len, 0] }, then: [{ return: "" }] }
+            - if: { condition: { eq: [{ call: [raw.starts_with, "/"] }, 1] }, then: [{ return: raw }] }
+            - return: "${<.root}/${raw}"
+
+      # kind_in: `kind:` and the fields that kind takes (doc/spec/115 §115.2,
+      # F115-22: an unknown kind and a field the kind does not take are errors).
+      - def:
+          name: kind_in
+          access: public
+          static_off: ["str_cmp"]
+          args: [[snode, ref<yaml_node>], [name, string], [out, ref<CascDoc>]]
+          body:
+            - decl: [one, SecretKind]
+            - set: [one.name, name]
+            - set: [one.kind, { call: [<.text_of, snode, "kind"] }]
+            - if: { condition: { eq: [one.kind.len, 0] }, then: [{ set: [one.kind, "token"] }] }
+            - set: [one.user, { call: [<.text_of, snode, "user"] }]
+            - set: [one.passphrase, { call: [<.text_of, snode, "passphrase"] }]
+            - set: [one.cert, { call: [<.beside, { call: [<.text_of, snode, "cert"] }] }]
+            - set: [one.ca_cert, { call: [<.beside, { call: [<.text_of, snode, "ca"] }] }]
+            - set: [one.known_hosts, { call: [<.beside, { call: [<.text_of, snode, "known_hosts"] }] }]
+            - decl: [takes, string, ""]
+            - if: { condition: { eq: [one.kind, "token"] }, then: [{ set: [takes, ","] }] }
+            - if: { condition: { eq: [one.kind, "file"] }, then: [{ set: [takes, ","] }] }
+            - if: { condition: { eq: [one.kind, "user_password"] }, then: [{ set: [takes, ",user,"] }] }
+            - if: { condition: { eq: [one.kind, "ssh_key"] }, then: [{ set: [takes, ",user,passphrase,known_hosts,"] }] }
+            - if: { condition: { eq: [one.kind, "tls_client"] }, then: [{ set: [takes, ",cert,ca,"] }] }
+            - if:
+                condition: { eq: [takes.len, 0] }
+                then:
+                  - call: [out.errors.push, "secret ${name}: kind '${one.kind}' is unknown — there are token, user_password, file, ssh_key, tls_client"]
+                  - return: null
+            - decl: [fields, list<string>, ["user", "passphrase", "cert", "ca", "known_hosts"]]
+            - decl: [fix, i32, 0]
+            - while:
+                condition: { lt: [fix, fields.len] }
+                body:
+                  - decl: [field, string, { at: [fields, fix] }]
+                  - set: [fix, { +: [fix, 1] }]
+                  - decl: [given, string, { call: [<.text_of, snode, field] }]
+                  - if:
+                      condition: { '&&': [{ gt: [given.len, 0] }, { lt: [{ call: [takes.index_of, ",${field},"] }, 0] }] }
+                      then: [{ call: [out.errors.push, "secret ${name}: '${field}:' does not belong to kind ${one.kind}"] }]
+            - if:
+                condition: { '&&': [{ eq: [one.kind, "user_password"] }, { eq: [one.user.len, 0] }] }
+                then: [{ call: [out.errors.push, "secret ${name}: kind user_password needs 'user:'"] }]
+            - if:
+                condition: { '&&': [{ eq: [one.kind, "tls_client"] }, { eq: [one.cert.len, 0] }] }
+                then: [{ call: [out.errors.push, "secret ${name}: kind tls_client needs 'cert:'"] }]
+            - call: [out.kinds.kinds.push, one]
 
       # secret_in: a secret's value from the declaration being read (its own
       # `secrets:`), so a from_repo of the same file can use it.  "" = none.

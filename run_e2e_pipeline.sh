@@ -39,7 +39,22 @@ trap cleanup EXIT
 cd "$WORK"
 export AIONDB_PATH="$WORK/aiondb"
 
-COSMOS_BIND="$URL" ./cosmosd > "$LOGS/e2epipe_cosmosd.log" 2>&1 &
+# doc/spec/115: three declared secrets for the secret probe below.  The values
+# are made up here and checked against the server's log afterwards.
+TOKVAL="tok-e2e-$(date +%s%N | tail -c 9)-value"
+PWVAL="pw-e2e-hunter2-$$"
+mkdir -p casc/sec
+printf '%s\n' "$PWVAL" > casc/sec/pw
+printf 'signing-file-content\n' > casc/sec/sign
+cat > casc/casc.yaml <<'CASC'
+- config:
+    secrets:
+      - secret: { name: tok, env: COSMOS_E2E_TOK }
+      - secret: { name: deploy, kind: user_password, user: e2e-deployer, file: sec/pw }
+      - secret: { name: sign, kind: file, file: sec/sign }
+CASC
+
+COSMOS_E2E_TOK="$TOKVAL" COSMOS_CASC="$WORK/casc/casc.yaml" COSMOS_BIND="$URL" ./cosmosd > "$LOGS/e2epipe_cosmosd.log" 2>&1 &
 DAEMON_PID=$!
 for _ in $(seq 1 50); do
     grep -q "listening on" "$LOGS/e2epipe_cosmosd.log" 2>/dev/null && break
@@ -121,6 +136,48 @@ else echo "[e2epipe] FAIL — die Zeitgrenze griff nicht"; RC=1; fi
 grep -q "124" "$LOGS/e2epipe_agent.log" \
     && echo "[e2epipe] ok   der Agent meldete 124 (Zeitgrenze)" \
     || echo "[e2epipe] Hinweis: kein 124 im Agenten-Protokoll"
+
+# ── doc/spec/115: secrets for steps (A115-1..6) ─────────────────────────
+echo "[e2epipe] Secret-Probe (token, user_password, file; dann ein fehlendes)"
+COSMOS_SECRET_PROBE=1 COSMOS_E2E_URL="$URL" ./e2e_pipeline_run > "$LOGS/e2epipe_secrets.log" 2>&1 &
+SPID=$!
+# A115-6: while the stage sleeps, no process shows a value in its arguments.
+PS_HITS=0
+for _ in $(seq 1 30); do
+    ps -eo args > ps.dump 2>/dev/null
+    grep -qF -- "$TOKVAL" ps.dump && PS_HITS=$((PS_HITS+1))
+    grep -qF -- "$PWVAL" ps.dump && PS_HITS=$((PS_HITS+1))
+    sleep 0.3
+done
+wait "$SPID"; SRC=$?
+cat "$LOGS/e2epipe_secrets.log"
+[ "$SRC" -eq 0 ] || { echo "[e2epipe] FAIL — Secret-Probe"; RC=1; }
+[ "$PS_HITS" -eq 0 ] && echo "[e2epipe] ok   kein Wert in einer Befehlszeile (A115-6)" \
+    || { echo "[e2epipe] FAIL — ein Wert stand $PS_HITS mal in ps"; RC=1; }
+SECLOG=$(grep -l "secret-stage-done" run_logs/*.out 2>/dev/null | head -1)
+if [ -z "$SECLOG" ]; then
+    echo "[e2epipe] FAIL — kein Server-Protokoll der Secret-Stufe"; RC=1
+else
+    TOKB64=$(printf %s "$TOKVAL" | base64)
+    BASIC=$(printf %s "e2e-deployer:$PWVAL" | base64)
+    for val in "$TOKVAL" "$PWVAL" "$TOKB64" "$BASIC"; do
+        if grep -qF -- "$val" "$SECLOG"; then echo "[e2epipe] FAIL — ein Wert steht im Server-Protokoll"; RC=1; fi
+    done
+    grep -q "^tok=\*\*\*\*$" "$SECLOG" && echo "[e2epipe] ok   token maskiert (A115-1)" || { echo "[e2epipe] FAIL — tok= nicht maskiert"; RC=1; }
+    grep -q "^user=e2e-deployer pw=\*\*\*\*$" "$SECLOG" && echo "[e2epipe] ok   _USER sichtbar, _PASSWORD maskiert (A115-3)" || { echo "[e2epipe] FAIL — user/pw"; RC=1; }
+    grep -q "a\*\*\*\*$" "$SECLOG" && echo "[e2epipe] ok   Wert ueber der 64-KiB-Grenze maskiert (A115-2)" || { echo "[e2epipe] FAIL — Wert an der Chunk-Grenze"; RC=1; }
+    # The file's content is a line of 16 bytes or more, so it is masked too (F115-18).
+    grep -q "^sign=\*\*\*\* mode=400$" "$SECLOG" && echo "[e2epipe] ok   file: Pfad auf 0400-Datei, Inhalt maskiert (A115-4)" || { echo "[e2epipe] FAIL — file-Secret"; RC=1; }
+    SDIR=$(sed -n 's/^secret-dir=//p' "$SECLOG" | head -1)
+    case "$SDIR" in
+        *.secrets) [ -e "$SDIR" ] && { echo "[e2epipe] FAIL — $SDIR liegt nach dem Lauf noch da"; RC=1; } \
+                   || echo "[e2epipe] ok   Secret-Verzeichnis neben dem Schritt, danach weg (F115-11)" ;;
+        *) echo "[e2epipe] FAIL — Secret-Verzeichnis unerwartet: '$SDIR'"; RC=1 ;;
+    esac
+fi
+grep -rqF -- "$TOKVAL" "$LOGS/e2epipe_cosmosd.log" "$LOGS/e2epipe_agent.log" \
+    && { echo "[e2epipe] FAIL — ein Wert steht im Dienst-Protokoll"; RC=1; } \
+    || echo "[e2epipe] ok   kein Wert in den Protokollen von Server und Agent"
 
 echo "========================================================"
 if [ "$RC" -eq 0 ]; then echo "[e2epipe] PASS"; else echo "[e2epipe] FAIL (rc=$RC) — logs in logs/e2epipe_*.log"; fi

@@ -3,6 +3,8 @@
 # Drei Nachrichten, alle Agent -> Server: holen, erneuern, melden.  Der Agent
 # zieht (F103-2) — der Server haelt Zustand, er treibt nicht.
 
+- import: "sources/models/step_secret.aiml"
+
 - model:
     name: StepClaimReq
     fields:
@@ -37,3 +39,8 @@
       - [cache_class, i32]
       - [resolve,     string]
       - [prev_key,    string]
+      # Secrets for steps (doc/spec/115 §115.4): resolved at THIS claim, never
+      # stored.  `secret_error` != "" = the stage cannot have them; the agent
+      # ends it with 125 and that text (F115-12).
+      - [secrets,      list<StepSecret>]
+      - [secret_error, string]

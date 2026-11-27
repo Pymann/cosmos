@@ -172,6 +172,9 @@
                       # doc/spec/114 F114-1: config.git, beside config (F108-2).
                       - call: [<.gitcfg.check, doc.git, doc.config.secrets, out]
                       - call: [<.gitcfg.plan, doc.git, out]
+                      # doc/spec/115 §115.2: the kinds of the secrets, beside config.
+                      - call: [<.seckinds.check, doc.kinds, doc.config.secrets, out]
+                      - call: [<.seckinds.plan, doc.kinds, out]
                 - if:
                     condition: { eq: [doc.has_catalog, 1] }
                     then: [{ call: [<.plan_catalog, doc, out] }]
@@ -191,7 +194,7 @@
               body:
                 - decl: [out, CascPlan, { call: [<.plan, doc] }]
                 - if: { condition: { eq: [out.success, 0] }, then: [{ return: out }] }
-                - if: { condition: { eq: [doc.has_config, 1] }, then: [{ call: [<.apply_config, doc.config] }, { call: [<.gitcfg.apply, doc.git] }] }
+                - if: { condition: { eq: [doc.has_config, 1] }, then: [{ call: [<.apply_config, doc.config] }, { call: [<.gitcfg.apply, doc.git] }, { call: [<.seckinds.apply, doc.kinds] }] }
                 - if: { condition: { eq: [doc.has_catalog, 0] }, then: [{ return: out }] }
                 - decl: [declared, list<string>]
                 - decl: [jix, i32, 0]
@@ -327,6 +330,6 @@
                 - set: [run.status, "queued"]
                 - call: [<.add_pipeline, run]
                 - call: [<.set_base, run_id, { call: [<.submitter.base_in, source, run_prm] }]
-                - call: [<.submitter.declare_in, source, run_prm, run_id, <.keys]
+                - call: [<.submitter.declare_in, source, run_prm, run_id, <.keys, <.secrets]
                 - call: [log.info, "[start] ${job.name} #${build} als ${run_id} (${reason})"]
                 - return: run_id
