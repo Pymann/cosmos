@@ -106,8 +106,15 @@
                   - set: [out.message, "`exclude` schliesst JEDE Lane aus — es bleibt nichts zu tun (aiml F62-5)"]
                   - call: [kontext.close]
                   - return: out
+            - decl: [prm_bad, string, { call: [<.prm_trouble, pipe, prm_src] }]
+            - if:
+                condition: { gt: [prm_bad.len, 0] }
+                then:
+                  - set: [out.message, prm_bad]
+                  - call: [kontext.close]
+                  - return: out
             # Die LAGE: kennt dieser Cluster die genannten Abbilder?
-            - decl: [img_bad, string, { call: [<.image_trouble, pipe] }]
+            - decl: [img_bad, string, { call: [<.image_trouble, pipe, prm_src] }]
             - if:
                 condition: { gt: [img_bad.len, 0] }
                 then:
@@ -152,7 +159,7 @@
             - set: [run.status, "pending"]
             - call: [<.take_axes, pipe, run]
             - call: [<.take_pushes, pipe, run]
-            - call: [<.take_stages, pipe, run, run_id]
+            - call: [<.take_stages, pipe, run, run_id, prm_src]
             - call: [kontext.close]
             - return: run
 
@@ -180,7 +187,7 @@
             - decl: [pipe, pipeline, { call: [kontext.call, pname, "fn() -> pipeline"] }]
             - if: { condition: { eq: [{ call: [pipe.stage_count] }, 0] }, then: [{ call: [kontext.close] }, { return: "" }] }
             - decl: [first, stage, { call: [pipe.stage_at, 0] }]
-            - decl: [got, string, { call: [first.base] }]
+            - decl: [got, string, { call: [<.fill_prm, { call: [first.base] }, prm_src] }]
             - call: [kontext.close]
             - return: got
 
@@ -232,7 +239,7 @@
                   - if:
                       condition: { gt: [cls, 0] }
                       then:
-                        - decl: [probe, string, { call: [stg.resolve] }]
+                        - decl: [probe, string, { call: [<.fill_prm, { call: [stg.resolve] }, prm_src] }]
                         - decl: [lix, i32, 0]
                         - while:
                             condition: { lt: [lix, { call: [pipe.lane_count] }] }
@@ -263,6 +270,11 @@
             - decl: [out, string, ""]
             - if: { condition: { eq: [bag.rows.len, 0] }, then: [{ return: out }] }
             - set: [out, "- namespace: prm\n"]
+            # Daneben jeder Wert als Kommentarzeile `# cosmos-prm NAME BASE64`:
+            # seit aiml 95aa14c stehen Stufenattribute (`run:`, `image:`, …)
+            # unaufgeloest im Modell, und cosmos setzt `prm.NAME`-Verweise
+            # dort selbst ein (fill_prm).  Base64, damit kein Wert die Zeile
+            # bricht; der aiml-Quelltext darunter bleibt fuer Schritt-Rumpfe.
             - decl: [rix, i32, 0]
             - while:
                 condition: { lt: [rix, bag.rows.len] }
@@ -298,6 +310,11 @@
                                   condition: { eq: [row.kind, "datei"] }
                                   then: [{ set: [raw, "/work/${run_id}/params/${row.name}"] }]
                               - set: [lit, "\"${ { call: [<.as_literal, raw] } }\""]
+                  - decl: [shown, string, row.value]
+                  - if: { condition: { eq: [row.kind, "zahl"] }, then: [{ set: [shown, lit] }] }
+                  - if: { condition: { eq: [row.kind, "bool"] }, then: [{ set: [shown, lit] }] }
+                  - if: { condition: { eq: [row.kind, "datei"] }, then: [{ set: [shown, "/work/${run_id}/params/${row.name}"] }] }
+                  - set: [out, "${out}# cosmos-prm ${row.name} ${ { call: [base64.encode, shown] } }\n"]
                   - set: [out, "${out}- def:\n    name: ${row.name}\n    return: ${typ}\n    body: [{ return: ${lit} }]\n"]
             - return: out
 
@@ -317,6 +334,145 @@
             - set: [out, { call: [out.replace, "\n", "\\n"] }]
             - set: [out, { call: [out.replace, "\t", "\\t"] }]
             - return: out
+
+      # ── Parameter in Stufenattributen (doc/spec/106 §106.6c) ─────────────
+      #
+      # Bis aiml 8dde78f setzte der Uebersetzer `${dollar}{prm.NAME}` in
+      # `run:`, `image:`, `requires:` … schon im erzeugten Konstruktor ein,
+      # und ein unbekannter Name war ein Uebersetzungsfehler.  Seit aiml
+      # 95aa14c stehen Stufenattribute so im Modell, wie sie geschrieben sind
+      # (sie sind Vorlagen, die der Wirt je Lane fuellt, F62-49).  Also fuellt
+      # cosmos die `prm.`-Verweise selbst, aus den Kommentarzeilen, die
+      # prm_bundle neben die Funktionen schreibt — und lehnt einen Verweis ab,
+      # den der Job nicht kennt, wie es der Uebersetzer tat.  Alles andere in
+      # `${dollar}{…}` (Lane-Achsen, Shell-Variablen) bleibt stehen.
+
+      # prm_open: `${dollar}{prm.` — in einem aiml-Literal nicht schreibbar,
+      # ohne dass DIESE Datei es einsetzt.
+      - def:
+          name: prm_open
+          access: public
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [dollar, string, "$"]
+            - return: "${dollar}{prm."
+
+      # prm_line: die Kommentarzeile zu `name` ab dem Wert, "" = keine.
+      - def:
+          name: prm_line
+          access: public
+          static_off: ["str_cmp"]
+          args: [[prm_src, string], [name, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [key, string, "\n# cosmos-prm ${name} "]
+            - decl: [hit_at, i32, { call: [prm_src.index_of, key] }]
+            - if: { condition: { lt: [hit_at, 0] }, then: [{ return: "" }] }
+            - decl: [from, i32, { +: [hit_at, key.len] }]
+            - decl: [rest, string, { call: [prm_src.substr, from, { -: [prm_src.len, from] }] }]
+            - decl: [cut, i32, { call: [rest.index_of, "\n"] }]
+            - if: { condition: { lt: [cut, 0] }, then: [{ set: [cut, rest.len] }] }
+            # Ein Marker vorn, damit ein leerer Wert von „keine Zeile" zu
+            # unterscheiden ist.
+            - return: "=${ { call: [rest.substr, 0, cut] } }"
+
+      # fill_prm: jeden bekannten `prm.NAME`-Verweis in `text` durch den Wert
+      # ersetzen; ein unbekannter bleibt stehen (missing_prm meldet ihn).
+      - def:
+          name: fill_prm
+          access: public
+          static_off: ["str_cmp"]
+          args: [[text, string], [prm_src, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [open, string, { call: [<.prm_open] }]
+            - if: { condition: { lt: [{ call: [text.index_of, open] }, 0] }, then: [{ return: text }] }
+            - decl: [out, string, ""]
+            - decl: [rest, string, text]
+            - decl: [going, i32, 1]
+            - while:
+                condition: { eq: [going, 1] }
+                body:
+                  - decl: [hit_at, i32, { call: [rest.index_of, open] }]
+                  - if:
+                      condition: { lt: [hit_at, 0] }
+                      then:
+                        - set: [out, "${out}${rest}"]
+                        - set: [going, 0]
+                      else:
+                        - set: [out, "${out}${ { call: [rest.substr, 0, hit_at] } }"]
+                        - decl: [from, i32, { +: [hit_at, open.len] }]
+                        - decl: [tail, string, { call: [rest.substr, from, { -: [rest.len, from] }] }]
+                        - decl: [close, i32, { call: [tail.index_of, "}"] }]
+                        - if:
+                            condition: { lt: [close, 0] }
+                            then:
+                              # Kein `}`: kein Verweis, der Rest bleibt wie er ist.
+                              - set: [out, "${out}${open}${tail}"]
+                              - set: [going, 0]
+                            else:
+                              - decl: [pname, string, { call: [tail.substr, 0, close] }]
+                              - decl: [line, string, { call: [<.prm_line, prm_src, pname] }]
+                              - if:
+                                  condition: { gt: [line.len, 0] }
+                                  then:
+                                    - decl: [coded, string, { call: [line.substr, 1, { -: [line.len, 1] }] }]
+                                    - decl: [plain, string, ""]
+                                    - if: { condition: { gt: [coded.len, 0] }, then: [{ set: [plain, { call: [base64.decode_str, coded] }] }] }
+                                    - set: [out, "${out}${plain}"]
+                                  else:
+                                    - set: [out, "${out}${open}${pname}}"]
+                              - decl: [next, i32, { +: [close, 1] }]
+                              - set: [rest, { call: [tail.substr, next, { -: [tail.len, next] }] }]
+            - return: out
+
+      # missing_prm: der erste `prm.NAME`-Verweis in `text`, den der Job nicht
+      # kennt; "" = alle bekannt.
+      - def:
+          name: missing_prm
+          access: public
+          static_off: ["str_cmp"]
+          args: [[text, string], [prm_src, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [open, string, { call: [<.prm_open] }]
+            - decl: [rest, string, text]
+            - while:
+                condition: { ge: [{ call: [rest.index_of, open] }, 0] }
+                body:
+                  - decl: [from, i32, { +: [{ call: [rest.index_of, open] }, open.len] }]
+                  - decl: [tail, string, { call: [rest.substr, from, { -: [rest.len, from] }] }]
+                  - decl: [close, i32, { call: [tail.index_of, "}"] }]
+                  - if: { condition: { lt: [close, 0] }, then: [{ return: "" }] }
+                  - decl: [pname, string, { call: [tail.substr, 0, close] }]
+                  - if: { condition: { eq: [{ call: [<.prm_line, prm_src, pname] }, ""] }, then: [{ return: pname }] }
+                  - decl: [next, i32, { +: [close, 1] }]
+                  - set: [rest, { call: [tail.substr, next, { -: [tail.len, next] }] }]
+            - return: ""
+
+      # prm_trouble: "" wenn jede Stufe nur bekannte Parameter nennt, sonst
+      # die Begruendung (wie frueher der Uebersetzer, doc/spec/106 §106.6c).
+      - def:
+          name: prm_trouble
+          access: public
+          static_off: ["str_cmp"]
+          args: [[pipe, ref<pipeline>], [prm_src, string]]
+          return: { type: string, lifetime: producer }
+          body:
+            - decl: [six, i32, 0]
+            - while:
+                condition: { lt: [six, { call: [pipe.stage_count] }] }
+                body:
+                  - decl: [stg, stage, { call: [pipe.stage_at, six] }]
+                  - set: [six, { +: [six, 1] }]
+                  - decl: [said, string, "${ { call: [stg.command] } }\n${ { call: [stg.image] } }\n${ { call: [stg.requires] } }\n${ { call: [stg.agent] } }\n${ { call: [stg.shares] } }\n${ { call: [stg.base] } }\n${ { call: [stg.resolve] } }"]
+                  - decl: [bad, string, { call: [<.missing_prm, said, prm_src] }]
+                  - if:
+                      condition: { gt: [bad.len, 0] }
+                      then:
+                        - decl: [sname, string, { call: [stg.name] }]
+                        - return: "stage '${sname}': `prm.${bad}` ist kein Parameter dieses Jobs (doc/spec/106 §106.6c)"
+            - return: ""
 
       # param_problem: "" wenn die Liste brauchbar ist, sonst die Begruendung.
       # Geprueft wird beim SPEICHERN (F106-5): ein Parameter, der erst beim
@@ -524,7 +680,7 @@
           name: take_stages
           access: public
           static_off: ["str_cmp"]
-          args: [[pipe, ref<pipeline>], [run, ref<PipelineRun>], [run_id, string]]
+          args: [[pipe, ref<pipeline>], [run, ref<PipelineRun>], [run_id, string], [prm_src, string]]
           return: i32
           body:
             - decl: [lix, i32, 0]
@@ -551,11 +707,11 @@
                         # Alles Folgende ist AUFGELOEST (aiml F62-151): den
                         # Vorrang Stufe-vor-Pipeline hat der Uebersetzer schon
                         # angewandt, `shares` sind schon zusammengelegt.
-                        - set: [entry.command, { call: [stg.command] }]
-                        - set: [entry.required_label, { call: [stg.agent] }]
-                        - set: [entry.image, { call: [stg.image] }]
-                        - set: [entry.requires, { call: [stg.requires] }]
-                        - set: [entry.shares, { call: [stg.shares] }]
+                        - set: [entry.command, { call: [<.fill_prm, { call: [stg.command] }, prm_src] }]
+                        - set: [entry.required_label, { call: [<.fill_prm, { call: [stg.agent] }, prm_src] }]
+                        - set: [entry.image, { call: [<.fill_prm, { call: [stg.image] }, prm_src] }]
+                        - set: [entry.requires, { call: [<.fill_prm, { call: [stg.requires] }, prm_src] }]
+                        - set: [entry.shares, { call: [<.fill_prm, { call: [stg.shares] }, prm_src] }]
                         - set: [entry.cpu_cores, { call: [stg.cpu_cores] }]
                         - set: [entry.mem_mb, { call: [stg.mem_mb] }]
                         - set: [entry.pids_max, { call: [stg.pids_max] }]
@@ -574,7 +730,7 @@
           name: image_trouble
           access: public
           static_off: ["str_cmp"]
-          args: [[pipe, ref<pipeline>]]
+          args: [[pipe, ref<pipeline>], [prm_src, string]]
           return: { type: string, lifetime: producer }
           body:
             - decl: [six, i32, 0]
@@ -583,7 +739,7 @@
                 body:
                   - decl: [stg, stage, { call: [pipe.stage_at, six] }]
                   - set: [six, { +: [six, 1] }]
-                  - decl: [want, string, { call: [stg.image] }]
+                  - decl: [want, string, { call: [<.fill_prm, { call: [stg.image] }, prm_src] }]
                   # Kein `continue` in aiml — die Pruefung haengt am Block.
                   - if:
                       condition: { gt: [want.len, 0] }

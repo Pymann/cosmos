@@ -127,6 +127,21 @@
             - decl: [want, string, "git checkout main && make -j7 TESTS=true < /work/lauf-1/params/keystore"]
             - set: [fails, { +: [fails, { call: [expect_str, "die Werte stehen im Befehl", one.command, want] }] }]
 
+      # ── 3a. cosmos setzt die Werte selbst ein (seit aiml 95aa14c) ─────────
+      # Ein Wert mit Anfuehrungszeichen, Umbruch und `}` kommt unveraendert an;
+      # ein `prm.`-Verweis, den der Job nicht hat, wird abgelehnt, auch wenn er
+      # andere Parameter hat; eine Shell-Variable bleibt stehen.
+      - decl: [open, string, { call: [prm_open] }]
+      - decl: [roh, JobParams]
+      - call: [add_row, roh, "branch", "text", "a\"b}\nc"]
+      - decl: [roh_src, string, { call: [submit.prm_bundle, roh, "lauf-2"] }]
+      - decl: [filled, string, { call: [submit.fill_prm, "x=${open}prm.branch} h=${open}HOME} t=${open}prm.branch", roh_src] }]
+      - set: [fails, { +: [fails, { call: [expect_str, "ein Wert kommt roh an, Shell-Variablen bleiben", filled, "x=a\"b}\nc h=${open}HOME} t=${open}prm.branch"] }] }]
+      - decl: [fremd_src, string, "- pipeline:\n    name: fremd\n    image: \"ubuntu-base\"\n    steps:\n      - stage: { name: eins, run: \"echo ${open}prm.gibtsnicht}\" }\n"]
+      - decl: [fremd_chk, SubmitCheck, { call: [submit.check, fremd_src, prm_src] }]
+      - set: [fails, { +: [fails, { call: [expect, "ein unbekannter Parameter wird abgelehnt", { eq: [fremd_chk.accepted, 0] }] }] }]
+      - set: [fails, { +: [fails, { call: [expect, "und beim Namen genannt", { ge: [{ call: [fremd_chk.message.index_of, "gibtsnicht"] }, 0] }] }] }]
+
       # ── 4. was beim Speichern abgewiesen wird ────────────────────────────
       - decl: [leer, JobParams]
       - call: [add_row, leer, "", "text", "x"]
