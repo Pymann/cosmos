@@ -39,5 +39,16 @@
             - set: [g_current_peer_id, rpc.peer_id]
             # … und welche RPC das ist: das Rollen-Tor in email_for_token fragt danach
             # (doc/spec/111 §111.3).
-            - set: [g_current_method, rpc.method]
+            #
+            # Als KOPIE, nicht geteilt: `rpc.method` ist ein malloc-Puffer des
+            # Mirror-Laufzeitteils ohne Zaehlkopf, den der naechste poll_rpc
+            # freigibt.  `set:` teilt (AIML_MEM_V3), das incref ist bei einem
+            # Puffer ohne Kopf wirkungslos — das Global hielte danach einen
+            # freigegebenen Zeiger, und das naechste `set:` hier gab ihn noch
+            # einmal frei (cosmosd SIGSEGV in aiml_str_assign_share,
+            # run_mem_check.sh, 2026-11-28).  Die Interpolation legt einen
+            # eigenen, gezaehlten String an.  Nach dem Handler wieder leer: ein
+            # Zeitplan-Lauf ist keine RPC (conn_registry.aiml).
+            - set: [g_current_method, "${rpc.method}"]
             - call: [hnd.run, rpc, session]
+            - set: [g_current_method, ""]
